@@ -7,7 +7,7 @@ use std::{
 use ccusage_cli::PricingOverride;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::fast::FxHashMap;
 
@@ -24,6 +24,123 @@ const MODELS_DEV_FAILURE_RETRY_AFTER: Duration = Duration::from_secs(60);
 // Anthropic date-suffixed model aliases use YYYYMMDD, while other numeric
 // suffixes are treated as distinct model versions.
 const MODEL_DATE_SUFFIX_DIGITS: usize = 8;
+include!("pricing_compact.rs");
+
+/// Projects a models.dev `api.json` body to the fields the runtime reads,
+/// preserving the container shape. Shape must be preserved because the parser
+/// uses order-dependent first-wins dedup on flattened provider bodies — a
+/// single model id can appear under multiple providers with different prices.
+/// Flattening here would pick a different dedup winner and break
+/// parse-equivalence. Variant acceptance mirrors the parser's strict gates;
+/// mixed bodies return `None` and fall back to the raw body.
+fn project_models_dev_body(raw_body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw_body).ok()?;
+    let Value::Object(entries) = value else {
+        return None;
+    };
+
+    // Detect the same variant the parser does (`parse_models_dev_json`).
+    let projected = if entries.values().any(models_dev_entry_has_models_field) {
+        // Provider format: { "provider_id": { "models": { ... }, ... } }.
+        // Mirror the parser: any-but-not-all `models` => reject the whole body.
+        if !entries.values().all(models_dev_entry_has_models_field) {
+            return None;
+        }
+        // Keep the provider wrapper and model keys; project only leaf models.
+        let mut providers = Map::new();
+        for (provider_id, provider) in entries {
+            let Value::Object(provider_obj) = provider else {
+                continue;
+            };
+            let Some(Value::Object(models)) = provider_obj.get("models") else {
+                continue;
+            };
+            let mut projected_models = Map::new();
+            for (model_key, model_value) in models {
+                if let Some(projected) = project_models_dev_model(model_value) {
+                    projected_models.insert(model_key.clone(), projected);
+                }
+            }
+            let mut wrapper = Map::new();
+            wrapper.insert("models".to_string(), Value::Object(projected_models));
+            providers.insert(provider_id, Value::Object(wrapper));
+        }
+        providers
+    } else {
+        // Flat format: { "model_id": { "cost": { ... } } }.
+        // Mirror the parser: any entry missing numeric input+output => reject the
+        // whole body (the parser returns None rather than dropping entries here).
+        if !entries.values().all(models_dev_entry_has_required_cost) {
+            return None;
+        }
+        let mut models = Map::new();
+        for (model_key, model_value) in entries {
+            if let Some(projected) = project_models_dev_model(&model_value) {
+                models.insert(model_key, projected);
+            }
+        }
+        models
+    };
+
+    serde_json::to_string(&Value::Object(projected)).ok()
+}
+
+/// Projects a single models.dev model entry to only the fields the runtime
+/// reads, preserving `id` so the parser resolves the same key
+/// (`model.id.unwrap_or(model_key)`). Returns `None` if the model lacks the
+/// required numeric `cost.input` and `cost.output`.
+fn project_models_dev_model(model_value: &Value) -> Option<Value> {
+    let model_obj = model_value.as_object()?;
+    let cost = model_obj.get("cost")?.as_object()?;
+
+    let input = cost.get("input")?;
+    let output = cost.get("output")?;
+    if !input.is_number() || !output.is_number() {
+        return None;
+    }
+
+    let mut cost_obj = Map::new();
+    cost_obj.insert("input".to_string(), input.clone());
+    cost_obj.insert("output".to_string(), output.clone());
+
+    if let Some(cache_read) = cost.get("cache_read").filter(|v| !v.is_null()) {
+        cost_obj.insert("cache_read".to_string(), cache_read.clone());
+    }
+    if let Some(cache_write) = cost.get("cache_write").filter(|v| !v.is_null()) {
+        cost_obj.insert("cache_write".to_string(), cache_write.clone());
+    }
+
+    let mut projected = Map::new();
+    if let Some(id) = model_obj.get("id").filter(|v| v.is_string()) {
+        projected.insert("id".to_string(), id.clone());
+    }
+    projected.insert("cost".to_string(), Value::Object(cost_obj));
+
+    if let Some(limit_obj) = model_obj.get("limit").and_then(|v| v.as_object())
+        && let Some(context) = limit_obj.get("context").filter(|v| !v.is_null())
+    {
+        let mut limit_projected = Map::new();
+        limit_projected.insert("context".to_string(), context.clone());
+        projected.insert("limit".to_string(), Value::Object(limit_projected));
+    }
+
+    Some(Value::Object(projected))
+}
+
+/// Projects a pricing body to the compact form before caching.
+///
+/// Branches on `url` to select the appropriate projector. Returns the raw body
+/// unchanged on any projection failure (never loses data).
+fn project_pricing_body(url: &str, body: &str) -> String {
+    let projected = if url == LITELLM_PRICING_URL {
+        compact_litellm(body, true)
+    } else if url == MODELS_DEV_API_URL {
+        project_models_dev_body(body)
+    } else {
+        None
+    };
+    projected.unwrap_or_else(|| body.to_string())
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pricing {
@@ -76,7 +193,14 @@ pub(crate) struct PricingMap {
     context_limits: FxHashMap<String, u64>,
     enable_models_dev_fallback: bool,
     enable_embedded_models_dev_fallback: bool,
-    find_cache: OnceLock<Mutex<FxHashMap<String, Option<Pricing>>>>,
+    // Memoizes `find` results (including misses) keyed by raw model string. The
+    // pricing entries are immutable once constructed, and resolution otherwise
+    // depends only on the global alias table; the stored generation invalidates
+    // the cache if that table changes (test-only in practice). The lookup does a
+    // linear scan over thousands of entries on a non-exact match, which the
+    // reprice loop would otherwise repeat for every billable row. Distinct
+    // models per run number in the dozens.
+    find_cache: std::sync::RwLock<(u64, FxHashMap<String, Option<Pricing>>)>,
 }
 
 impl Default for PricingMap {
@@ -86,7 +210,7 @@ impl Default for PricingMap {
             context_limits: FxHashMap::default(),
             enable_models_dev_fallback: false,
             enable_embedded_models_dev_fallback: false,
-            find_cache: OnceLock::new(),
+            find_cache: std::sync::RwLock::new((0, FxHashMap::default())),
         }
     }
 }
@@ -397,25 +521,28 @@ impl PricingMap {
     }
 
     pub(crate) fn find(&self, model: &str) -> Option<Pricing> {
-        // Fast path: check the model-level cache first. When the same model
-        // name is looked up repeatedly (e.g. across thousands of entries with
-        // only a few dozen unique models), the cache avoids re-running the
-        // expensive fuzzy fallback on every call.
+        let generation = crate::model_aliases::alias_generation();
+        if let Ok(cache) = self.find_cache.read()
+            && cache.0 == generation
+            && let Some(cached) = cache.1.get(model)
         {
-            let cache = self
-                .find_cache
-                .get_or_init(|| Mutex::new(FxHashMap::default()));
-            let guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(&cached) = guard.get(model) {
-                return cached;
-            }
+            return *cached;
         }
-        // Full lookup (dropped the lock above so concurrent callers are not
-        // serialized on the expensive fuzzy path).
+        let resolved = self.find_uncached(model);
+        if let Ok(mut cache) = self.find_cache.write() {
+            if cache.0 != generation {
+                cache.0 = generation;
+                cache.1.clear();
+            }
+            cache.1.insert(model.to_string(), resolved);
+        }
+        resolved
+    }
+
+    fn find_uncached(&self, model: &str) -> Option<Pricing> {
         let alias = crate::model_aliases::resolve_model_name(model);
         let resolved_alias = alias.as_ref();
-        let result = self
-            .find_entry_or_alias(model)
+        self.find_entry_or_alias(model)
             .or_else(|| {
                 (resolved_alias != model)
                     .then(|| self.find_entry_or_alias(resolved_alias))
@@ -436,16 +563,7 @@ impl PricingMap {
                 self.enable_embedded_models_dev_fallback
                     .then(|| embedded_models_dev_pricing().find_entry_or_alias(resolved_alias))
                     .flatten()
-            });
-        // Store the result (including None for misses) so repeated lookups
-        // for the same model that fails to match any pricing entry are also
-        // short-circuited.
-        let cache = self
-            .find_cache
-            .get_or_init(|| Mutex::new(FxHashMap::default()));
-        let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-        guard.insert(model.to_string(), result);
-        result
+            })
     }
 
     pub(crate) fn find_exact(&self, model: &str) -> Option<Pricing> {
@@ -619,9 +737,8 @@ impl PricingMap {
     }
 
     fn clear_find_cache(&self) {
-        if let Some(cache) = self.find_cache.get() {
-            let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-            guard.clear();
+        if let Ok(mut cache) = self.find_cache.write() {
+            cache.1.clear();
         }
     }
 
@@ -1461,37 +1578,117 @@ fn fetch_models_dev_json() -> std::io::Result<String> {
 }
 
 fn fetch_json_url(url: &str) -> std::io::Result<String> {
+    let cached = crate::cache::load_pricing(url);
+
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(PRICING_FETCH_TIMEOUT_SECONDS)))
         .build()
         .new_agent();
-    let mut response = agent
-        .get(url)
-        .call()
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    if response.status().as_u16() != 200 {
-        return Err(std::io::Error::other(format!(
-            "HTTP {}",
-            response.status().as_u16()
-        )));
+
+    let mut req = agent.get(url);
+    if let Some(ref c) = cached {
+        if let Some(ref etag) = c.etag {
+            req = req.header("If-None-Match", etag.as_str());
+        } else if let Some(ref lm) = c.last_modified {
+            req = req.header("If-Modified-Since", lm.as_str());
+        }
     }
-    response
+
+    let mut response = match req.call() {
+        Ok(resp) => resp,
+        Err(error) if cached.is_some() => {
+            // Network failure: degrade to last-known cached pricing, warning that
+            // prices may be stale.
+            if should_log_pricing_refresh_details() {
+                eprintln!(
+                    "WARN  Failed to refresh LiteLLM pricing ({error}); using last-known cached pricing."
+                );
+            }
+            return Ok(cached.unwrap().body);
+        }
+        Err(error) => return Err(std::io::Error::other(error.to_string())),
+    };
+
+    let status = response.status().as_u16();
+
+    // 304 Not Modified — server confirmed nothing changed.
+    if status == 304 {
+        return match cached {
+            Some(c) => Ok(c.body),
+            None => {
+                // Edge case: server said 304 but we had no cache.
+                // Fall back to an unconditional GET.
+                let mut resp = agent
+                    .get(url)
+                    .call()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                if resp.status().as_u16() != 200 {
+                    return Err(std::io::Error::other(format!(
+                        "HTTP {}",
+                        resp.status().as_u16()
+                    )));
+                }
+                let etag = resp
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let last_modified = resp
+                    .headers()
+                    .get("last-modified")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = resp
+                    .body_mut()
+                    .with_config()
+                    .limit(PRICING_FETCH_MAX_BYTES)
+                    .read_to_string()
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                    })?;
+                let body = project_pricing_body(url, &body);
+                crate::cache::store_pricing(url, &body, etag.as_deref(), last_modified.as_deref());
+                Ok(body)
+            }
+        };
+    }
+
+    if status != 200 {
+        return Err(std::io::Error::other(format!("HTTP {status}")));
+    }
+
+    // Capture conditional-request headers before consuming the body.
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let last_modified = response
+        .headers()
+        .get("last-modified")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let body = response
         .body_mut()
         .with_config()
         .limit(PRICING_FETCH_MAX_BYTES)
         .read_to_string()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    let body = project_pricing_body(url, &body);
+    crate::cache::store_pricing(url, &body, etag.as_deref(), last_modified.as_deref());
+    Ok(body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BUILD_TIME_MODELS_DEV_JSON, BUILD_TIME_PRICING_JSON, Pricing, PricingMap,
-        embedded_models_dev_pricing, long_context_split_threshold, model_without_date_suffix,
+        embedded_models_dev_pricing, fetch_json_url, long_context_split_threshold,
+        model_without_date_suffix,
     };
     use ccusage_test_support::fs_fixture;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
     #[test]
     fn loads_embedded_claude_pricing() {
         let pricing = PricingMap::load_embedded();
@@ -2782,5 +2979,758 @@ mod tests {
             // cache_create still scaled since not explicitly provided
             assert!((entry.cache_create - 2.5e-6).abs() < 1e-15);
         }
+    }
+
+    /// Isolates `XDG_CACHE_HOME` for one pricing-fetch test so `cache.db` is a
+    /// fresh temp dir and conditional-fetch state cannot leak between runs.
+    /// Holds the shared env lock and restores the var on drop.
+    struct PricingCacheEnv {
+        dir: std::path::PathBuf,
+        prev_xdg: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PricingCacheEnv {
+        fn new(name: &str) -> Self {
+            let guard = crate::test_env_lock();
+            let dir = std::env::temp_dir().join(format!("ccusage-pricing-test-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+            unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+            Self {
+                dir,
+                prev_xdg,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for PricingCacheEnv {
+        fn drop(&mut self) {
+            match &self.prev_xdg {
+                Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
+                None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Build a raw `200 OK` HTTP response carrying `body` and `etag`.
+    fn resp_200(etag: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nETag: {etag}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            len = body.len(),
+        )
+    }
+
+    /// Build a raw, bodyless `304 Not Modified` HTTP response.
+    fn resp_304(etag: &str) -> String {
+        format!("HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nConnection: close\r\n\r\n")
+    }
+
+    /// Single-threaded HTTP origin that replays `responses` in order — one per
+    /// incoming request — closing the socket after each. Returns the origin URL
+    /// plus a log recording, per request, whether it carried `If-None-Match`,
+    /// so a test can assert the conditional-request behavior of the client.
+    /// The thread exits after `responses.len()` requests.
+    fn spawn_scripted_origin(
+        responses: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<bool>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_thread = log.clone();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                // Read the request head (GET has no body) up to the blank line.
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let conditional = String::from_utf8_lossy(&req)
+                    .to_ascii_lowercase()
+                    .contains("if-none-match");
+                log_thread.lock().unwrap().push(conditional);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}/pricing.json"), log)
+    }
+
+    /// HTTP origin that accepts one connection then closes it without
+    /// responding, forcing a deterministic client-side read failure (no
+    /// bound-then-dropped port race).
+    fn spawn_closing_origin() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+        format!("http://{addr}/pricing.json")
+    }
+
+    /// Cold fetch stores body + ETag; warm fetch sends `If-None-Match`, gets a
+    /// bodyless `304`, and is served the cached body. The request log
+    /// (`[unconditional, conditional]`) plus the empty `304` prove the warm
+    /// body came from the cache — an ETag-ignoring re-GET would log two
+    /// unconditional requests and fail here.
+    #[test]
+    fn etag_conditional_fetch_round_trip() {
+        let _env = PricingCacheEnv::new("etag-round-trip");
+        let (url, log) =
+            spawn_scripted_origin(vec![resp_200("\"v1\"", "PRICING_V1"), resp_304("\"v1\"")]);
+
+        let cold = fetch_json_url(&url).unwrap();
+        assert_eq!(cold, "PRICING_V1");
+        assert_eq!(
+            crate::cache::load_pricing(&url)
+                .expect("etag stored after 200")
+                .etag
+                .as_deref(),
+            Some("\"v1\"")
+        );
+
+        let warm = fetch_json_url(&url).unwrap();
+        assert_eq!(
+            warm, "PRICING_V1",
+            "304 has no body, so this is the cached copy"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![false, true],
+            "cold request unconditional, warm request conditional"
+        );
+    }
+
+    /// When the server answers the conditional request with a fresh `200` (the
+    /// document changed), the new body and ETag must replace the cached copy —
+    /// the `304` short-circuit must not swallow a real update.
+    #[test]
+    fn etag_change_refetches_and_updates_cache() {
+        let _env = PricingCacheEnv::new("etag-change");
+        let (url, log) = spawn_scripted_origin(vec![
+            resp_200("\"v1\"", "PRICING_V1"),
+            resp_200("\"v2\"", "PRICING_V2"),
+        ]);
+
+        assert_eq!(fetch_json_url(&url).unwrap(), "PRICING_V1");
+        let warm = fetch_json_url(&url).unwrap();
+        assert_eq!(warm, "PRICING_V2", "changed pricing must be re-downloaded");
+
+        let cached = crate::cache::load_pricing(&url).unwrap();
+        assert_eq!(cached.body, "PRICING_V2");
+        assert_eq!(cached.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![false, true],
+            "warm request was conditional but the server returned a fresh 200"
+        );
+    }
+
+    /// A `304` answered to an unconditional request (there was no cache to
+    /// validate) must not be trusted as "unchanged": the fetch falls back to a
+    /// plain GET and returns that body.
+    #[test]
+    fn stale_304_without_cache_falls_back_to_get() {
+        let _env = PricingCacheEnv::new("stale-304");
+        let (url, log) =
+            spawn_scripted_origin(vec![resp_304("\"v1\""), resp_200("\"v1\"", "PRICING_V1")]);
+
+        let body = fetch_json_url(&url).unwrap();
+        assert_eq!(
+            body, "PRICING_V1",
+            "a 304 with an empty cache must fall back to an unconditional GET"
+        );
+        assert_eq!(
+            crate::cache::load_pricing(&url).unwrap().body,
+            "PRICING_V1",
+            "the fallback body is cached"
+        );
+        assert_eq!(
+            log.lock().unwrap().len(),
+            2,
+            "original request plus fallback GET"
+        );
+    }
+    /// Regression: the 304-without-cache fallback must capture validators (ETag
+    /// and Last-Modified) from the fallback 200 response, not discard them.
+    #[test]
+    fn stale_304_fallback_preserves_validators() {
+        let _env = PricingCacheEnv::new("stale-304-validators");
+        let fallback_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             ETag: \"v2\"\r\n\
+             Last-Modified: Sat, 01 Jan 2025 00:00:00 GMT\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             PRICING_V2",
+            len = "PRICING_V2".len(),
+        );
+        let (url, _log) = spawn_scripted_origin(vec![resp_304("\"v1\""), fallback_response]);
+
+        let body = fetch_json_url(&url).unwrap();
+        assert_eq!(body, "PRICING_V2");
+        let cached = crate::cache::load_pricing(&url).unwrap();
+        assert_eq!(
+            cached.etag.as_deref(),
+            Some("\"v2\""),
+            "fallback ETag must be stored"
+        );
+        assert_eq!(
+            cached.last_modified.as_deref(),
+            Some("Sat, 01 Jan 2025 00:00:00 GMT"),
+            "fallback Last-Modified must be stored"
+        );
+    }
+
+    /// Network failure with a primed cache degrades to the last-known body
+    /// rather than erroring.
+    #[test]
+    fn fetch_degrades_to_cache_on_network_failure() {
+        let _env = PricingCacheEnv::new("degrade-on-failure");
+        let url = spawn_closing_origin();
+        crate::cache::store_pricing(&url, "CACHED_BODY", Some("\"v1\""), None);
+        assert_eq!(
+            fetch_json_url(&url).unwrap(),
+            "CACHED_BODY",
+            "must serve cached body when the response read fails"
+        );
+    }
+
+    /// Network failure with no cache must propagate the error, not fabricate an
+    /// empty success.
+    #[test]
+    fn fetch_without_cache_propagates_error() {
+        let _env = PricingCacheEnv::new("no-cache-error");
+        let url = spawn_closing_origin();
+        assert!(
+            fetch_json_url(&url).is_err(),
+            "a read failure with no cached fallback must surface as an error"
+        );
+    }
+    // -----------------------------------------------------------------------
+    // Pricing projection tests
+    // -----------------------------------------------------------------------
+
+    /// Regression: a model id appearing under multiple providers with different
+    /// prices must dedup identically in the raw and projected bodies. The parser
+    /// flattens provider bodies with order-dependent first-wins dedup, so the
+    /// projector preserves the provider-wrapped shape (and `id`) to round-trip
+    /// through the same dedup. Flattening here picked a different winner and
+    /// corrupted prices for ids like `openai/gpt-5.1-codex` on the live api.json.
+    #[test]
+    fn models_dev_projection_preserves_cross_provider_dedup() {
+        let raw = r#"{
+            "openai": {
+                "id": "openai",
+                "models": {
+                    "gpt-5.1-codex": {
+                        "id": "openai/gpt-5.1-codex",
+                        "cost": { "input": 1.25, "output": 10.0, "cache_read": 0.125 },
+                        "limit": { "context": 400000 }
+                    }
+                }
+            },
+            "openrouter": {
+                "id": "openrouter",
+                "models": {
+                    "openai/gpt-5.1-codex": {
+                        "id": "openai/gpt-5.1-codex",
+                        "cost": { "input": 1.5, "output": 12.0, "cache_read": 0.15 },
+                        "limit": { "context": 256000 }
+                    }
+                }
+            }
+        }"#;
+
+        let projected = super::project_models_dev_body(raw).expect("projection should succeed");
+
+        // Shape preserved: still provider-wrapped (every entry has a `models` object).
+        let value: serde_json::Value = serde_json::from_str(&projected).unwrap();
+        assert!(
+            value.as_object().unwrap().values().all(|entry| entry
+                .get("models")
+                .is_some_and(serde_json::Value::is_object)),
+            "projected must stay provider-wrapped to preserve dedup order"
+        );
+
+        let mut from_raw = super::PricingMap::default();
+        from_raw.load_models_dev_json_missing(raw);
+        let mut from_projected = super::PricingMap::default();
+        from_projected.load_models_dev_json_missing(&projected);
+
+        let id = "openai/gpt-5.1-codex";
+        let raw_p = from_raw.entries.get(id).expect("raw should have id");
+        let proj_p = from_projected
+            .entries
+            .get(id)
+            .expect("projected should have id");
+        assert_eq!(
+            raw_p.input, proj_p.input,
+            "dedup winner input price must match"
+        );
+        assert_eq!(
+            raw_p.output, proj_p.output,
+            "dedup winner output price must match"
+        );
+        assert_eq!(
+            from_raw.context_limits.get(id),
+            from_projected.context_limits.get(id),
+            "dedup winner context must match"
+        );
+        assert_eq!(
+            from_raw.entries.len(),
+            from_projected.entries.len(),
+            "entry count must match"
+        );
+    }
+
+    /// Headline: projected litellm body yields the same PricingMap as the raw body.
+    #[test]
+    fn litellm_projection_parse_equivalence() {
+        let raw = r#"{
+            "claude-sonnet-4-20250514": {
+                "input_cost_per_token": 0.000003,
+                "output_cost_per_token": 0.000015,
+                "cache_creation_input_token_cost": 0.00000375,
+                "cache_read_input_token_cost": 0.0000003,
+                "max_input_tokens": 200000,
+                "provider_specific_entry": { "fast": 2.0 },
+                "source": "litellm",
+                "mode": "chat"
+            },
+            "gpt-4o": {
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "max_input_tokens": 128000,
+                "source": "litellm"
+            },
+            "gemini-2.5-pro": {
+                "input_cost_per_token": 0.00000125,
+                "output_cost_per_token": 0.00001,
+                "cache_read_input_token_cost": 0.0000003125,
+                "max_input_tokens": 1048576
+            }
+        }"#;
+
+        let projected = super::compact_litellm(raw, true).expect("projection should succeed");
+
+        let mut from_raw = super::PricingMap::default();
+        let raw_count = from_raw.load_json(raw);
+
+        let mut from_projected = super::PricingMap::default();
+        let proj_count = from_projected.load_json(&projected);
+
+        assert_eq!(raw_count, proj_count, "same number of entries loaded");
+
+        for model in ["claude-sonnet-4-20250514", "gpt-4o", "gemini-2.5-pro"] {
+            let raw_entry = from_raw.find(model).expect("raw should have {model}");
+            let proj_entry = from_projected
+                .find(model)
+                .expect("projected should have {model}");
+            assert_eq!(
+                raw_entry.input, proj_entry.input,
+                "input mismatch for {model}"
+            );
+            assert_eq!(
+                raw_entry.output, proj_entry.output,
+                "output mismatch for {model}"
+            );
+            assert_eq!(
+                from_raw.context_limit(model),
+                from_projected.context_limit(model),
+                "context_limit mismatch for {model}"
+            );
+        }
+
+        let raw_sonnet = from_raw.find("claude-sonnet-4-20250514").unwrap();
+        let proj_sonnet = from_projected.find("claude-sonnet-4-20250514").unwrap();
+        assert_eq!(raw_sonnet.fast_multiplier, proj_sonnet.fast_multiplier);
+    }
+
+    /// Headline: projected models.dev body yields the same PricingMap as the raw body.
+    #[test]
+    fn models_dev_projection_parse_equivalence() {
+        // Provider-wrapped format with a non-Anthropic model
+        let raw = r#"{
+            "openai": {
+                "id": "openai",
+                "name": "OpenAI",
+                "models": {
+                    "gpt-4o": {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "cost": { "input": 2.5, "output": 10.0, "cache_read": 1.25 },
+                        "limit": { "context": 128000 },
+                        "description": "a model",
+                        "created_at": "2024-05-01"
+                    },
+                    "claude-sonnet-4": {
+                        "id": "claude-sonnet-4",
+                        "cost": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75 },
+                        "limit": { "context": 200000 }
+                    }
+                }
+            }
+        }"#;
+
+        let projected = super::project_models_dev_body(raw).expect("projection should succeed");
+
+        let mut from_raw = super::PricingMap::default();
+        from_raw.load_models_dev_json_missing(raw);
+
+        let mut from_projected = super::PricingMap::default();
+        from_projected.load_models_dev_json_missing(&projected);
+
+        for model in ["gpt-4o", "claude-sonnet-4"] {
+            let raw_entry = from_raw.find_entry(model).expect("raw should have {model}");
+            let proj_entry = from_projected
+                .find_entry(model)
+                .expect("projected should have {model}");
+            assert_eq!(
+                raw_entry.input, proj_entry.input,
+                "input mismatch for {model}"
+            );
+            assert_eq!(
+                raw_entry.output, proj_entry.output,
+                "output mismatch for {model}"
+            );
+            assert_eq!(
+                from_raw.context_limit_entry(model),
+                from_projected.context_limit_entry(model),
+                "context_limit mismatch for {model}"
+            );
+        }
+    }
+
+    /// Regression: when a model's `id` differs from its map key, the parser keys
+    /// the entry by `id` (`model.id.unwrap_or(model_key)`). The projected body
+    /// drops `id`, so the projector must emit the resolved `id` as the output key
+    /// — otherwise the projected body parses to a different `PricingMap`.
+    #[test]
+    fn models_dev_projection_keys_by_id_not_map_key() {
+        let raw = r#"{
+            "anthropic": {
+                "id": "anthropic",
+                "models": {
+                    "sonnet-latest": {
+                        "id": "claude-sonnet-4-5-20250101",
+                        "cost": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75 },
+                        "limit": { "context": 200000 }
+                    }
+                }
+            }
+        }"#;
+
+        let projected = super::project_models_dev_body(raw).expect("projection should succeed");
+
+        let mut from_raw = super::PricingMap::default();
+        from_raw.load_models_dev_json_missing(raw);
+
+        let mut from_projected = super::PricingMap::default();
+        from_projected.load_models_dev_json_missing(&projected);
+
+        // Assert on the exact entry keys (not fuzzy `find_entry`): the parser
+        // keys by the resolved id, so the projected map must too.
+        let id = "claude-sonnet-4-5-20250101";
+        assert!(from_raw.entries.contains_key(id), "raw should key by id");
+        assert!(
+            from_projected.entries.contains_key(id),
+            "projected must key by id, not map key"
+        );
+        assert!(
+            !from_projected.entries.contains_key("sonnet-latest"),
+            "projected must not key by the map key"
+        );
+        assert_eq!(
+            from_raw.entries.get(id).map(|p| (p.input, p.output)),
+            from_projected.entries.get(id).map(|p| (p.input, p.output)),
+            "pricing mismatch for resolved id"
+        );
+        assert_eq!(
+            from_raw.context_limits.get(id),
+            from_projected.context_limits.get(id),
+            "context_limit mismatch for resolved id"
+        );
+    }
+
+    /// Headline: flat-by-model models.dev body projection preserves all models.
+    #[test]
+    fn models_dev_flat_projection_parse_equivalence() {
+        let raw = r#"{
+            "gemini-2.5-pro": {
+                "cost": { "input": 1.25, "output": 10.0 },
+                "limit": { "context": 1048576 },
+                "description": "Gemini model"
+            },
+            "claude-3-haiku": {
+                "cost": { "input": 0.25, "output": 1.25, "cache_read": 0.03, "cache_write": 0.3 },
+                "limit": { "context": 200000 }
+            }
+        }"#;
+
+        let projected = super::project_models_dev_body(raw).expect("projection should succeed");
+
+        let mut from_raw = super::PricingMap::default();
+        from_raw.load_models_dev_json_missing(raw);
+
+        let mut from_projected = super::PricingMap::default();
+        from_projected.load_models_dev_json_missing(&projected);
+
+        for model in ["gemini-2.5-pro", "claude-3-haiku"] {
+            let raw_entry = from_raw.find_entry(model).expect("raw should have {model}");
+            let proj_entry = from_projected
+                .find_entry(model)
+                .expect("projected should have {model}");
+            assert_eq!(
+                raw_entry.input, proj_entry.input,
+                "input mismatch for {model}"
+            );
+            assert_eq!(
+                raw_entry.output, proj_entry.output,
+                "output mismatch for {model}"
+            );
+            assert_eq!(
+                from_raw.context_limit_entry(model),
+                from_projected.context_limit_entry(model),
+                "context_limit mismatch for {model}"
+            );
+        }
+    }
+
+    /// A mixed models.dev body (some entries with `models`, some without) is
+    /// rejected by the parser; projection must match by falling back to the raw
+    /// body so behavior is identical to pre-projection.
+    #[test]
+    fn models_dev_mixed_body_falls_back_to_raw() {
+        let raw = r#"{
+            "openai": { "models": { "gpt-5": { "id": "gpt-5", "cost": { "input": 1.0, "output": 2.0 } } } },
+            "claude-3-haiku": { "cost": { "input": 0.25, "output": 1.25 } }
+        }"#;
+
+        // Parser rejects the whole body (any-but-not-all has `models`).
+        assert!(
+            super::parse_models_dev_json(raw).is_none(),
+            "parser should reject a mixed body"
+        );
+        // Projector returns None, so the fetch layer caches the raw body unchanged.
+        assert!(
+            super::project_models_dev_body(raw).is_none(),
+            "projection should fall back on a mixed body"
+        );
+        assert_eq!(
+            super::project_pricing_body(super::MODELS_DEV_API_URL, raw),
+            raw,
+            "fetch layer should cache the raw body on fallback"
+        );
+    }
+
+    /// A flat models.dev body with an entry lacking numeric input+output is
+    /// rejected by the parser; projection must fall back to the raw body to match.
+    #[test]
+    fn models_dev_flat_partial_cost_falls_back_to_raw() {
+        let raw = r#"{
+            "gemini-2.5-pro": { "cost": { "input": 1.25, "output": 10.0 } },
+            "broken-model": { "cost": { "input": 1.0 } }
+        }"#;
+
+        assert!(
+            super::parse_models_dev_json(raw).is_none(),
+            "parser should reject a flat body missing required cost"
+        );
+        assert!(
+            super::project_models_dev_body(raw).is_none(),
+            "projection should fall back when a flat entry lacks numeric input+output"
+        );
+        assert_eq!(
+            super::project_pricing_body(super::MODELS_DEV_API_URL, raw),
+            raw,
+            "fetch layer should cache the raw body on fallback"
+        );
+    }
+
+    /// Embedded litellm blob is byte-identical when compacted with the filter.
+    #[test]
+    fn embedded_litellm_blob_unchanged_with_filter() {
+        let embedded = BUILD_TIME_PRICING_JSON;
+        // Re-parse and re-compact the embedded blob through the shared function
+        // with the filter enabled (keep_all=false). The output must be identical.
+        // We can't re-fetch the raw litellm data in a unit test, but we can
+        // verify the embedded blob is compact (no verbose fields).
+        assert!(embedded.len() < 200_000, "embedded blob should be compact");
+        assert!(
+            !embedded.contains("\"source\""),
+            "embedded blob should not contain verbose fields"
+        );
+        assert!(
+            !embedded.contains("vertex_ai/"),
+            "embedded blob should not contain non-embedded models"
+        );
+        assert!(
+            embedded.contains("claude-opus-4-6"),
+            "embedded blob should contain known models"
+        );
+    }
+
+    /// Projected store/load round-trip: store projected body, load it back, parse to same map.
+    #[test]
+    fn projected_store_load_round_trip() {
+        let raw = r#"{
+            "gpt-4o": {
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "max_input_tokens": 128000
+            },
+            "claude-sonnet-4-20250514": {
+                "input_cost_per_token": 0.000003,
+                "output_cost_per_token": 0.000015,
+                "cache_read_input_token_cost": 0.0000003,
+                "max_input_tokens": 200000
+            }
+        }"#;
+
+        let projected = super::compact_litellm(raw, true).expect("projection should succeed");
+
+        let mut from_raw = super::PricingMap::default();
+        from_raw.load_json(raw);
+        let mut from_projected = super::PricingMap::default();
+        from_projected.load_json(&projected);
+
+        let _env = PricingCacheEnv::new("projected-round-trip");
+        crate::cache::store_pricing("test://round-trip", &projected, Some("\"v1\""), None);
+        let cached =
+            crate::cache::load_pricing("test://round-trip").expect("cache should have entry");
+        let mut from_cached = super::PricingMap::default();
+        from_cached.load_json(&cached.body);
+
+        for model in ["gpt-4o", "claude-sonnet-4-20250514"] {
+            let raw_entry = from_raw.find_entry(model).unwrap();
+            let proj_entry = from_projected.find_entry(model).unwrap();
+            let cached_entry = from_cached.find_entry(model).unwrap();
+            assert_eq!(raw_entry.input, proj_entry.input);
+            assert_eq!(raw_entry.input, cached_entry.input);
+            assert_eq!(raw_entry.output, cached_entry.output);
+            assert_eq!(
+                from_raw.context_limit_entry(model),
+                from_cached.context_limit_entry(model)
+            );
+        }
+    }
+
+    /// Legacy raw-JSON row (not projected) still parses correctly.
+    #[test]
+    fn legacy_raw_json_row_still_parses() {
+        let legacy_body = r#"{
+            "gpt-4o": {
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "max_input_tokens": 128000,
+                "source": "litellm",
+                "mode": "chat",
+                "max_output_tokens": 16384
+            }
+        }"#;
+
+        let _env = PricingCacheEnv::new("legacy-row");
+        crate::cache::store_pricing("test://legacy", legacy_body, Some("\"old\""), None);
+        let cached = crate::cache::load_pricing("test://legacy").expect("cache should have entry");
+
+        let mut pricing = super::PricingMap::default();
+        let loaded = pricing.load_json(&cached.body);
+        assert_eq!(loaded, 1);
+        let entry = pricing.find_entry("gpt-4o").unwrap();
+        assert_eq!(entry.input, 2.5e-6);
+        assert_eq!(entry.output, 10e-6);
+        assert_eq!(pricing.context_limit_entry("gpt-4o"), Some(128000));
+    }
+
+    /// 304 reuse returns the stored (already-projected) body and parses to the same map.
+    #[test]
+    fn etag_304_returns_projected_body() {
+        let _env = PricingCacheEnv::new("etag-304-projected");
+        let raw_body = r#"{
+            "gpt-4o-proj": {
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "max_input_tokens": 128000
+            }
+        }"#;
+
+        // Simulate: first fetch stores projected body
+        let projected = super::compact_litellm(raw_body, true).expect("projection should succeed");
+        let (url, log) = spawn_scripted_origin(vec![resp_304("\"v1\"")]);
+        crate::cache::store_pricing(&url, &projected, Some("\"v1\""), None);
+
+        // 304 path returns cached (projected) body
+        let body = fetch_json_url(&url).unwrap();
+        assert_eq!(
+            body, projected,
+            "304 should return the stored projected body"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true],
+            "request should be conditional"
+        );
+
+        let mut pricing = super::PricingMap::default();
+        let loaded = pricing.load_json(&body);
+        assert_eq!(loaded, 1);
+        assert_eq!(pricing.find_entry("gpt-4o-proj").unwrap().input, 2.5e-6);
+        assert_eq!(pricing.context_limit_entry("gpt-4o-proj"), Some(128000));
+    }
+
+    /// Size sanity: projected litellm body is materially smaller than raw.
+    #[test]
+    fn projected_litellm_is_materially_smaller() {
+        let raw = r#"{
+            "claude-sonnet-4-20250514": {
+                "input_cost_per_token": 0.000003,
+                "output_cost_per_token": 0.000015,
+                "cache_creation_input_token_cost": 0.00000375,
+                "cache_read_input_token_cost": 0.0000003,
+                "input_cost_per_token_above_200k_tokens": 0.000006,
+                "output_cost_per_token_above_200k_tokens": 0.00003,
+                "max_input_tokens": 200000,
+                "max_output_tokens": 8192,
+                "source": "litellm",
+                "mode": "chat",
+                "provider_specific_entry": { "fast": 2.0 },
+                "supported_parameters": ["temperature", "max_tokens"],
+                "model_map": { "claude": true }
+            },
+            "gpt-4o": {
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "max_input_tokens": 128000,
+                "source": "litellm",
+                "mode": "chat",
+                "supported_parameters": ["temperature"]
+            }
+        }"#;
+
+        let projected = super::compact_litellm(raw, true).expect("projection should succeed");
+        assert!(
+            projected.len() < raw.len() / 2,
+            "projected ({}) should be less than half of raw ({})",
+            projected.len(),
+            raw.len()
+        );
     }
 }
