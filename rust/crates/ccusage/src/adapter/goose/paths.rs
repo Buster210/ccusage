@@ -7,16 +7,21 @@ pub(super) const GOOSE_DB_FILE_NAME: &str = "sessions.db";
 
 pub(super) fn goose_db_paths() -> Result<Vec<PathBuf>> {
     let candidates = if let Ok(root) = env::var(GOOSE_PATH_ROOT_ENV) {
-        let root = root.trim();
-        if root.is_empty() {
-            default_goose_db_candidates()?
-        } else {
-            vec![
+        let roots: Vec<PathBuf> = root
+            .split(',')
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+            .map(|root| {
                 PathBuf::from(root)
                     .join("data")
                     .join("sessions")
-                    .join(GOOSE_DB_FILE_NAME),
-            ]
+                    .join(GOOSE_DB_FILE_NAME)
+            })
+            .collect();
+        if roots.is_empty() {
+            default_goose_db_candidates()?
+        } else {
+            roots
         }
     } else {
         default_goose_db_candidates()?

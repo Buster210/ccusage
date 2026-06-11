@@ -236,6 +236,8 @@ fn read_session_file_with_context(
                 usage,
                 model: model.clone(),
                 id: None,
+
+                provider: None,
             },
             cost_usd: display_cost,
             request_id: None,

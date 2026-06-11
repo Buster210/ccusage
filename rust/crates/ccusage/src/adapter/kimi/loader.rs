@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
-    LoadedEntry, PricingMap, Result, cli::SharedArgs, debug_log, parse_tz, read_files_parallel,
+    LoadedEntry, PricingMap, Result, adapter::parse_or_log, cli::SharedArgs, parse_tz,
+    read_files_parallel,
 };
 
 use super::{
@@ -22,13 +23,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
     // over the original discovery order so the surviving entry per key matches
     // the single-threaded read.
     let loaded = read_files_parallel(&files, shared.single_thread, |file| {
-        read_wire_file(file).unwrap_or_else(|error| {
-            debug_log(
-                shared,
-                format!("Failed to read Kimi wire file {}: {error}", file.display()),
-            );
-            Vec::new()
-        })
+        parse_or_log(file, shared, "Kimi wire file", || read_wire_file(file))
     });
     let mut entries = Vec::new();
     let mut seen = HashSet::new();

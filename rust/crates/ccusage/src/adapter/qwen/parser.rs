@@ -14,10 +14,9 @@ use crate::{
     LoadedEntry, PricingMap, Result, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
     apply_total_token_fallback, calculate_cost_for_usage,
     cli::{CostMode, SharedArgs},
-    debug_log,
     fast::LinePrefilter,
     format_date_tz, format_rfc3339_millis, missing_pricing_model_for_candidates,
-    parse_ts_timestamp, parse_tz, read_files_parallel,
+    parse_ts_timestamp, parse_tz,
 };
 
 const DEFAULT_QWEN_MODEL: &str = "unknown";
@@ -66,27 +65,22 @@ pub(super) fn load_entries(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
     };
     let tz = parse_tz(shared.timezone.as_deref());
     let files = paths::discover_chat_files()?;
-    // Read chat files in parallel; the first-wins dedup runs sequentially over
-    // the original discovery order so the surviving record per id matches the
-    // single-threaded read.
-    let loaded = read_files_parallel(&files, shared.single_thread, |file| {
-        read_chat_file(file, tz.as_ref(), shared.mode, pricing.as_ref(), shared).unwrap_or_else(
-            |error| {
-                debug_log(
-                    shared,
-                    format!("Failed to read Qwen chat file {}: {error}", file.display()),
-                );
-                Vec::new()
-            },
-        )
-    });
-    let mut entries = Vec::new();
+    let parsed = crate::cache::load_with_cache(
+        "qwen",
+        &files,
+        crate::cache::CacheOpts {
+            single_thread: shared.single_thread,
+            live_only: shared.live_only,
+        },
+        crate::cache::Freshness::FileStat,
+        |file| read_chat_file(file, tz.as_ref(), shared.mode, pricing.as_ref(), shared),
+        |e| reprice(e, shared.mode, pricing.as_ref()),
+    )?;
     let mut seen = HashSet::new();
-    for file_entries in loaded {
-        for entry in file_entries {
-            if seen.insert(entry_id(&entry)) {
-                entries.push(entry);
-            }
+    let mut entries = Vec::with_capacity(parsed.len());
+    for entry in parsed {
+        if seen.insert(entry_id(&entry)) {
+            entries.push(entry);
         }
     }
     entries.sort_by_key(|entry| entry.timestamp);
@@ -184,6 +178,8 @@ fn parse_line(
             usage: display_usage,
             model: Some(model.clone()),
             id: None,
+
+            provider: None,
         },
         cost_usd: None,
         request_id: None,
@@ -205,6 +201,24 @@ fn parse_line(
         missing_pricing_model,
         extra_total_tokens,
     })
+}
+
+/// Recompute cost and missing-pricing for a cached entry from its stored tokens,
+/// mirroring the parse path (billable output folds in `extra_total_tokens`).
+pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&PricingMap>) {
+    let model = entry.data.message.model.clone().unwrap_or_default();
+    let billable_usage = TokenUsageRaw {
+        output_tokens: entry
+            .data
+            .message
+            .usage
+            .output_tokens
+            .saturating_add(entry.extra_total_tokens),
+        cache_creation: None,
+        ..entry.data.message.usage
+    };
+    entry.cost = calculate_qwen_cost(&model, billable_usage, mode, pricing);
+    entry.missing_pricing_model = missing_qwen_pricing(&model, billable_usage, mode, pricing);
 }
 
 fn calculate_qwen_cost(
@@ -374,6 +388,8 @@ mod tests {
                     },
                     model: Some("model:1".to_string()),
                     id: None,
+
+                    provider: None,
                 },
                 cost_usd: None,
                 request_id: None,
