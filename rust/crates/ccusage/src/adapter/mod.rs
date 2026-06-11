@@ -3,6 +3,8 @@ use std::{
     thread,
 };
 
+use crate::{cli::SharedArgs, debug_log};
+
 pub(crate) mod all;
 pub(crate) mod amp;
 pub(crate) mod claude;
@@ -20,6 +22,7 @@ pub(crate) mod openclaw;
 pub(crate) mod opencode;
 pub(crate) mod pi;
 pub(crate) mod qwen;
+pub(crate) mod sqlite_util;
 
 /// Reads `files` by applying `read` to each path and returns the per-file
 /// results in the **original file order**.
@@ -78,6 +81,24 @@ where
             .into_iter()
             .map(|value| value.expect("file read worker returned every file"))
             .collect()
+    })
+}
+
+/// Runs `parse` and returns its entries, or logs `"Failed to read {kind} {file}: {error}"`
+/// and returns an empty `Vec` on failure. Shared by the JSONL adapters whose
+/// per-file parse step differs only in `kind` and the parse call itself.
+pub(crate) fn parse_or_log<T>(
+    file: &Path,
+    shared: &SharedArgs,
+    kind: &str,
+    parse: impl FnOnce() -> crate::Result<Vec<T>>,
+) -> Vec<T> {
+    parse().unwrap_or_else(|error| {
+        debug_log(
+            shared,
+            format!("Failed to read {kind} {}: {error}", file.display()),
+        );
+        Vec::new()
     })
 }
 

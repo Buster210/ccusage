@@ -837,6 +837,7 @@ pub(super) fn aggregate_rows(rows: Vec<AllRow>, kind: AgentReportKind) -> Vec<Al
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::tests::CacheEnv;
     use ccusage_cli::NamedPiStore;
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
@@ -917,6 +918,7 @@ mod tests {
             "omp/sessions/project-a/agent_inside-session.jsonl": r#"{"type":"message","timestamp":"2026-07-04T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":10,"output":1}}}"#,
             "omp/sessions/project-a/agent_outside-session.jsonl": r#"{"type":"message","timestamp":"2026-07-05T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":20,"output":2}}}"#,
         });
+        let _cache_env = CacheEnv::new("all-pi-filters-named");
         let _pi_agent_dir = EnvVarGuard::set("PI_AGENT_DIR", fixture.path("empty-default"));
         let store_path = fixture.path("omp/sessions").to_string_lossy().into_owned();
         let shared = SharedArgs {
@@ -964,6 +966,7 @@ mod tests {
             "omp/sessions/project-a/agent_july-fourth.jsonl": r#"{"type":"message","timestamp":"2026-07-04T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":20,"output":2}}}"#,
             "omp/sessions/project-a/agent_july-fifth.jsonl": r#"{"type":"message","timestamp":"2026-07-05T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":30,"output":3}}}"#,
         });
+        let _cache_env = CacheEnv::new("all-pi-windowed");
         let shared = SharedArgs {
             mode: crate::cli::CostMode::Display,
             timezone: Some("America/Boise".to_string()),
@@ -995,6 +998,7 @@ mod tests {
             "pi/sessions/project-a/agent_until-day.jsonl": r#"{"type":"message","timestamp":"2026-07-04T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":10,"output":1}}}"#,
             "pi/sessions/project-a/agent_after-day.jsonl": r#"{"type":"message","timestamp":"2026-07-05T18:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":20,"output":2}}}"#,
         });
+        let _cache_env = CacheEnv::new("all-pi-until-day");
         let _pi_agent_dir = EnvVarGuard::set("PI_AGENT_DIR", fixture.path("pi/sessions"));
         let shared = SharedArgs {
             json: true,
@@ -1036,6 +1040,7 @@ mod tests {
         let fixture = fs_fixture!({
             "default-root/archive/sessions/project-a/agent_default-session.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":100,"output":200}}}"#,
         });
+        let _cache_env = CacheEnv::new("all-pi-project-path");
         let shared = SharedArgs {
             mode: crate::cli::CostMode::Display,
             ..SharedArgs::default()
@@ -1323,6 +1328,7 @@ mod tests {
             "pi/sessions/project-a/agent_pi-session.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":10,"output":20}}}"#,
             "omp/sessions/project-b/agent_omp-session.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":30,"output":40}}}"#,
         });
+        let _cache_env = CacheEnv::new("all-pi-additive");
         let shared = SharedArgs {
             mode: crate::cli::CostMode::Display,
             ..SharedArgs::default()

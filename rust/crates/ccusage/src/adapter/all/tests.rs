@@ -13,6 +13,7 @@ use serde_json::json;
 use super::*;
 use crate::{
     Align, CodexGroup, CodexModelUsage, ModelBreakdown, PricingMap,
+    cache::tests::CacheEnv,
     cli::{AgentReportKind, CodexSpeed, SharedArgs},
     model_aliases::set_model_aliases_for_tests,
 };
@@ -493,6 +494,7 @@ fn multi_section_claude_fixture_matches_standalone_sections_for_daily_and_sessio
         ]
         .join("\n"),
     });
+    let _cache_env = CacheEnv::new("multi_section_claude");
     let _env = isolated_agent_env(
         &fixture,
         "CLAUDE_CONFIG_DIR",
