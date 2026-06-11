@@ -3,8 +3,9 @@ use std::{fs, path::Path};
 use serde_json::Value;
 
 use crate::{
-    PricingMap, Result, TokenUsageRaw, apply_total_token_fallback, calculate_cost_for_usage,
-    cli::CostMode, format_rfc3339_millis, missing_pricing_model_for_candidates, parse_ts_timestamp,
+    LoadedEntry, PricingMap, Result, TokenUsageRaw, apply_total_token_fallback,
+    calculate_cost_for_usage, cli::CostMode, format_rfc3339_millis,
+    missing_pricing_model_for_candidates, parse_ts_timestamp,
 };
 
 const DEFAULT_CODEBUFF_MODEL: &str = "codebuff-unknown";
@@ -442,6 +443,51 @@ pub(super) fn missing_codebuff_pricing(
         crate::total_usage_tokens(usage),
         Some(pricing),
     )
+}
+/// Recompute cost and missing-pricing for a cached entry from its stored tokens,
+/// mirroring `to_loaded_entry` exactly.
+pub(super) fn reprice(entry: &mut LoadedEntry, pricing: &PricingMap) {
+    let model = entry.data.message.model.clone().unwrap_or_default();
+    let provider = infer_provider(&model);
+    let usage = TokenUsageRaw {
+        output_tokens: entry
+            .data
+            .message
+            .usage
+            .output_tokens
+            .saturating_add(entry.extra_total_tokens),
+        cache_creation: None,
+        ..entry.data.message.usage
+    };
+    let raw = calculate_cost_for_usage(
+        Some(&model),
+        usage,
+        None,
+        CostMode::Calculate,
+        Some(pricing),
+    );
+    entry.cost =
+        if raw > 0.0 || provider == "unknown" || model.starts_with(&format!("{}/", provider)) {
+            raw
+        } else {
+            calculate_cost_for_usage(
+                Some(&format!("{}/{}", provider, model)),
+                usage,
+                None,
+                CostMode::Calculate,
+                Some(pricing),
+            )
+        };
+    let mut candidates = vec![model.clone()];
+    if provider != "unknown" && !model.starts_with(&format!("{}/", provider)) {
+        candidates.push(format!("{}/{}", provider, model));
+    }
+    entry.missing_pricing_model = missing_pricing_model_for_candidates(
+        &model,
+        candidates,
+        crate::total_usage_tokens(usage),
+        Some(pricing),
+    );
 }
 
 fn object_field<'a>(

@@ -61,6 +61,8 @@ pub(super) fn row_to_entry(
             usage,
             model: Some(model.clone()),
             id: Some(id.clone()),
+
+            provider: provider_name,
         },
         cost_usd: None,
         request_id: None,
@@ -219,4 +221,29 @@ fn missing_goose_pricing(
         crate::total_usage_tokens(cost_usage),
         Some(pricing),
     )
+}
+
+pub(super) fn reprice(entry: &mut LoadedEntry, pricing: &PricingMap) {
+    let model = match entry.data.message.model.as_deref() {
+        Some(m) => m,
+        None => return,
+    };
+    let provider_id = normalize_provider(entry.data.message.provider.as_deref(), model);
+    let reasoning_tokens = entry.extra_total_tokens;
+    let cost = calculate_goose_cost(
+        model,
+        &provider_id,
+        entry.data.message.usage,
+        reasoning_tokens,
+        pricing,
+    );
+    let missing_pricing_model = missing_goose_pricing(
+        model,
+        &provider_id,
+        entry.data.message.usage,
+        reasoning_tokens,
+        pricing,
+    );
+    entry.cost = cost;
+    entry.missing_pricing_model = missing_pricing_model;
 }

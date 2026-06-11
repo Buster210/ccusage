@@ -7,9 +7,9 @@ use super::{
     paths::paths,
 };
 use crate::{
-    LoadedEntry, Result, TokenUsageRaw, UsageEntry, UsageMessage, calculate_cost_for_usage,
-    cli::CostMode, debug_log, format_date_tz, missing_pricing_model_for_usage, parse_tz,
-    read_files_parallel,
+    LoadedEntry, Result, TokenUsageRaw, UsageEntry, UsageMessage, adapter::parse_or_log,
+    calculate_cost_for_usage, cli::CostMode, format_date_tz, missing_pricing_model_for_usage,
+    parse_tz,
 };
 
 pub(crate) fn load_entries(
@@ -29,24 +29,38 @@ fn load_entries_inner(
 ) -> Result<Vec<LoadedEntry>> {
     let tz = parse_tz(shared.timezone.as_deref());
     let files = paths()?;
-    // Read OTEL files in parallel; entries keep their original file order before
-    // the stable sort, so output is identical to the sequential read.
-    let loaded = read_files_parallel(&files, shared.single_thread, |path| {
-        read_otel_file(path, tz.as_ref(), shared.mode, pricing).unwrap_or_else(|error| {
-            debug_log(
-                shared,
-                format!(
-                    "Failed to read Copilot OTEL file {}: {error}",
-                    path.display()
-                ),
-            );
-            Vec::new()
-        })
-    });
-    let mut entries = Vec::new();
-    for file_entries in loaded {
-        entries.extend(file_entries);
-    }
+    let mode = shared.mode;
+    let mut entries = crate::cache::load_with_cache(
+        "copilot",
+        &files,
+        crate::cache::CacheOpts {
+            single_thread: shared.single_thread,
+            live_only: shared.live_only,
+        },
+        crate::cache::Freshness::FileStat,
+        |path| {
+            Ok(parse_or_log(path, shared, "Copilot OTEL file", || {
+                read_otel_file(path, tz.as_ref(), mode, pricing)
+            }))
+        },
+        |e| {
+            // Copilot bills reasoning tokens as output; extra_total_tokens holds them.
+            let cost_usage = crate::TokenUsageRaw {
+                output_tokens: e
+                    .data
+                    .message
+                    .usage
+                    .output_tokens
+                    .saturating_add(e.extra_total_tokens),
+                cache_creation: None,
+                ..e.data.message.usage
+            };
+            let model = e.data.message.model.as_deref();
+            e.cost = calculate_cost_for_usage(model, cost_usage, None, mode, Some(pricing));
+            e.missing_pricing_model =
+                missing_pricing_model_for_usage(model, cost_usage, None, mode, Some(pricing));
+        },
+    )?;
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)
 }
@@ -90,6 +104,8 @@ fn usage_entry_to_loaded(
             usage,
             model: Some(entry.model.clone()),
             id: Some(entry.dedup_key),
+
+            provider: None,
         },
         cost_usd: None,
         request_id: None,
