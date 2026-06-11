@@ -333,6 +333,7 @@ fn parse_command(
             Command::Qwen,
         ),
         "openclaw" => parse_openclaw_command(parser, shared, config),
+        "clear-cache" => parse_clear_cache_command(parser),
         _ => Err(format!("Unknown command '{command}'")),
     }
 }
@@ -374,6 +375,28 @@ fn parse_unified_report_arg(
         return Ok(Some("--by-agent"));
     }
     Ok(None)
+}
+
+fn parse_clear_cache_command(parser: &mut ArgParser) -> Result<Command, String> {
+    let agent = match parser.peek() {
+        None => None,
+        Some("all") => {
+            parser.next();
+            None
+        }
+        Some(token) if is_agent_command(token) => {
+            let agent = token.to_string();
+            parser.next();
+            Some(agent)
+        }
+        Some(token) if token.starts_with('-') => None,
+        Some(token) => {
+            return Err(format!(
+                "Unknown agent '{token}' for clear-cache. Pass an agent name (for example \"ccusage clear-cache codex\"), \"all\", or no argument to clear everything."
+            ));
+        }
+    };
+    Ok(Command::ClearCache { agent })
 }
 
 fn parse_all_command(
@@ -733,6 +756,7 @@ fn parse_shared_arg(parser: &mut ArgParser, shared: &mut SharedArgs) -> Result<(
         "--compact" => shared.compact = true,
         "--single-thread" => shared.single_thread = true,
         "--no-cost" => shared.no_cost = true,
+        "--live-only" => shared.live_only = true,
         flag => return Err(format!("Unknown option '{flag}'")),
     }
     Ok(())
@@ -762,6 +786,7 @@ fn is_command(arg: &str) -> bool {
             | "gemini"
             | "kimi"
             | "qwen"
+            | "clear-cache"
     )
 }
 
@@ -990,6 +1015,7 @@ fn is_shared_flag(arg: &str) -> bool {
             | "--compact"
             | "--single-thread"
             | "--no-cost"
+            | "--live-only"
     )
 }
 

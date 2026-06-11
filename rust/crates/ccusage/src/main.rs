@@ -2,6 +2,7 @@ use std::{fmt, io};
 
 mod adapter;
 mod blocks;
+mod cache;
 mod cli;
 mod commands;
 mod config;
@@ -32,8 +33,8 @@ pub(crate) use blocks::{
 };
 pub(crate) use cost::{
     calculate_cost, calculate_cost_for_usage, calculate_cost_from_pricing,
-    missing_pricing_model_for_candidates, missing_pricing_model_for_token_total,
-    missing_pricing_model_for_usage,
+    cost_and_missing_for_output, missing_pricing_model_for_candidates,
+    missing_pricing_model_for_token_total, missing_pricing_model_for_usage,
 };
 pub(crate) use date_utils::*;
 pub(crate) use logger::{debug_log, log_level};
@@ -124,9 +125,27 @@ where
     }
 }
 
+fn run_clear_cache(agent: Option<String>) -> Result<()> {
+    match agent {
+        None => {
+            cache::clear_cache();
+            println!("Cleared the cache.");
+        }
+        Some(agent) => {
+            if cache::clear_cache_namespaces(&agent) {
+                println!("Cleared the {agent} cache.");
+            } else {
+                println!("{agent} has no on-disk cache to clear.");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = cli::parse();
     match cli.command {
+        Some(Command::ClearCache { agent }) => run_clear_cache(agent),
         Some(Command::All(args)) => adapter::all::run(args),
         Some(Command::Daily(args)) => commands::run_daily(args),
         Some(Command::Monthly(shared)) => commands::run_bucket(shared, BucketKind::Monthly),
@@ -163,18 +182,74 @@ fn main() -> Result<()> {
     }
 }
 
+/// Shared test lock for `XDG_CACHE_HOME` and `CLAUDE_CONFIG_DIR` isolation.
+/// Tests in `cache.rs` and `main.rs` both mutate these env vars and must not
+/// run concurrently.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs, sync::Arc};
+    use std::{collections::HashMap, env, fs, sync::Arc};
 
-    use ccusage_test_support::{EnvVarGuard, fs_fixture};
+    use ccusage_test_support::fs_fixture;
     use serde_json::json;
 
     use super::*;
     use crate::{
+        cache::tests::CacheEnv,
         cli::{CostMode, SharedArgs, SortOrder, WeekDay},
         cost::tiered_cost,
     };
+
+    /// Isolates `CLAUDE_CONFIG_DIR` and `XDG_CACHE_HOME` for one test. The cache
+    /// dir is a fresh temp dir so the retention ledger starts empty and cannot
+    /// leak a prior run's deleted-fixture entries into exact-count assertions.
+    /// Holds the shared env lock and restores both vars on drop.
+    struct ClaudeEnv {
+        cache_dir: std::path::PathBuf,
+        prev_config: Option<std::ffi::OsString>,
+        prev_cache: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ClaudeEnv {
+        fn new(name: &str, config_dir: impl AsRef<std::path::Path>) -> Self {
+            let guard = crate::test_env_lock();
+            let cache_dir = env::temp_dir().join(format!("ccusage-main-test-{name}"));
+            let _ = fs::remove_dir_all(&cache_dir);
+            fs::create_dir_all(&cache_dir).unwrap();
+            let prev_config = env::var_os("CLAUDE_CONFIG_DIR");
+            let prev_cache = env::var_os("XDG_CACHE_HOME");
+            unsafe { env::set_var("CLAUDE_CONFIG_DIR", config_dir.as_ref()) };
+            unsafe { env::set_var("XDG_CACHE_HOME", &cache_dir) };
+            Self {
+                cache_dir,
+                prev_config,
+                prev_cache,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for ClaudeEnv {
+        fn drop(&mut self) {
+            match &self.prev_config {
+                Some(v) => unsafe { env::set_var("CLAUDE_CONFIG_DIR", v) },
+                None => unsafe { env::remove_var("CLAUDE_CONFIG_DIR") },
+            }
+            match &self.prev_cache {
+                Some(v) => unsafe { env::set_var("XDG_CACHE_HOME", v) },
+                None => unsafe { env::remove_var("XDG_CACHE_HOME") },
+            }
+            let _ = fs::remove_dir_all(&self.cache_dir);
+        }
+    }
 
     #[test]
     fn compiled_version_matches_release_package() {
@@ -323,7 +398,7 @@ mod tests {
             .join("\n"),
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new("keeps_most_complete_duplicate_usage_entry", fixture.root());
         let shared = SharedArgs {
             mode: CostMode::Display,
             ..SharedArgs::default()
@@ -346,7 +421,10 @@ mod tests {
             .join("\n"),
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new(
+            "dedupes_usage_entries_by_message_id_without_request_id",
+            fixture.root(),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             ..SharedArgs::default()
@@ -364,7 +442,10 @@ mod tests {
             "projects/project1/session1/chat.jsonl": r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":25,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}},"costUSD":0.001}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.path("projects"));
+        let _env = ClaudeEnv::new(
+            "accepts_projects_directory_in_claude_config_dir",
+            fixture.path("projects"),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             ..SharedArgs::default()
@@ -381,7 +462,10 @@ mod tests {
             "projects/project1/session1/chat.jsonl": r#"{"timestamp":"2026-05-22T02:34:40.000Z","version":"1.2.3","sessionId":"session1","advisorModel":"claude-opus-4-20250514","message":{"id":"msg_123","model":"claude-sonnet-4-20250514","usage":{"input_tokens":2,"output_tokens":491,"cache_creation_input_tokens":7853,"cache_read_input_tokens":226584,"iterations":[{"type":"message","input_tokens":1,"output_tokens":45,"cache_creation_input_tokens":7192,"cache_read_input_tokens":109696},{"type":"advisor_message","model":"claude-opus-4-20250514","input_tokens":159419,"output_tokens":7805,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},{"type":"message","input_tokens":1,"output_tokens":446,"cache_creation_input_tokens":661,"cache_read_input_tokens":116888}]}},"requestId":"req_456","costUSD":1.23}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new(
+            "loads_advisor_usage_as_a_separate_model_entry",
+            fixture.root(),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             ..SharedArgs::default()
@@ -406,7 +490,7 @@ mod tests {
             "projects/project1/session1/chat.jsonl": r#"{"timestamp":"2026-05-22T02:34:40.000Z","version":"1.2.3","sessionId":"session1","advisorModel":"claude-opus-4-20250514","message":{"id":"msg_123","model":"claude-sonnet-4-20250514","usage":{"input_tokens":2,"output_tokens":491,"cache_creation_input_tokens":7853,"cache_read_input_tokens":226584,"iterations":[{"type":"message","input_tokens":1,"output_tokens":45,"cache_creation_input_tokens":7192,"cache_read_input_tokens":109696},{"type":"advisor_message","model":"claude-opus-4-20250514","input_tokens":159419,"output_tokens":7805,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},{"type":"message","input_tokens":1,"output_tokens":446,"cache_creation_input_tokens":661,"cache_read_input_tokens":116888}]}},"requestId":"req_456","costUSD":1.23}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new("includes_advisor_usage_in_daily_summaries", fixture.root());
         let shared = SharedArgs {
             mode: CostMode::Display,
             timezone: Some("UTC".to_string()),
@@ -439,7 +523,10 @@ mod tests {
             "projects/project-b/session-b/chat.jsonl": r#"{"timestamp":"2025-01-10T12:00:00.000Z","version":"1.2.3","sessionId":"session-b","message":{"id":"msg_b","model":"claude-sonnet-4-20250514","usage":{"input_tokens":20,"output_tokens":30,"cache_creation_input_tokens":4,"cache_read_input_tokens":2}},"requestId":"req_b","costUSD":0.04}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new(
+            "loads_daily_summaries_like_loaded_entry_aggregation",
+            fixture.root(),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             timezone: Some("UTC".to_string()),
@@ -493,7 +580,10 @@ mod tests {
             "projects/project-a/session-a/subagents/agent-a.jsonl": r#"{"timestamp":"2026-03-10T06:00:01.000Z","version":"1.2.3","sessionId":"session-a","message":{"id":"msg_haiku","model":"claude-haiku-4-5-20251001","role":"assistant","usage":{"input_tokens":20,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"requestId":"req_haiku","costUSD":0.06}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new(
+            "keeps_nested_agent_progress_in_daily_model_order",
+            fixture.root(),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             timezone: Some("UTC".to_string()),
@@ -520,7 +610,10 @@ mod tests {
             "projects/project-a/session-a/subagents/agent-a.jsonl": r#"{"timestamp":"2026-03-10T06:00:01.000Z","version":"1.2.3","sessionId":"session-a","message":{"id":"msg_haiku","model":"claude-haiku-4-5-20251001","role":"assistant","usage":{"input_tokens":20,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"requestId":"req_haiku","costUSD":0.06}"#,
         });
 
-        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let _env = ClaudeEnv::new(
+            "uses_direct_subagent_cost_for_duplicate_daily_agent_progress",
+            fixture.root(),
+        );
         let shared = SharedArgs {
             mode: CostMode::Display,
             timezone: Some("UTC".to_string()),
@@ -792,6 +885,8 @@ mod tests {
                     },
                     model: Some("claude-sonnet-4-20250514".to_string()),
                     id: Some("event-a".to_string()),
+
+                    provider: None,
                 },
                 cost_usd: None,
                 request_id: None,
@@ -828,6 +923,7 @@ mod tests {
 
     #[test]
     fn loads_pi_agent_jsonl_usage_entries() {
+        let _cache_env = CacheEnv::new("main-loads-pi-agent");
         let fixture = fs_fixture!({
             "sessions/project-a/prefix_session-a.jsonl": [
                 r#"{"type":"message","timestamp":"2026-04-22T01:02:02.000Z","message":{"role":"user","usage":{"input":999,"output":999}}}"#,
@@ -877,6 +973,8 @@ mod tests {
                     },
                     model: Some("[pi] gpt-5.4".to_string()),
                     id: None,
+
+                    provider: None,
                 },
                 cost_usd: Some(0.05),
                 request_id: None,
@@ -939,6 +1037,8 @@ mod tests {
                     },
                     model: Some("claude-sonnet-4-20250514".to_string()),
                     id: Some("msg-1".to_string()),
+
+                    provider: None,
                 },
                 cost_usd: Some(0.02),
                 request_id: None,
