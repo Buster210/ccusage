@@ -3,12 +3,14 @@ use std::{collections::HashMap, sync::Arc};
 use jiff::tz::TimeZone as JiffTimeZone;
 
 use super::{
-    parser::{CodebuffEntry, calculate_codebuff_cost, load_chat_file, missing_codebuff_pricing},
+    parser::{
+        CodebuffEntry, calculate_codebuff_cost, load_chat_file, missing_codebuff_pricing, reprice,
+    },
     paths::discover_chat_files,
 };
 use crate::{
-    LoadedEntry, PricingMap, Result, UsageEntry, UsageMessage, cli::SharedArgs, debug_log,
-    format_date_tz, parse_tz, read_files_parallel,
+    LoadedEntry, PricingMap, Result, UsageEntry, UsageMessage, adapter::parse_or_log,
+    cache::Freshness, cli::SharedArgs, format_date_tz, parse_tz,
 };
 
 pub(crate) fn load_entries(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<LoadedEntry>> {
@@ -23,31 +25,31 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
     let tz = parse_tz(shared.timezone.as_deref());
     let mut files = discover_chat_files()?;
     files.sort();
-    // Read files in parallel but apply the last-wins dedup sequentially over the
-    // original (sorted) file order, so the surviving entry per dedup key is
-    // identical to the single-threaded read.
-    let loaded = read_files_parallel(&files, shared.single_thread, |file| {
-        load_chat_file(file).unwrap_or_else(|error| {
-            debug_log(
-                shared,
-                format!(
-                    "Failed to read Codebuff chat file {}: {error}",
-                    file.display()
-                ),
-            );
-            Vec::new()
-        })
-    });
-    let mut deduped = HashMap::<String, CodebuffEntry>::new();
-    for file_entries in loaded {
-        for entry in file_entries {
-            deduped.insert(entry.dedup_key.clone(), entry);
-        }
+    let entries = crate::cache::load_with_cache(
+        "codebuff",
+        &files,
+        crate::cache::CacheOpts {
+            single_thread: shared.single_thread,
+            live_only: shared.live_only,
+        },
+        Freshness::FileStat,
+        |file| {
+            Ok(parse_or_log(file, shared, "Codebuff chat file", || {
+                load_chat_file(file).map(|v| {
+                    v.into_iter()
+                        .map(|entry| to_loaded_entry(entry, tz.as_ref(), pricing))
+                        .collect()
+                })
+            }))
+        },
+        |e| reprice(e, pricing),
+    )?;
+    // (cached first, then fresh), so the last entry per key is the canonical one.
+    let mut deduped = HashMap::<String, LoadedEntry>::new();
+    for entry in entries {
+        deduped.insert(entry.data.message.id.clone().unwrap_or_default(), entry);
     }
-    let mut entries = deduped
-        .into_values()
-        .map(|entry| to_loaded_entry(entry, tz.as_ref(), pricing))
-        .collect::<Vec<_>>();
+    let mut entries: Vec<_> = deduped.into_values().collect();
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)
 }
@@ -67,6 +69,8 @@ fn to_loaded_entry(
             usage: entry.usage,
             model: Some(entry.model.clone()),
             id: Some(entry.dedup_key.clone()),
+
+            provider: None,
         },
         cost_usd: None,
         request_id: None,
@@ -97,13 +101,48 @@ use super::report::{report_from_rows, summarize_entries};
 mod tests {
     use super::super::{parser::parse_usage_object, paths::CODEBUFF_DATA_DIR_ENV};
     use super::*;
+    use crate::cache::tests::CacheEnv;
     use crate::{
         TokenUsageRaw, UsageEntry, UsageMessage, cli::AgentReportKind, parse_ts_timestamp,
     };
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
     #[test]
+    fn loads_entries_through_persistent_cache() {
+        let _cache_env = CacheEnv::new("codebuff-cache-load");
+        let fixture = fs_fixture!({
+            "projects/project-a/chats/2026-01-02T03-04-05.000Z/chat-messages.json": r#"[
+                {"role":"user","text":"hello"},
+                {"id":"assistant-message","role":"assistant","timestamp":"2026-01-02T03:04:06.000Z","metadata":{"model":"claude-sonnet-4-20250514","usage":{"inputTokens":100,"outputTokens":50,"cacheCreationInputTokens":20,"cacheReadInputTokens":10}},"credits":1.25}
+            ]"#,
+        });
+        let _env = EnvVarGuard::set(CODEBUFF_DATA_DIR_ENV, fixture.root());
+        let shared = SharedArgs {
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let pricing = PricingMap::load_embedded();
+
+        let entries = load_entries(&shared, &pricing).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].date, "2026-01-02");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 100);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(entries[0].credits, Some(1.25));
+
+        let warm = load_entries(&shared, &pricing).unwrap();
+        assert_eq!(warm.len(), entries.len());
+        assert_eq!(warm[0].date, entries[0].date);
+        assert_eq!(
+            warm[0].data.message.usage.input_tokens,
+            entries[0].data.message.usage.input_tokens
+        );
+        assert_eq!(warm[0].cost, entries[0].cost);
+    }
+
+    #[test]
     fn loads_assistant_usage_from_chat_messages() {
+        let _cache_env = CacheEnv::new("codebuff-assistant-usage");
         let fixture = fs_fixture!({
             "projects/project-a/chats/2026-01-02T03-04-05.000Z/chat-messages.json": r#"[
                 {"role":"user","text":"hello"},
@@ -138,6 +177,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_run_state_provider_usage() {
+        let _cache_env = CacheEnv::new("codebuff-run-state-fallback");
         let fixture = fs_fixture!({
             "projects/project-a/chats/2026-01-02T03-04-05.000Z/chat-messages.json": r#"[
                 {"variant":"agent","metadata":{"runState":{"sessionState":{"mainAgentState":{"messageHistory":[
@@ -189,6 +229,8 @@ mod tests {
                     },
                     model: Some("claude-sonnet-4-20250514".to_string()),
                     id: Some("message-a".to_string()),
+
+                    provider: None,
                 },
                 cost_usd: None,
                 request_id: None,

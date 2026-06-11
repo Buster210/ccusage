@@ -5,7 +5,7 @@ use jiff::tz::TimeZone as JiffTimeZone;
 use crate::{
     LoadedEntry, PricingMap, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
     calculate_cost_for_usage, cli::CostMode, format_date_tz, format_rfc3339_millis,
-    missing_pricing_model_for_candidates,
+    missing_pricing_model_for_candidates, total_usage_tokens,
 };
 
 pub(super) struct HermesEntry {
@@ -154,6 +154,8 @@ pub(super) fn to_loaded_entry(
             usage: entry.usage,
             model: Some(entry.model.clone()),
             id: Some(format!("hermes:{}", entry.session_id)),
+
+            provider: None,
         },
         cost_usd: entry.cost_usd,
         request_id: None,
@@ -175,6 +177,70 @@ pub(super) fn to_loaded_entry(
         missing_pricing_model,
         data,
     }
+}
+
+pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: &PricingMap) {
+    let usage = TokenUsageRaw {
+        output_tokens: entry
+            .data
+            .message
+            .usage
+            .output_tokens
+            .saturating_add(entry.extra_total_tokens),
+        cache_creation: None,
+        ..entry.data.message.usage
+    };
+    let model = entry.data.message.model.as_deref();
+    let mut candidates = Vec::new();
+    if let Some(m) = model {
+        let provider = infer_provider_from_model(m);
+        if provider != "hermes" {
+            candidates.push(format!("{}/{}", provider, m));
+        }
+        candidates.push(m.to_string());
+    }
+    let cost = match mode {
+        CostMode::Display => entry.data.cost_usd.unwrap_or(0.0),
+        CostMode::Auto => entry.data.cost_usd.filter(|c| *c > 0.0).unwrap_or_else(|| {
+            candidates
+                .iter()
+                .find_map(|c| {
+                    let cost = calculate_cost_for_usage(
+                        Some(c),
+                        usage,
+                        None,
+                        CostMode::Calculate,
+                        Some(pricing),
+                    );
+                    (cost.is_finite() && cost > 0.0).then_some(cost)
+                })
+                .unwrap_or(0.0)
+        }),
+        CostMode::Calculate => candidates
+            .iter()
+            .find_map(|c| {
+                let cost = calculate_cost_for_usage(
+                    Some(c),
+                    usage,
+                    None,
+                    CostMode::Calculate,
+                    Some(pricing),
+                );
+                (cost.is_finite() && cost > 0.0).then_some(cost)
+            })
+            .unwrap_or(0.0),
+    };
+    entry.cost = cost;
+    entry.missing_pricing_model = match mode {
+        CostMode::Display => None,
+        CostMode::Auto if entry.data.cost_usd.is_some() => None,
+        _ => missing_pricing_model_for_candidates(
+            model.unwrap_or(""),
+            candidates,
+            total_usage_tokens(usage),
+            Some(pricing),
+        ),
+    };
 }
 
 fn calculate_hermes_cost(entry: &HermesEntry, pricing: &PricingMap) -> f64 {

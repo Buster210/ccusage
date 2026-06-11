@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
-    LoadedEntry, PricingMap, Result, cli::SharedArgs, debug_log, parse_tz, read_files_parallel,
+    LoadedEntry, PricingMap, Result, adapter::parse_or_log, cli::SharedArgs,
+    cost_and_missing_for_output, parse_tz,
 };
 
 use super::{
@@ -27,31 +28,35 @@ fn load_entries_inner(
     pricing: Option<&PricingMap>,
 ) -> Result<Vec<LoadedEntry>> {
     let tz = parse_tz(shared.timezone.as_deref());
-    let mut entries = Vec::new();
-    let mut seen = HashSet::new();
+    let mut files = Vec::new();
     for root in paths(custom_path) {
-        let files = collect_session_files(&root)?;
-        // Read session files in parallel; the first-wins dedup runs sequentially
-        // over the original file order so the surviving record per id is the
-        // same as the single-threaded read.
-        let loaded = read_files_parallel(&files, shared.single_thread, |file| {
-            parse_session_file(file, tz.as_ref(), shared.mode, pricing).unwrap_or_else(|error| {
-                debug_log(
-                    shared,
-                    format!(
-                        "Failed to read OpenClaw session file {}: {error}",
-                        file.display()
-                    ),
-                );
-                Vec::new()
-            })
-        });
-        for file_entries in loaded {
-            for entry in file_entries {
-                if seen.insert(entry_id(&entry)) {
-                    entries.push(entry);
-                }
-            }
+        files.extend(collect_session_files(&root)?);
+    }
+    let parsed = crate::cache::load_with_cache(
+        "openclaw",
+        &files,
+        crate::cache::CacheOpts {
+            single_thread: shared.single_thread,
+            live_only: shared.live_only,
+        },
+        crate::cache::Freshness::FileStat,
+        |file| {
+            Ok(parse_or_log(file, shared, "OpenClaw session file", || {
+                parse_session_file(file, tz.as_ref(), shared.mode, pricing)
+            }))
+        },
+        |e| {
+            let (cost, missing_pricing_model) =
+                cost_and_missing_for_output(&e.data, shared.mode, pricing);
+            e.cost = cost;
+            e.missing_pricing_model = missing_pricing_model;
+        },
+    )?;
+    let mut seen = HashSet::new();
+    let mut entries = Vec::with_capacity(parsed.len());
+    for entry in parsed {
+        if seen.insert(entry_id(&entry)) {
+            entries.push(entry);
         }
     }
     entries.sort_by_key(|entry| entry.timestamp);
@@ -60,16 +65,13 @@ fn load_entries_inner(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
+    use crate::cache::tests::CacheEnv;
     use ccusage_test_support::fs_fixture;
-
-    static OPENCLAW_DIR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn loads_assistant_usage_and_uses_model_change_events() {
-        let _guard = OPENCLAW_DIR_LOCK.lock().unwrap();
+        let _cache_env = CacheEnv::new("openclaw-model-change");
         let fixture = fs_fixture!({
             "agents/main/sessions/abc.jsonl": [
                 r#"{"type":"model_change","provider":"openai-codex","modelId":"gpt-5.2"}"#,
@@ -100,7 +102,7 @@ mod tests {
 
     #[test]
     fn deduplicates_repeated_openclaw_records() {
-        let _guard = OPENCLAW_DIR_LOCK.lock().unwrap();
+        let _cache_env = CacheEnv::new("openclaw-dedup");
         let line = r#"{"type":"message","message":{"role":"assistant","model":"gpt-5.2","usage":{"input":1,"output":1,"totalTokens":2},"timestamp":1769753935279}}"#;
         let fixture = fs_fixture!({
             "agents/main/sessions/session.jsonl": format!("{line}\n{line}\n"),
@@ -112,7 +114,7 @@ mod tests {
 
     #[test]
     fn calculates_cost_from_pricing_overrides() {
-        let _guard = OPENCLAW_DIR_LOCK.lock().unwrap();
+        let _cache_env = CacheEnv::new("openclaw-pricing");
         let fixture = fs_fixture!({
             "agents/main/sessions/abc.jsonl": r#"{"type":"message","message":{"role":"assistant","model":"gpt-5.2","usage":{"input":1000,"output":500,"cost":{"total":0.99}},"timestamp":1769753935279}}"#,
         });
@@ -137,5 +139,28 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!((entries[0].cost - 0.002).abs() < f64::EPSILON);
         assert_eq!(entries[0].data.cost_usd, Some(0.99));
+    }
+
+    #[test]
+    fn display_mode_surfaces_logged_cost() {
+        let _cache_env = CacheEnv::new("openclaw-display");
+        let fixture = fs_fixture!({
+            "agents/main/sessions/abc.jsonl": r#"{"type":"message","message":{"role":"assistant","model":"gpt-5.2","usage":{"input":1000,"output":500,"cost":{"total":0.99}},"timestamp":1769753935279}}"#,
+        });
+        let shared = SharedArgs {
+            mode: crate::cli::CostMode::Display,
+            offline: true,
+            ..SharedArgs::default()
+        };
+        // Mirror openclaw::run(): pricing is loaded regardless of mode. Display
+        // must still surface the logged costUSD, not reprice it to 0.0.
+        let pricing =
+            PricingMap::load_with_overrides(shared.offline, false, shared.pricing_overrides.iter());
+
+        let entries = load_entries(&shared, fixture.root().to_str(), Some(&pricing)).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cost, 0.99);
+        assert_eq!(entries[0].missing_pricing_model, None);
     }
 }
