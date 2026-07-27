@@ -18,11 +18,19 @@ in
     in
     {
       devShells.default = pkgs.mkShell {
+        # Hand cargo the pinned LiteLLM snapshot the way the Nix packages do, so
+        # `cargo build` in the dev shell stays offline and does not need the
+        # fetch-litellm-pricing feature's rustls stack.
+        CCUSAGE_PRICING_JSON_PATH = "${inputs.litellm}/model_prices_and_context_window.json";
+
         buildInputs =
           (with pkgs; [
             nodejs
             pnpm
+            bun
+            inputs.bun2nix.packages.${system}.default
             nushell
+            config.packages.cargo-hawk
             config.packages.publint
 
             rustToolchain
@@ -78,7 +86,7 @@ in
 
           # Set up direnv and JS dependencies whenever `git wt` creates a new
           # worktree, so worktrees are usable without a manual step.
-          git config --replace-all wt.hook "direnv allow || true; pnpm install --frozen-lockfile || true"
+          git config --replace-all wt.hook "direnv allow || true; just install || true"
 
           # Move deleted worktree directories to the trash instead of `rm -rf`,
           # which is noticeably slower on large node_modules and target trees.

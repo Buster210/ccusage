@@ -3,11 +3,6 @@ use std::{
     path::PathBuf,
 };
 
-pub struct Cli {
-    pub command: Option<Command>,
-    pub shared: SharedArgs,
-}
-
 pub enum Command {
     All(AgentCommandArgs),
     ClearCache { agent: Option<String> },
@@ -37,6 +32,9 @@ pub enum Command {
 pub struct SharedArgs {
     pub since: Option<String>,
     pub until: Option<String>,
+    /// Number of most recent report periods to keep, resolved into `since` by
+    /// the binary once the report's calendar unit is known.
+    pub last: Option<u32>,
     pub json: bool,
     pub mode: CostMode,
     pub debug: bool,
@@ -59,7 +57,7 @@ pub struct SharedArgs {
 }
 
 impl SharedArgs {
-    pub(crate) fn with_defaults() -> Self {
+    pub fn with_defaults() -> Self {
         Self {
             mode: CostMode::Auto,
             debug_samples: 5,
@@ -144,13 +142,13 @@ pub enum AgentReportKind {
     Session,
 }
 
-pub(crate) const STANDARD_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
+pub const STANDARD_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
     ("daily", AgentReportKind::Daily),
     ("monthly", AgentReportKind::Monthly),
     ("session", AgentReportKind::Session),
 ];
 
-pub(crate) const OPENCODE_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
+pub const OPENCODE_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
     ("daily", AgentReportKind::Daily),
     ("weekly", AgentReportKind::Weekly),
     ("monthly", AgentReportKind::Monthly),

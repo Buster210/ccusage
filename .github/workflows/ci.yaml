@@ -261,8 +261,9 @@ jobs:
       # Packing only repackages the native binaries restored from the build
       # matrix below (no Rust build happens here), so the full `nix develop` dev
       # shell is unnecessary. The package checks bring Nu through their Nix
-      # shebangs.
-      - run: nix profile install --inputs-from . nixpkgs#pnpm nixpkgs#nodejs
+      # shebangs; `publint` is the flake's own pinned build, invoked by every
+      # package's prepack script.
+      - run: nix profile install --inputs-from . nixpkgs#pnpm nixpkgs#nodejs .#publint
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -275,7 +276,11 @@ jobs:
             tar -xf "$archive"
           done
       - id: publish
-        run: pnpm pkg-pr-new publish --pnpm --bin './apps/ccusage' './packages/ccusage-linux-arm64' './packages/ccusage-linux-x64' './packages/ccusage-darwin-arm64' './packages/ccusage-darwin-x64' './packages/ccusage-win32-x64'
+        # Fetched on demand rather than carried as a root devDependency: this
+        # job is the only thing that runs it, and it never needs to resolve
+        # against the workspace. Renovate does not update `dlx` specifiers, so
+        # bump the pin here by hand.
+        run: pnpm dlx pkg-pr-new@0.0.75 publish --pnpm --bin './apps/ccusage' './packages/ccusage-linux-arm64' './packages/ccusage-linux-x64' './packages/ccusage-darwin-arm64' './packages/ccusage-darwin-x64' './packages/ccusage-win32-x64'
       # Resolve the ccusage CLI preview URL and build the E2E fixture here (this
       # job has the checkout); the E2E jobs then run without a checkout.
       - id: preview-url

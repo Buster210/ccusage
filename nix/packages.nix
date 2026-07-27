@@ -27,13 +27,24 @@ in
           ;
       };
       ccusageProgram = pkgs.lib.getExe' ccusage "ccusage";
+      # Shared builders for the `nix/tools/*` dependency manifests; see
+      # nix/bun-node-modules.nix and nix/bun-cli.nix.
+      bunNodeModules = pkgs.callPackage ../nix/bun-node-modules.nix {
+        bun2nix = inputs.bun2nix.packages.${system}.default;
+      };
+      bunCli = pkgs.callPackage ../nix/bun-cli.nix { inherit bunNodeModules; };
+      cargo-hawk = pkgs.callPackage ../nix/cargo-hawk.nix {
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (root + /rust-toolchain.toml);
+      };
+      changelogithub = pkgs.callPackage ../nix/tools/changelogithub { inherit bunCli; };
       # Regeneration-only output for committed models.dev snapshots;
       # `just gen-models-dev-pricing` builds this and copies them into the source
       # tree. It is not part of the ccusage build, which embeds the committed files.
-      models-dev-pricing = pkgs.callPackage ../nix/models-dev-pricing.nix {
+      models-dev-pricing = pkgs.callPackage ../nix/tools/models-dev-gen {
+        inherit bunNodeModules;
         modelsDevSrc = inputs.models-dev;
       };
-      publint = pkgs.callPackage ../nix/publint.nix { };
+      publint = pkgs.callPackage ../nix/tools/publint { inherit bunCli; };
     in
     {
       apps = {
@@ -49,7 +60,13 @@ in
 
       packages = {
         default = ccusage;
-        inherit ccusage models-dev-pricing publint;
+        inherit
+          cargo-hawk
+          ccusage
+          changelogithub
+          models-dev-pricing
+          publint
+          ;
       };
     };
 }

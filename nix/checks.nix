@@ -18,10 +18,12 @@ in
       craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
       inherit (config.packages.ccusage.passthru)
         cargoArtifacts
+        workspaceArtifacts
         commonArgs
         version
         ;
       nixFilter = inputs.nix-filter.lib;
+      rustSrc = import ./rust-src.nix { inherit nixFilter root; };
       repoSrc = nixFilter {
         inherit root;
         exclude = [
@@ -34,7 +36,7 @@ in
       ccusage-clippy = craneLib.cargoClippy (
         commonArgs
         // {
-          src = repoSrc;
+          src = rustSrc;
           sourceRoot = "source/rust";
           cargoLock = root + /rust/Cargo.lock;
           inherit cargoArtifacts;
@@ -42,10 +44,26 @@ in
           cargoClippyExtraArgs = "--all-targets -- -D warnings";
         }
       );
+      # hawk belongs here rather than in treefmt: it analyses the whole workspace as a
+      # closed world instead of a file at a time, and narrowing a visibility is a
+      # semantic change, not formatting. It reuses the same cargo artifacts as clippy,
+      # so the cost is its own analysis rather than another workspace build.
+      ccusage-hawk = craneLib.mkCargoDerivation (
+        commonArgs
+        // {
+          pname = "ccusage-hawk";
+          src = rustSrc;
+          sourceRoot = "source/rust";
+          cargoLock = root + /rust/Cargo.lock;
+          inherit cargoArtifacts;
+          nativeBuildInputs = commonArgs.nativeBuildInputs or [ ] ++ [ config.packages.cargo-hawk ];
+          buildPhaseCargoCommand = "cargo hawk check --manifest-path Cargo.toml -D warnings";
+        }
+      );
       ccusage-fmt = craneLib.cargoFmt {
         pname = "ccusage-rust";
         inherit version;
-        src = repoSrc;
+        src = rustSrc;
         sourceRoot = "source/rust";
         cargoExtraArgs = "--all";
       };
@@ -56,8 +74,9 @@ in
         commonArgs
         // {
           pname = "generate-config-schema";
-          inherit cargoArtifacts;
-          cargoExtraArgs = "-p ccusage --bin generate-config-schema";
+          # Only the config layer is needed, so skip the adapter artifacts.
+          cargoArtifacts = workspaceArtifacts.foundation;
+          cargoExtraArgs = "-p ccusage-config --bin generate-config-schema";
           doCheck = false;
           meta = {
             mainProgram = "generate-config-schema";
@@ -96,6 +115,28 @@ in
 
             touch "$out"
           '';
+      # Fail `nix flake check` when a tool's committed `bun.nix` no longer matches
+      # what `bun2nix` derives from its `bun.lock`. Renovate bumps `bun.lock`
+      # without knowing about `bun.nix`, and a stale pair would otherwise only
+      # surface as a confusing sandbox install failure. `bun2nix` only parses the
+      # lockfile, so this needs no network access.
+      bun-nix =
+        mkRepoCheck "bun-nix-check"
+          [
+            inputs.bun2nix.packages.${system}.default
+            pkgs.diffutils
+          ]
+          ''
+            for lockfile in nix/tools/*/bun.lock; do
+              toolDir="$(dirname "$lockfile")"
+              (cd "$toolDir" && bun2nix -o generated.nix)
+              if ! diff -u "$toolDir/bun.nix" "$toolDir/generated.nix"; then
+                echo "ERROR: $toolDir/bun.nix is out of sync with $lockfile." >&2
+                echo "Run 'just gen-bun-nix' and commit the result." >&2
+                exit 1
+              fi
+            done
+          '';
       mkRepoCheck =
         name: nativeBuildInputs: command:
         pkgs.runCommand name
@@ -119,7 +160,13 @@ in
       # optimized native package here too only duplicated a ~70s release compile
       # on cache-cold runners.
       checks = {
-        inherit ccusage-clippy ccusage-fmt config-schema;
+        inherit
+          bun-nix
+          ccusage-clippy
+          ccusage-fmt
+          ccusage-hawk
+          config-schema
+          ;
         oxlint = mkRepoCheck "oxlint-check" [ pkgs.oxlint ] ''
           oxlint --config nix/oxlint-check.json .
         '';
@@ -137,7 +184,9 @@ in
               pkgs.nodejs
             ]
             ''
-              mapfile -t packageManifests < <(fd --type f '^package\.json$' .)
+              # nix/tools/*/package.json are dependency manifests for Nix-built
+              # JS tooling, not publishable packages, so they are out of scope.
+              mapfile -t packageManifests < <(fd --type f '^package\.json$' . --exclude nix/tools)
 
               node - "''${packageManifests[@]}" <<'EOF'
               const fs = require("node:fs");

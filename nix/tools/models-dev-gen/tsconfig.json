@@ -1,0 +1,26 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"lib": ["ESNext"],
+		"moduleDetection": "force",
+		"module": "Preserve",
+		"moduleResolution": "bundler",
+		"types": ["node"],
+		"allowImportingTsExtensions": true,
+		"strict": true,
+		"noFallthroughCasesInSwitch": true,
+		"noImplicitOverride": true,
+		"noPropertyAccessFromIndexSignature": false,
+		"noUncheckedIndexedAccess": true,
+		"noUnusedLocals": false,
+		"noUnusedParameters": false,
+		"noEmit": true,
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"skipLibCheck": true
+	},
+	"include": ["*.ts"],
+	// gen.ts runs inside a copy of the upstream models.dev worktree and imports
+	// `./packages/core/src/generate.ts` from there, so it cannot resolve here.
+	"exclude": ["node_modules", "gen.ts"]
+}

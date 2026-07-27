@@ -16,6 +16,51 @@ fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// Shared test lock for `XDG_CACHE_HOME` and `CLAUDE_CONFIG_DIR` isolation.
+/// Cache tests and CLI tests both mutate these env vars and must not run
+/// concurrently. Deliberately not [`ENV_LOCK`]: a test holding a [`CacheEnv`]
+/// still builds `Fixture`/`EnvVarGuard` values, and one non-reentrant mutex for
+/// both would deadlock on the second acquire.
+pub fn test_env_lock() -> MutexGuard<'static, ()> {
+    static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    CACHE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// Isolate cache I/O in a temp dir so tests never touch the real cache.
+pub struct CacheEnv {
+    dir: PathBuf,
+    prev_xdg: Option<OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl CacheEnv {
+    pub fn new(name: &str) -> Self {
+        let guard = test_env_lock();
+        let dir = std::env::temp_dir().join(format!("ccusage-cache-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+        unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+        Self {
+            dir,
+            prev_xdg,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for CacheEnv {
+    fn drop(&mut self) {
+        match &self.prev_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CACHE_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 pub struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -98,7 +143,7 @@ impl Fixture {
         self.dir.path().join(path)
     }
 
-    pub fn child(&self, path: impl AsRef<Path>) -> ChildPath {
+    fn child(&self, path: impl AsRef<Path>) -> ChildPath {
         self.dir.child(path)
     }
 

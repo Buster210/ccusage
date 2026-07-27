@@ -19,6 +19,19 @@ mod rust
 default:
     @just --list
 
+# Install the JS dependencies needed to work in this repository
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm install --frozen-lockfile
+    # Tool directories under nix/tools are outside the pnpm workspace. Nix builds
+    # their dependencies itself, so only the ones carrying a tsconfig need a local
+    # node_modules — `just typecheck` resolves their types out of it.
+    for tsconfig in nix/tools/*/tsconfig.json; do
+        toolDir="$(dirname "$tsconfig")"
+        (cd "$toolDir" && bun install --frozen-lockfile)
+    done
+
 # Build every workspace package
 build: ccusage::build docs::build
 
@@ -32,7 +45,7 @@ test: rust::test test-node
 
 # Run Node's built-in test runner for TypeScript package and tooling tests
 test-node:
-    TZ=UTC node --test apps/ccusage/src/cli.test.ts nix/models-dev-compact.test.ts
+    TZ=UTC node --test apps/ccusage/src/cli.test.ts nix/tools/models-dev-gen/compact.test.ts
 
 # Generate a large benchmark fixture for PR performance comparisons
 generate-large-fixture output_dir codex_output_dir size_mib="1024":
@@ -46,9 +59,23 @@ fmt:
 check:
     nix flake check
 
+# Report `pub` items in the Rust workspace that no other crate needs (needs cargo-hawk)
+hawk:
+    cargo hawk check --manifest-path rust/Cargo.toml
+
 # Regenerate apps/ccusage/config-schema.json from the Rust source
 schema:
     nix run .#generate-schema
+
+# Re-resolve the Nix-built JS tools under nix/tools and regenerate their bun.nix
+gen-bun-nix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for lockfile in nix/tools/*/bun.lock; do
+        toolDir="$(dirname "$lockfile")"
+        echo "Regenerating $toolDir"
+        (cd "$toolDir" && bun install && bun2nix -o bun.nix)
+    done
 
 # Update the locked LiteLLM pricing snapshot and validate the result
 update-litellm-pricing:
@@ -57,11 +84,11 @@ update-litellm-pricing:
 
 # Regenerate committed models.dev snapshots from the pinned input
 gen-models-dev-pricing:
-    snapshots="$(nix build .#models-dev-pricing --no-link --print-out-paths)" && cp "$snapshots/models-dev-pricing.json" rust/crates/ccusage/src/models-dev-pricing.json && cp "$snapshots/codex-auto-review-fallbacks.json" rust/crates/ccusage/src/adapter/codex/codex-auto-review-fallbacks.json
-    chmod u+w rust/crates/ccusage/src/models-dev-pricing.json
-    chmod u+w rust/crates/ccusage/src/adapter/codex/codex-auto-review-fallbacks.json
-    nix fmt rust/crates/ccusage/src/models-dev-pricing.json
-    nix fmt rust/crates/ccusage/src/adapter/codex/codex-auto-review-fallbacks.json
+    snapshots="$(nix build .#models-dev-pricing --no-link --print-out-paths)" && cp "$snapshots/models-dev-pricing.json" rust/crates/ccusage-core/src/models-dev-pricing.json && cp "$snapshots/codex-auto-review-fallbacks.json" rust/adapters/codex/src/codex-auto-review-fallbacks.json
+    chmod u+w rust/crates/ccusage-core/src/models-dev-pricing.json
+    chmod u+w rust/adapters/codex/src/codex-auto-review-fallbacks.json
+    nix fmt rust/crates/ccusage-core/src/models-dev-pricing.json
+    nix fmt rust/adapters/codex/src/codex-auto-review-fallbacks.json
 
 # Update the pinned models.dev input, regenerate its pricing snapshot, and validate
 update-models-dev-pricing:
