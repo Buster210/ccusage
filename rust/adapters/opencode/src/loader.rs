@@ -215,6 +215,10 @@ fn fallback_from_cache(
 
 /// Load OpenCode message-database rows, reusing the per-database row cache so
 /// unchanged rows skip the expensive JSON parse.
+///
+/// V1 stores messages in `message`; V2 (beta) stores them in `session_message`.
+/// Both tables share the `(id, session_id, data)` columns this loader selects,
+/// so both are scanned when present and deduped by message id downstream.
 fn load_entries_from_database(
     db_path: &Path,
     tz: Option<&JiffTimeZone>,
@@ -241,22 +245,126 @@ fn load_entries_from_database(
         );
         return fallback_from_cache(cached, mode, pricing);
     };
+
+    let Ok(tables) = message_tables(&connection) else {
+        debug_log(
+            shared,
+            format!(
+                "Failed to read OpenCode database schema: {}",
+                db_path.display()
+            ),
+        );
+        return fallback_from_cache(cached, mode, pricing);
+    };
+    if tables.is_empty() {
+        debug_log(
+            shared,
+            format!(
+                "OpenCode database has no message or session_message table: {}",
+                db_path.display()
+            ),
+        );
+        return fallback_from_cache(cached, mode, pricing);
+    }
+
+    let mut entries = Vec::new();
+    let mut fresh_rows = Vec::new();
+    let mut all_completed = true;
+    for table in &tables {
+        let (table_entries, table_fresh, completed) = scan_message_table(
+            &connection,
+            table,
+            db_path,
+            &cached,
+            tz,
+            mode,
+            pricing,
+            shared,
+            window,
+        );
+        if !completed {
+            all_completed = false;
+        }
+        entries.extend(table_entries);
+        fresh_rows.extend(table_fresh);
+    }
+
+    if !all_completed {
+        return fallback_from_cache(cached, mode, pricing);
+    }
+
+    // A full scan sees every live row, so the cache is rebuilt from exactly what
+    // this run saw and rows deleted from the database drop out. A windowed scan
+    // only saw part of the table, so the rows it did see are merged over the
+    // existing cache instead of replacing it.
+    if window.is_unbounded() {
+        cache::save_opencode_row_cache(&cache_key, &fresh_rows);
+    } else {
+        let mut merged = cached;
+        for row in fresh_rows {
+            merged.insert(row.id.clone(), row);
+        }
+        cache::save_opencode_row_cache(&cache_key, &merged.into_values().collect::<Vec<_>>());
+    }
+
+    // Reprice every entry (cache hits carry cost 0 from `CachedEntry`; fresh
+    // parses are repriced idempotently) so cost reflects current pricing/mode
+    // without reparsing. Ledger-frozen entries are merged later and untouched.
+    for entry in &mut entries {
+        reprice(entry, mode, pricing);
+    }
+
+    Some(entries)
+}
+
+/// Which message tables a database actually has, `message` (V1) before
+/// `session_message` (V2) so a duplicated id resolves to the V1 row first.
+fn message_tables(connection: &sqlite::Connection) -> sqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN \
+         ('message', 'session_message') \
+         ORDER BY CASE name WHEN 'message' THEN 0 ELSE 1 END",
+    )?;
+    let mut tables = Vec::new();
+    while let sqlite::State::Row = statement.next()? {
+        if let Ok(name) = statement.read::<String, _>(0) {
+            tables.push(name);
+        }
+    }
+    Ok(tables)
+}
+
+/// Scan one message table with the per-row content-hash cache. Returns the
+/// parsed entries, the fresh rows for the cache rebuild, and whether the scan
+/// ran to completion (a mid-scan error must not clobber a good row cache).
+#[allow(clippy::too_many_arguments)]
+fn scan_message_table(
+    connection: &sqlite::Connection,
+    table: &str,
+    db_path: &Path,
+    cached: &HashMap<String, OpenCodeRow>,
+    tz: Option<&JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+    shared: &SharedArgs,
+    window: DateWindow,
+) -> (Vec<LoadedEntry>, Vec<OpenCodeRow>, bool) {
     // Push the window into SQL only while a sample of `time_created` still looks
     // millisecond-scaled. The sample cannot prove the whole column is, which is
     // why the payload check in the loop stays authoritative either way.
-    let pushdown = if window.is_unbounded() || time_created_looks_like_millis(&connection) {
+    let pushdown = if window.is_unbounded() || time_created_looks_like_millis(connection, table) {
         window.widened_for_pushdown()
     } else {
         debug_log(
             shared,
             format!(
-                "OpenCode time_created is not millisecond-scale; scanning unfiltered: {}",
+                "OpenCode {table}.time_created is not millisecond-scale; scanning unfiltered: {}",
                 db_path.display()
             ),
         );
         DateWindow::UNBOUNDED
     };
-    let statement = prepare_message_query(&connection, pushdown).or_else(|| {
+    let statement = prepare_message_query(connection, table, pushdown).or_else(|| {
         // A pre-SQLite-era schema has no `time_created` column, so the filtered
         // query cannot prepare. Scan unfiltered rather than return nothing.
         debug_log(
@@ -266,14 +374,14 @@ fn load_entries_from_database(
                 db_path.display()
             ),
         );
-        prepare_message_query(&connection, DateWindow::UNBOUNDED)
+        prepare_message_query(connection, table, DateWindow::UNBOUNDED)
     });
     let Some(mut statement) = statement else {
         debug_log(
             shared,
             format!("Failed to read OpenCode database: {}", db_path.display()),
         );
-        return fallback_from_cache(cached, mode, pricing);
+        return (Vec::new(), Vec::new(), false);
     };
     let mut completed = false;
     let mut entries = Vec::new();
@@ -342,32 +450,7 @@ fn load_entries_from_database(
         }
     }
 
-    if !completed {
-        return fallback_from_cache(cached, mode, pricing);
-    }
-
-    // A full scan sees every live row, so the cache is rebuilt from exactly what
-    // this run saw and rows deleted from the database drop out. A windowed scan
-    // only saw part of the table, so the rows it did see are merged over the
-    // existing cache instead of replacing it.
-    if window.is_unbounded() {
-        cache::save_opencode_row_cache(&cache_key, &fresh_rows);
-    } else {
-        let mut merged = cached;
-        for row in fresh_rows {
-            merged.insert(row.id.clone(), row);
-        }
-        cache::save_opencode_row_cache(&cache_key, &merged.into_values().collect::<Vec<_>>());
-    }
-
-    // Reprice every entry (cache hits carry cost 0 from `CachedEntry`; fresh
-    // parses are repriced idempotently) so cost reflects current pricing/mode
-    // without reparsing. Ledger-frozen entries are merged later and untouched.
-    for entry in &mut entries {
-        reprice(entry, mode, pricing);
-    }
-
-    Some(entries)
+    (entries, fresh_rows, completed)
 }
 
 fn read_message_file(
@@ -477,7 +560,7 @@ impl DateWindow {
     }
 }
 
-/// Prepares the `message` scan, narrowed to `window` where its bounds are set.
+/// Prepares the `table` scan, narrowed to `window` where its bounds are set.
 ///
 /// Returns `None` when the statement cannot be prepared, which is what a schema
 /// without a `time_created` column looks like.
@@ -488,24 +571,25 @@ impl DateWindow {
 /// subquery is answered from that index alone, leaving only in-range rows to be
 /// fetched by primary key — the difference is what keeps a narrow window off the
 /// gigabytes of payload it does not need.
-fn prepare_message_query(
-    connection: &sqlite::Connection,
+fn prepare_message_query<'c>(
+    connection: &'c sqlite::Connection,
+    table: &str,
     window: DateWindow,
-) -> Option<sqlite::Statement<'_>> {
+) -> Option<sqlite::Statement<'c>> {
     let sql = match (window.start, window.end) {
-        (Some(_), Some(_)) => {
-            "SELECT id, session_id, data FROM message WHERE id IN \
-             (SELECT id FROM message WHERE time_created >= ?1 AND time_created < ?2)"
-        }
-        (Some(_), None) => {
-            "SELECT id, session_id, data FROM message WHERE id IN \
-             (SELECT id FROM message WHERE time_created >= ?1)"
-        }
-        (None, Some(_)) => {
-            "SELECT id, session_id, data FROM message WHERE id IN \
-             (SELECT id FROM message WHERE time_created < ?1)"
-        }
-        (None, None) => "SELECT id, session_id, data FROM message",
+        (Some(_), Some(_)) => format!(
+            "SELECT id, session_id, data FROM {table} WHERE id IN \
+             (SELECT id FROM {table} WHERE time_created >= ?1 AND time_created < ?2)"
+        ),
+        (Some(_), None) => format!(
+            "SELECT id, session_id, data FROM {table} WHERE id IN \
+             (SELECT id FROM {table} WHERE time_created >= ?1)"
+        ),
+        (None, Some(_)) => format!(
+            "SELECT id, session_id, data FROM {table} WHERE id IN \
+             (SELECT id FROM {table} WHERE time_created < ?1)"
+        ),
+        (None, None) => format!("SELECT id, session_id, data FROM {table}"),
     };
     let mut statement = connection.prepare(sql).ok()?;
     for (index, bound) in [window.start, window.end].into_iter().flatten().enumerate() {
@@ -518,7 +602,7 @@ fn prepare_message_query(
 /// needs at least 12 digits, while second-scale values stay far below it.
 const MIN_MILLIS_SCALE: i64 = 100_000_000_000;
 
-/// Reports whether a sample of `message.time_created` looks like Unix
+/// Reports whether a sample of `<table>.time_created` looks like Unix
 /// milliseconds, the scale the payload's `time.created` uses.
 ///
 /// Sampling keeps this cheap on databases tens of gigabytes in size, and proves
@@ -527,10 +611,10 @@ const MIN_MILLIS_SCALE: i64 = 100_000_000_000;
 /// does catch is a build that stored seconds, or left the column at zero, where
 /// millisecond bounds would otherwise exclude every row — those disable the
 /// push-down and leave the payload check to filter.
-fn time_created_looks_like_millis(connection: &sqlite::Connection) -> bool {
-    let Ok(mut statement) = connection
-        .prepare("SELECT max(time_created) FROM (SELECT time_created FROM message LIMIT 8)")
-    else {
+fn time_created_looks_like_millis(connection: &sqlite::Connection, table: &str) -> bool {
+    let Ok(mut statement) = connection.prepare(format!(
+        "SELECT max(time_created) FROM (SELECT time_created FROM {table} LIMIT 8)"
+    )) else {
         return false;
     };
     match statement.next() {
@@ -599,6 +683,136 @@ mod tests {
         statement.bind((2, session_id)).unwrap();
         statement.bind((3, data)).unwrap();
         statement.next().unwrap();
+    }
+
+    /// Real V2 (beta) schema: messages live in `session_message` with `type` /
+    /// `seq` columns and V2-shaped payloads (nested `model`), while `message`
+    /// either does not exist or stays empty.
+    fn create_db_session_message(path: &Path, id: &str, session_id: &str, data: &str) {
+        let created = serde_json::from_str::<serde_json::Value>(data)
+            .ok()
+            .and_then(|value| value["time"]["created"].as_i64())
+            .expect("test message payload needs time.created");
+        let db = sqlite::open(path).unwrap();
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS session_message \
+             (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, \
+              time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)",
+        )
+        .unwrap();
+        let mut statement = db
+            .prepare(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .unwrap();
+        statement.bind((1, id)).unwrap();
+        statement.bind((2, session_id)).unwrap();
+        statement.bind((3, "assistant")).unwrap();
+        statement.bind((4, 1_i64)).unwrap();
+        statement.bind((5, created)).unwrap();
+        statement.bind((6, created)).unwrap();
+        statement.bind((7, data)).unwrap();
+        statement.next().unwrap();
+    }
+
+    #[test]
+    fn loads_v2_session_message_table() {
+        let _cache_env = CacheEnv::new("opencode-loads-v2-session-message-table");
+        let fixture = fs_fixture!({});
+        create_db_session_message(
+            &fixture.path("opencode.db"),
+            "msg-v2-1",
+            "ses-v2-a",
+            r#"{"time":{"created":1767312000000,"completed":1767312001000},"agent":"build","model":{"id":"deepseek-v4-flash-free","providerID":"opencode","variant":"max"},"cost":0,"tokens":{"input":120,"output":60,"cache":{"read":12,"write":24}}}"#,
+        );
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let entries = load_entries_from_directory(fixture.root(), &shared).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].date, "2026-01-02");
+        assert_eq!(entries[0].session_id.as_ref(), "ses-v2-a");
+        assert_eq!(entries[0].data.message.id.as_deref(), Some("msg-v2-1"));
+        assert_eq!(entries[0].model.as_deref(), Some("deepseek-v4-flash-free"));
+        assert_eq!(entries[0].data.message.usage.input_tokens, 120);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 60);
+        assert_eq!(entries[0].data.message.usage.cache_creation_input_tokens, 24);
+        assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 12);
+    }
+
+    #[test]
+    fn loads_v2_channel_database() {
+        let _cache_env = CacheEnv::new("opencode-loads-v2-channel-database");
+        let fixture = fs_fixture!({});
+        create_db_session_message(
+            &fixture.path("opencode-next.db"),
+            "msg-v2-1",
+            "ses-v2-a",
+            r#"{"time":{"created":1767312000000},"model":{"id":"mimo-v2.5-free","providerID":"opencode"},"tokens":{"input":80,"output":40}}"#,
+        );
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let entries = load_entries_from_directory(fixture.root(), &shared).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model.as_deref(), Some("mimo-v2.5-free"));
+        assert_eq!(entries[0].data.message.usage.input_tokens, 80);
+    }
+
+    #[test]
+    fn loads_v1_and_v2_tables_with_dedup() {
+        let _cache_env = CacheEnv::new("opencode-loads-v1-and-v2-tables-with-dedup");
+        // V1 row wins for a duplicated id; V2-only rows are still loaded.
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-shared",
+            "ses-v1",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":111,"output":1},"cost":0.03}"#,
+        );
+        create_db_session_message(
+            &db,
+            "msg-shared",
+            "ses-v2",
+            r#"{"time":{"created":1767312000000},"model":{"id":"mimo-v2.5-free","providerID":"opencode"},"tokens":{"input":999,"output":9}}"#,
+        );
+        create_db_session_message(
+            &db,
+            "msg-v2-only",
+            "ses-v2-b",
+            r#"{"time":{"created":1767312000001},"model":{"id":"mimo-v2.5-free","providerID":"opencode"},"tokens":{"input":222,"output":2}}"#,
+        );
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let entries = load_entries_from_directory(fixture.root(), &shared).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        let shared_entry = entries
+            .iter()
+            .find(|e| e.data.message.id.as_deref() == Some("msg-shared"))
+            .expect("shared id present");
+        assert_eq!(shared_entry.session_id.as_ref(), "ses-v1");
+        assert_eq!(shared_entry.data.message.usage.input_tokens, 111);
+        let v2_only = entries
+            .iter()
+            .find(|e| e.data.message.id.as_deref() == Some("msg-v2-only"))
+            .expect("v2-only row present");
+        assert_eq!(v2_only.session_id.as_ref(), "ses-v2-b");
+        assert_eq!(v2_only.data.message.usage.input_tokens, 222);
     }
 
     #[test]

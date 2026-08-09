@@ -27,6 +27,10 @@ pub struct OpenCodeMessage {
         deserialize_with = "jsonl::non_empty_string"
     )]
     provider_id: Option<String>,
+    /// V2 records nest model identity (`"model": {"id", "providerID"}`) instead
+    /// of the V1 top-level `modelID` / `providerID` fields. `None` for V1 rows.
+    #[serde(default, deserialize_with = "jsonl::lenient_object")]
+    model: Option<OpenCodeModel>,
     #[serde(default, deserialize_with = "jsonl::lenient_object")]
     time: Option<OpenCodeTime>,
     #[serde(default, deserialize_with = "jsonl::non_empty_string")]
@@ -39,6 +43,15 @@ pub struct OpenCodeMessage {
     session_id: Option<String>,
     #[serde(default, deserialize_with = "jsonl::lenient_f64")]
     cost: Option<f64>,
+}
+
+/// Nested model identity carried by OpenCode V2 `session_message` records.
+#[derive(Debug, Default, Deserialize)]
+struct OpenCodeModel {
+    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
+    id: Option<String>,
+    #[serde(default, alias = "providerID", deserialize_with = "jsonl::non_empty_string")]
+    provider_id: Option<String>,
 }
 
 /// Token usage block carried by OpenCode messages.
@@ -103,8 +116,13 @@ pub fn message_to_entry(
     {
         return None;
     }
-    let model = non_empty(msg.model_id.as_ref())?;
-    let provider = non_empty(msg.provider_id.as_ref())?;
+    let model = non_empty(msg.model_id.as_ref())
+        .or_else(|| msg.model.as_ref().and_then(|m| non_empty(m.id.as_ref())))?;
+    let provider = non_empty(msg.provider_id.as_ref()).or_else(|| {
+        msg.model
+            .as_ref()
+            .and_then(|m| non_empty(m.provider_id.as_ref()))
+    })?;
     let millis = msg.time.as_ref().and_then(|t| t.created).unwrap_or(0);
     let timestamp = crate::TimestampMs::from_millis(millis);
     let timestamp_text = crate::format_rfc3339_millis(timestamp);
@@ -314,6 +332,7 @@ mod tests {
             session_id: Some("session-a".to_string()),
             provider_id: Some("openai".to_string()),
             model_id: Some("gpt-test".to_string()),
+            model: None,
             time: Some(OpenCodeTime { created: Some(0) }),
             tokens: Some(tokens),
             cost: Some(0.0),
@@ -486,6 +505,85 @@ mod tests {
     }
 
     #[test]
+    fn resolves_v2_nested_model_shape() {
+        let entry = message_to_entry(
+            &message(json!({
+                "id": "message-v2",
+                "sessionID": "session-v2",
+                "time": { "created": 1767312000000_i64 },
+                "model": {
+                    "id": "deepseek-v4-flash-free",
+                    "providerID": "opencode",
+                    "variant": "max"
+                },
+                "tokens": {
+                    "input": 100,
+                    "output": 10,
+                    "cache": { "read": 50, "write": 25 }
+                },
+                "cost": 0
+            })),
+            None,
+            None,
+            None,
+            CostMode::Auto,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry.data.message.usage.input_tokens, 100);
+        assert_eq!(entry.data.message.usage.output_tokens, 10);
+        assert_eq!(entry.data.message.usage.cache_creation_input_tokens, 25);
+        assert_eq!(entry.data.message.usage.cache_read_input_tokens, 50);
+        assert_eq!(entry.model.as_deref(), Some("deepseek-v4-flash-free"));
+        assert_eq!(entry.data.message.provider.as_deref(), Some("opencode"));
+        assert_eq!(entry.data.message.id.as_deref(), Some("message-v2"));
+    }
+
+    #[test]
+    fn v1_top_level_model_fields_win_over_nested_model() {
+        let entry = message_to_entry(
+            &message(json!({
+                "id": "message-both",
+                "providerID": "anthropic",
+                "modelID": "claude-sonnet-4-20250514",
+                "model": { "id": "nested-model", "providerID": "nested-provider" },
+                "time": { "created": 0 },
+                "tokens": { "input": 10, "output": 5 },
+                "cost": 0.01
+            })),
+            None,
+            None,
+            None,
+            CostMode::Auto,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(entry.data.message.provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn drops_v2_record_without_model_identity() {
+        let entry = message_to_entry(
+            &message(json!({
+                "id": "message-nomodel",
+                "sessionID": "session-v2",
+                "time": { "created": 0 },
+                "tokens": { "input": 10, "output": 5 },
+                "cost": 0
+            })),
+            None,
+            None,
+            None,
+            CostMode::Auto,
+            None,
+        );
+        assert!(entry.is_none(), "record without model identity is dropped");
+    }
+
+    #[test]
     fn creates_open_code_provider_and_normalized_model_candidates() {
         assert_eq!(
             open_code_model_candidates("claude-sonnet-4.5", "github-copilot"),
@@ -542,6 +640,7 @@ mod tests {
                 session_id: Some("session-a".to_string()),
                 provider_id: Some("github-copilot".to_string()),
                 model_id: Some("claude-sonnet-4.5".to_string()),
+                model: None,
                 time: Some(OpenCodeTime {
                     created: Some(1767312000000),
                 }),
@@ -569,6 +668,7 @@ mod tests {
                 session_id: None,
                 provider_id: Some("openai".to_string()),
                 model_id: Some("gpt-test".to_string()),
+                model: None,
                 time: Some(OpenCodeTime { created: Some(0) }),
                 tokens: Some(OpenCodeTokens {
                     input: 0,
