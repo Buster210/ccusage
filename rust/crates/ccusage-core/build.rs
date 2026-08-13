@@ -1,5 +1,9 @@
 use std::{env, fs, path::PathBuf};
 
+// Only the flake.lock parsing behind the fetch feature needs these; the included
+// `pricing_compact.rs` fully qualifies its own `serde_json` paths because
+// `pricing.rs` includes it too.
+#[cfg(feature = "fetch-litellm-pricing")]
 use serde_json::{Map, Value};
 
 const FLAKE_LOCK_JSON: &str = "../../../flake.lock";

@@ -2972,15 +2972,13 @@ mod tests {
     struct PricingCacheEnv {
         dir: std::path::PathBuf,
         prev_xdg: Option<std::ffi::OsString>,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: ccusage_test_support::EnvLockGuard,
     }
 
     impl PricingCacheEnv {
         fn new(name: &str) -> Self {
             let guard = ccusage_test_support::test_env_lock();
-            let dir = std::env::temp_dir().join(format!("ccusage-pricing-test-{name}"));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = ccusage_test_support::fresh_temp_dir(&format!("ccusage-pricing-test-{name}"));
             let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
             unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
             Self {

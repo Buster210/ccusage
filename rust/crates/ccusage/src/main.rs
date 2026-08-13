@@ -103,15 +103,14 @@ mod tests {
         cache_dir: std::path::PathBuf,
         prev_config: Option<std::ffi::OsString>,
         prev_cache: Option<std::ffi::OsString>,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: ccusage_test_support::EnvLockGuard,
     }
 
     impl ClaudeEnv {
         fn new(name: &str, config_dir: impl AsRef<std::path::Path>) -> Self {
             let guard = ccusage_test_support::test_env_lock();
-            let cache_dir = env::temp_dir().join(format!("ccusage-main-test-{name}"));
-            let _ = fs::remove_dir_all(&cache_dir);
-            fs::create_dir_all(&cache_dir).unwrap();
+            let cache_dir =
+                ccusage_test_support::fresh_temp_dir(&format!("ccusage-main-test-{name}"));
             let prev_config = env::var_os("CLAUDE_CONFIG_DIR");
             let prev_cache = env::var_os("XDG_CACHE_HOME");
             unsafe { env::set_var("CLAUDE_CONFIG_DIR", config_dir.as_ref()) };
