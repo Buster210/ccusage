@@ -1,8 +1,10 @@
 use std::{
+    cell::RefCell,
     ffi::{OsStr, OsString},
     fs,
+    marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use assert_fs::{
@@ -10,37 +12,108 @@ use assert_fs::{
     fixture::{ChildPath, FileWriteStr, PathChild, PathCreateDir},
 };
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// One lock for every guard that mutates the process-global environment.
+/// Two separate mutexes let a thread holding one call `std::env::set_var` while
+/// a thread holding the other did the same. That races `getenv` in any code
+/// reading the environment concurrently, which is why `set_var` is `unsafe` as
+/// of edition 2024. One lock is what makes the mutation actually exclusive.
+///
+/// Reentrancy below is thread-local, so it does NOT extend to child threads: a
+/// guard taken inside a spawned thread while the parent still holds one blocks
+/// until the parent releases, and deadlocks outright if the parent is joining
+/// that thread. Nothing does this today — `cache.rs`'s
+/// `concurrent_writers_preserve_all_file_rows` holds a `CacheEnv` across a
+/// `thread::scope`, but no closure inside takes a guard. Keep it that way.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+thread_local! {
+    /// Reentrancy depth plus the outermost guard. A single test routinely holds
+    /// a [`CacheEnv`] and an [`EnvVarsGuard`] at once, so nesting on the same
+    /// thread bumps the depth rather than deadlocking on a mutex it already
+    /// owns. `std::sync::ReentrantLock` would do this, but is still unstable.
+    static ENV_DEPTH: RefCell<(usize, Option<MutexGuard<'static, ()>>)> =
+        const { RefCell::new((0, None)) };
 }
 
-/// Shared test lock for `XDG_CACHE_HOME` and `CLAUDE_CONFIG_DIR` isolation.
-/// Cache tests and CLI tests both mutate these env vars and must not run
-/// concurrently. Deliberately not [`ENV_LOCK`]: a test holding a [`CacheEnv`]
-/// still builds `Fixture`/`EnvVarGuard` values, and one non-reentrant mutex for
-/// both would deadlock on the second acquire.
-pub fn test_env_lock() -> MutexGuard<'static, ()> {
-    static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
-    CACHE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
+/// Held for as long as a guard is mutating the process environment.
+/// `PhantomData<*const ()>` keeps it `!Send`, because the depth it decrements is
+/// thread-local and dropping it on another thread would unlock someone else's
+/// nesting. It is `!Sync` too, which the `MutexGuard` it replaced was not, so
+/// every struct holding one (`CacheEnv`, `EnvVarGuard`, `EnvVarsGuard`, and the
+/// two test-local env structs) narrows to `!Sync` as well. Nothing shares these
+/// across threads today; a `&CacheEnv` sent to another thread stops compiling.
+///
+/// `must_use` restores the diagnostic the `MutexGuard` this replaced carried for
+/// free: dropping it on the spot silently unlocks, so an unbound
+/// `test_env_lock();` would leave the environment unguarded and still compile.
+#[must_use = "dropping the guard immediately releases the environment lock"]
+pub struct EnvLockGuard(PhantomData<*const ()>);
+
+impl Drop for EnvLockGuard {
+    fn drop(&mut self) {
+        // `with` panics once the thread-local is destroyed, and a panic inside
+        // drop during an unwind aborts the process. Stack-local guards never hit
+        // that today; `try_with` just declines instead of taking the suite down.
+        let _ = ENV_DEPTH.try_with(|state| {
+            let mut state = state.borrow_mut();
+            state.0 -= 1;
+            if state.0 == 0 {
+                state.1 = None;
+            }
+        });
+    }
+}
+
+pub fn test_env_lock() -> EnvLockGuard {
+    ENV_DEPTH.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.0 == 0 {
+            // A panicking test poisons the mutex; `()` carries no invariant to
+            // protect, so recovering beats failing every later test.
+            state.1 = Some(ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner));
+        }
+        state.0 += 1;
+    });
+    EnvLockGuard(PhantomData)
+}
+
+/// An empty temp dir under `prefix`, one per process.
+///
+/// The pid keeps two cargo processes on one machine (two checkouts, or a test
+/// run alongside a mutation run) off the same directory; [`ENV_MUTEX`] only
+/// orders threads inside one process. Three test-env structs across three
+/// crates need this, so it lives here rather than being pasted into each.
+pub fn fresh_temp_dir(prefix: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        // Failing to clear means inheriting the previous run's cache.db —
+        // ledger rows, WAL and locks included — which does not surface here but
+        // later, as an unrelated test asserting the wrong totals.
+        Err(err) => panic!("stale temp dir {} not cleared: {err}", dir.display()),
+    }
+    fs::create_dir_all(&dir).expect("failed to create temp dir");
+    dir
 }
 
 /// Isolate cache I/O in a temp dir so tests never touch the real cache.
 pub struct CacheEnv {
     dir: PathBuf,
     prev_xdg: Option<OsString>,
-    _guard: MutexGuard<'static, ()>,
+    _guard: EnvLockGuard,
 }
 
 impl CacheEnv {
+    /// The redirected `XDG_CACHE_HOME`, for tests that assert on the cache
+    /// database the loader writes underneath it.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn new(name: &str) -> Self {
         let guard = test_env_lock();
-        let dir = std::env::temp_dir().join(format!("ccusage-cache-test-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = fresh_temp_dir(&format!("ccusage-cache-test-{name}"));
         let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
         unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
         Self {
@@ -64,12 +137,12 @@ impl Drop for CacheEnv {
 pub struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
-    _guard: MutexGuard<'static, ()>,
+    _guard: EnvLockGuard,
 }
 
 impl EnvVarGuard {
     pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let guard = env_lock();
+        let guard = test_env_lock();
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
         Self {
@@ -91,12 +164,12 @@ impl Drop for EnvVarGuard {
 
 pub struct EnvVarsGuard {
     previous: Vec<(&'static str, Option<OsString>)>,
-    _guard: MutexGuard<'static, ()>,
+    _guard: EnvLockGuard,
 }
 
 impl EnvVarsGuard {
     pub fn set_many(vars: impl IntoIterator<Item = (&'static str, Option<OsString>)>) -> Self {
-        let guard = env_lock();
+        let guard = test_env_lock();
         let mut previous = Vec::new();
         for (key, value) in vars {
             previous.push((key, std::env::var_os(key)));
