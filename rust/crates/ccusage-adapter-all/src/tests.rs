@@ -493,7 +493,6 @@ fn multi_section_claude_fixture_matches_standalone_sections_for_daily_and_sessio
         ]
         .join("\n"),
     });
-    let _cache_env = CacheEnv::new("multi_section_claude");
     let _env = isolated_agent_env(
         &fixture,
         "CLAUDE_CONFIG_DIR",
@@ -537,11 +536,15 @@ fn fixture_shared(since: &str, until: &str) -> SharedArgs {
     }
 }
 
+/// Isolates the cache too: `load_rows` is cache-backed, so without an
+/// `XDG_CACHE_HOME` of its own a concurrent test's `CacheEnv` leaks its agents
+/// into this one's detection.
 fn isolated_agent_env(
     fixture: &ccusage_test_support::Fixture,
     source_key: &'static str,
     source_value: OsString,
-) -> EnvVarsGuard {
+) -> (CacheEnv, EnvVarsGuard) {
+    let cache_env = CacheEnv::new(source_key);
     let home = fixture.path("empty-home").into_os_string();
     let xdg_config = fixture.path("empty-xdg-config").into_os_string();
     let mut vars = [
@@ -560,6 +563,7 @@ fn isolated_agent_env(
         "GEMINI_DATA_DIR",
         "KIMI_DATA_DIR",
         "QWEN_DATA_DIR",
+        "GROK_HOME",
     ]
     .into_iter()
     .map(|key| (key, None::<OsString>))
@@ -571,7 +575,38 @@ fn isolated_agent_env(
     ));
     vars.push(("XDG_CONFIG_HOME", Some(xdg_config)));
     vars.push((source_key, Some(source_value)));
-    EnvVarsGuard::set_many(vars)
+    (cache_env, EnvVarsGuard::set_many(vars))
+}
+
+fn assert_unified_rows_use_grok_home(kind: AgentReportKind) {
+    let line = r#"{"timestamp":1750000000,"params":{"sessionId":"sess-grok","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":40,"reasoningTokens":10,"modelUsage":{"grok-4.5-build":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":40,"reasoningTokens":10}}}},"_meta":{"eventId":"evt-grok"}}}"#;
+    let fixture = fs_fixture!({
+        "grok/sessions/proj/sess-grok/updates.jsonl": line,
+    });
+    let _env = isolated_agent_env(&fixture, "GROK_HOME", fixture.path("grok").into_os_string());
+    let shared = fixture_shared("20250615", "20250615");
+
+    let result = loader::load_rows(kind, &shared).unwrap();
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.detected_agents, vec!["grok"]);
+    assert_eq!(
+        result.rows[0].metadata_agents,
+        (kind != AgentReportKind::Session).then_some(vec!["grok"])
+    );
+    assert_eq!(result.rows[0].input_tokens, 60);
+    assert_eq!(result.rows[0].cache_read_tokens, 40);
+    assert_eq!(result.rows[0].output_tokens, 20);
+}
+
+#[test]
+fn unified_daily_rows_use_grok_home() {
+    assert_unified_rows_use_grok_home(AgentReportKind::Daily);
+}
+
+#[test]
+fn unified_session_rows_use_grok_home() {
+    assert_unified_rows_use_grok_home(AgentReportKind::Session);
 }
 
 fn assert_daily_family_and_session_sections_match_standalone(shared: &SharedArgs) {

@@ -30,7 +30,10 @@ in
           hooks = {
             renovate-config-validator = {
               enable = true;
-              entry = "${lib.getExe pkgs.renovate} --strict config-validator";
+              # `renovate config-validator` does not exist as a subcommand, and
+              # `--strict` is only understood by the standalone validator, so the
+              # hook silently failed with "unknown option" whenever it did run.
+              entry = "${pkgs.renovate}/bin/renovate-config-validator --strict";
               files = "renovate\\.json5?$";
               pass_filenames = false;
               stages = [
@@ -63,6 +66,15 @@ in
               always_run = true;
               stages = [ "pre-commit" ];
               priority = 20;
+            };
+            ccusage-commit-scope = {
+              enable = true;
+              name = "commit scope";
+              entry = "${lib.getExe pkgs.nushell} scripts/validate-commit-scope.nu";
+              pass_filenames = true;
+              always_run = true;
+              stages = [ "commit-msg" ];
+              priority = 0;
             };
             ccusage-treefmt-check = {
               enable = true;

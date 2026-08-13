@@ -176,6 +176,7 @@ If ccusage shows no data, check:
    - OpenClaw: `${OPENCLAW_DIR:-~/.openclaw}` (also scans `~/.clawdbot`, `~/.moltbot`, `~/.moldbot`)
    - Qwen: `${QWEN_DATA_DIR:-~/.qwen}`
    - GitHub Copilot CLI: `~/.copilot/otel/*.jsonl` or `COPILOT_OTEL_FILE_EXPORTER_PATH`
+   - Grok Build CLI: `${GROK_HOME:-~/.grok}`
 
 ### Stale or Unexpected Numbers
 
@@ -207,9 +208,10 @@ export KILO_DATA_DIR="/path/to/kilo"
 export KIMI_DATA_DIR="/path/to/kimi"
 export QWEN_DATA_DIR="/path/to/qwen"
 export COPILOT_OTEL_FILE_EXPORTER_PATH="/path/to/copilot-otel.jsonl"
+export GROK_HOME="/path/to/grok-home"
 ```
 
-Each source-specific path variable can also contain comma-separated directories:
+Each source-specific path variable can also contain comma-separated directories, except `GROK_HOME`, which takes a single root:
 
 ```bash
 export CODEX_HOME="/path/to/codex,/archive/codex,/path/to/codex-exec-jsonl"
