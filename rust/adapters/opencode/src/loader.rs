@@ -627,14 +627,38 @@ fn time_created_looks_like_millis(connection: &sqlite::Connection, table: &str) 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use super::load_entries_from_directory;
     use crate::cli::{CostMode, SharedArgs};
     use ccusage_test_support::{CacheEnv, fs_fixture};
 
+    // Unbounded window: the cache and ledger tests are about what survives a
+    // reload, so a date filter would only mask which rows came back.
+    fn display_shared() -> SharedArgs {
+        SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        }
+    }
+
     // Mirrors the real OpenCode schema, where `time_created` repeats the
     // payload's `time.created`, so tests exercise the range push-down.
+    /// Rows a plain scan can still read, for tests that corrupt a DB and need to
+    /// prove the live path actually broke rather than assuming it did.
+    fn raw_message_count(path: &Path) -> usize {
+        let Ok(db) = sqlite::open(path) else { return 0 };
+        let Ok(mut statement) = db.prepare("SELECT id FROM message") else {
+            return 0;
+        };
+        let mut rows = 0;
+        while let Ok(sqlite::State::Row) = statement.next() {
+            rows += 1;
+        }
+        rows
+    }
+
     fn create_db_message(path: &Path, id: &str, session_id: &str, data: &str) {
         let created = serde_json::from_str::<serde_json::Value>(data)
             .ok()
@@ -1555,5 +1579,309 @@ mod tests {
             None
         );
         assert_eq!(super::extract_message_timestamp(r#"{"id":"msg-1"}"#), None);
+    }
+
+    #[test]
+    fn serves_unchanged_row_from_cache_on_second_load() {
+        let env = CacheEnv::new("opencode-row-cache-hit");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":100,"output":50},"cost":0.02}"#,
+        );
+
+        let cold = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert!(
+            env.dir().join("ccusage").join("cache.db").exists(),
+            "row cache should be written to the cache database"
+        );
+        // Assert the row cache itself, not just that some cache file appeared:
+        // the ledger writes the same cache.db, and cold == warm holds trivially
+        // on a plain reparse, so neither one can detect a cache miss.
+        let cached = super::cache::load_opencode_row_cache(&super::cache::cache_key(&db))
+            .expect("row cache must hold the scanned row");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "msg-1");
+
+        let warm = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(cold.len(), warm.len());
+        assert_eq!(cold[0].cost, warm[0].cost);
+        assert_eq!(
+            cold[0].data.message.usage.input_tokens,
+            warm[0].data.message.usage.input_tokens
+        );
+    }
+
+    #[test]
+    fn changed_row_content_invalidates_cache() {
+        let _env = CacheEnv::new("opencode-row-content-change");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100}}"#,
+        );
+
+        let cold = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(cold[0].data.message.usage.input_tokens, 100);
+
+        // Rewrite the row's `data` in place (same id). Only the content hash
+        // catches this; the old `(id, time_updated)` key would serve a stale 100.
+        let conn = sqlite::open(&db).unwrap();
+        conn.execute(
+            r#"UPDATE message SET data = '{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":999}}' WHERE id = 'msg-1'"#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let warm = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(
+            warm[0].data.message.usage.input_tokens, 999,
+            "changed row content must invalidate the cache and reparse"
+        );
+    }
+
+    #[test]
+    fn deleted_database_retains_spend_via_ledger() {
+        let _env = CacheEnv::new("opencode-db-retain");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100}}"#,
+        );
+
+        // Cold load records the DB row's spend in the ledger.
+        let cold = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].data.message.usage.input_tokens, 100);
+
+        // Delete the entire database file — simulates a removed opencode store.
+        fs::remove_file(&db).unwrap();
+
+        // The spend must still be reported, re-emitted from the ledger.
+        let warm = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(
+            warm.len(),
+            1,
+            "deleted DB spend must be retained via the ledger"
+        );
+        assert_eq!(warm[0].data.message.usage.input_tokens, 100);
+    }
+
+    #[test]
+    fn deleted_row_spend_retained_via_ledger() {
+        let _env = CacheEnv::new("opencode-row-cache-delete");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100}}"#,
+        );
+        create_db_message(
+            &db,
+            "msg-2",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":200}}"#,
+        );
+
+        let first = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Delete one row, then reload: its spend must persist via the ledger so
+        // a removed chat never erases the tokens/cost already incurred.
+        let conn = sqlite::open(&db).unwrap();
+        conn.execute("DELETE FROM message WHERE id = 'msg-2'")
+            .unwrap();
+        drop(conn);
+
+        let second = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(second.len(), 2, "deleted row's spend must be retained");
+        let deleted = second
+            .iter()
+            .find(|e| e.data.message.id.as_deref() == Some("msg-2"))
+            .expect("deleted row retained from ledger");
+        assert_eq!(deleted.data.message.usage.input_tokens, 200);
+    }
+
+    #[test]
+    fn loads_distinct_rows_with_same_timestamp() {
+        let _env = CacheEnv::new("opencode-row-same-tick");
+        let cached_ids = |db: &Path| {
+            let mut ids: Vec<_> =
+                super::cache::load_opencode_row_cache(&super::cache::cache_key(db))
+                    .expect("row cache must hold both rows")
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
+            ids.sort();
+            ids
+        };
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        // Two distinct rows sharing an identical time_created value: content-hash
+        // keying must keep both, never collapse them on the shared timestamp.
+        create_db_message_with_time(
+            &db,
+            "msg-1",
+            "session-a",
+            1767312000000,
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100}}"#,
+        );
+        create_db_message_with_time(
+            &db,
+            "msg-2",
+            "session-a",
+            1767312000000,
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":200}}"#,
+        );
+
+        let first = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(first.len(), 2);
+        // The cache is keyed by row id, so assert both ids survived it. Counting
+        // returned entries alone passes with the cache switched off entirely.
+        assert_eq!(cached_ids(&db), ["msg-1", "msg-2"]);
+
+        let second = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(cached_ids(&db), ["msg-1", "msg-2"]);
+    }
+
+    /// Corruption must leave spend untouched — not zeroed, not doubled. The row
+    /// cache and the ledger both re-emit here and produce identical output, so
+    /// this pins the guarantee, not which of the two delivered it.
+    #[test]
+    fn garbage_db_neither_zeroes_nor_doubles_spend() {
+        let _env = CacheEnv::new("opencode-garbage-db");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100,"output":50}}"#,
+        );
+
+        let cold = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].data.message.usage.input_tokens, 100);
+
+        // Replace the DB with garbage — simulates corruption.
+        fs::write(&db, b"not a sqlite database at all").unwrap();
+
+        let warm = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(warm.len(), 1, "garbage DB must not zero or double spend");
+        assert_eq!(warm[0].data.message.usage.input_tokens, 100);
+    }
+
+    /// `live_only` suppresses the ledger's re-emission (`merge_ledger`), leaving
+    /// `fallback_from_cache` as the only thing between a corrupt DB and zeroed
+    /// spend. Every other test here runs with both mechanisms live, so each one
+    /// alone can be disabled without a single failure and neither is really
+    /// covered; this is the case that pins the fallback by itself.
+    #[test]
+    fn live_only_corrupt_db_preserves_spend_without_the_ledger() {
+        let _env = CacheEnv::new("opencode-live-only-corrupt");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100,"output":50}}"#,
+        );
+
+        let shared = SharedArgs {
+            live_only: true,
+            ..display_shared()
+        };
+        let cold = load_entries_from_directory(fixture.root(), &shared).unwrap();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].data.message.usage.input_tokens, 100);
+
+        fs::write(&db, b"not a sqlite database at all").unwrap();
+
+        let warm = load_entries_from_directory(fixture.root(), &shared).unwrap();
+        assert_eq!(
+            warm.len(),
+            1,
+            "ledger suppressed, so the row-cache fallback alone must hold spend"
+        );
+        assert_eq!(warm[0].data.message.usage.input_tokens, 100);
+    }
+
+    /// A DB that opens and prepares but fails during iteration takes the
+    /// `!completed` path, which skips the cache save and re-emits what was
+    /// already stored. Like the garbage-DB case, the cache and the ledger
+    /// produce the same output, so this pins the full set coming back rather
+    /// than a truncated one — not which mechanism returned it.
+    /// SQLite is resilient to page-level damage and may return Done instead of
+    /// Err on a truncated file, so the corruption here is aggressive (zeroed
+    /// data pages) to actually reach the step error.
+    #[test]
+    fn mid_scan_error_neither_zeroes_nor_truncates_spend() {
+        let _env = CacheEnv::new("opencode-mid-scan-error");
+        let fixture = fs_fixture!({});
+        let db = fixture.path("opencode.db");
+
+        // Two messages spanning separate data pages.
+        create_db_message(
+            &db,
+            "msg-1",
+            "session-a",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000000},"tokens":{"input":100,"output":50}}"#,
+        );
+        create_db_message(
+            &db,
+            "msg-2",
+            "session-b",
+            r#"{"providerID":"anthropic","modelID":"m","time":{"created":1767312000001},"tokens":{"input":200,"output":100}}"#,
+        );
+
+        let cold = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        assert_eq!(cold.len(), 2, "cold run must return both messages");
+
+        // Corrupt the DB: keep header + first page (schema), zero remaining
+        // pages so iteration hits I/O or corruption errors.
+        let mut contents = fs::read(&db).unwrap();
+        let page_size = 4096;
+        assert!(
+            contents.len() > page_size,
+            "fixture DB is {} bytes, so zeroing past the first page corrupts \
+             nothing and the warm assertion below would prove nothing",
+            contents.len()
+        );
+        for byte in &mut contents[page_size..] {
+            *byte = 0;
+        }
+        fs::write(&db, &contents).unwrap();
+
+        // SQLite tolerates a lot of page damage. Without this the corruption may
+        // leave the DB fully readable, the warm load is then a plain reparse,
+        // and `warm.len() == 2` passes with the cache and ledger both switched
+        // off — exactly the vacuous test this one is meant not to be.
+        let live_rows = raw_message_count(&db);
+        assert!(
+            live_rows < 2,
+            "corruption left {live_rows} rows readable, so the live scan never \
+             failed and the warm assertion is vacuous"
+        );
+
+        let warm = load_entries_from_directory(fixture.root(), &display_shared()).unwrap();
+        // Must return the full cached set, not a truncated subset.
+        assert_eq!(
+            warm.len(),
+            2,
+            "mid-scan error must not clobber cache or truncate return"
+        );
     }
 }
