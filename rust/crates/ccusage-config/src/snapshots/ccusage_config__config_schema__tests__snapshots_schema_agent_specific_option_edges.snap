@@ -17,7 +17,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Percentage threshold for low context warning.",
         "format": "uint64",
         "markdownDescription": "Percentage threshold for low context warning.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "contextMediumThreshold": {
@@ -25,7 +25,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Percentage threshold for medium context warning.",
         "format": "uint64",
         "markdownDescription": "Percentage threshold for medium context warning.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "costSource": {
@@ -77,7 +77,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Statusline refresh interval in seconds.",
         "format": "uint64",
         "markdownDescription": "Statusline refresh interval in seconds.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "timezone": {
@@ -132,7 +132,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -218,7 +218,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -310,7 +310,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -403,7 +403,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -483,7 +483,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -576,7 +576,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -650,7 +650,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -741,7 +741,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -820,7 +820,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -913,7 +913,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -987,7 +987,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "jq": {
@@ -1078,7 +1078,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {
@@ -1152,7 +1152,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
         "description": "Number of sample discrepancies to show in debug output.",
         "format": "uint",
         "markdownDescription": "Number of sample discrepancies to show in debug output.",
-        "minimum": 0.0,
+        "minimum": 0,
         "type": "integer"
       },
       "instances": {
@@ -1243,7 +1243,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
             },
             "maxInputTokens": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             },
             "outputCostPerToken": {

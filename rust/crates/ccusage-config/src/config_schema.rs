@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use schemars::{JsonSchema, r#gen::SchemaSettings};
+use schemars::{JsonSchema, generate::SchemaSettings};
 
 pub const NAMED_PI_STORE_NAME_PATTERN: &str = "^[a-z][a-z0-9_-]{0,31}$";
 
@@ -669,11 +669,55 @@ impl OpenClawOptions {
     }
 }
 
+/// schemars 1.x dropped the `option_add_null_type` setting, so every `Option<T>` now
+/// emits an explicit null branch. Stripping it back out keeps the published schema
+/// byte-stable for editors already validating against the 0.8 output.
+#[derive(Clone, Debug)]
+struct StripNull;
+
+impl schemars::transform::Transform for StripNull {
+    fn transform(&mut self, schema: &mut schemars::Schema) {
+        // Depth-first, so a subschema is already null-free when its parent merges it up.
+        schemars::transform::transform_subschemas(self, schema);
+        let Some(obj) = schema.as_object_mut() else {
+            return;
+        };
+        if let Some(Value::Array(any_of)) = obj.get("anyOf")
+            && any_of.len() == 2
+            && let Some(pos) = any_of
+                .iter()
+                .position(|entry| entry == &json!({"type": "null"}))
+            && let Some(Value::Object(mut other)) = any_of.get(1 - pos).cloned()
+        {
+            obj.remove("anyOf");
+            // Field-level keywords (description, default) outrank the referenced type's.
+            for (key, value) in std::mem::take(obj) {
+                other.insert(key, value);
+            }
+            *obj = other;
+        }
+        // ponytail: stripping null empties these only for a null-only field (`Option<()>`),
+        // which no config option uses. An empty `type`/`enum` would reject every value
+        // silently, so add a guard here if such a field ever appears.
+        if let Some(Value::Array(types)) = obj.get_mut("type") {
+            types.retain(|entry| entry != "null");
+            if types.len() == 1
+                && let Some(Value::String(single)) = types.pop()
+            {
+                obj.insert("type".to_string(), Value::String(single));
+            }
+        }
+        if let Some(Value::Array(enum_values)) = obj.get_mut("enum") {
+            enum_values.retain(|entry| !entry.is_null());
+        }
+    }
+}
+
 pub fn generate_config_schema_json() -> String {
     let generator = SchemaSettings::draft07()
         .with(|settings| {
-            settings.meta_schema = Some("https://json-schema.org/draft-07/schema#".to_string());
-            settings.option_add_null_type = false;
+            settings.meta_schema = Some("https://json-schema.org/draft-07/schema#".into());
+            settings.transforms.push(Box::new(StripNull));
         })
         .into_generator();
     let mut schema =
