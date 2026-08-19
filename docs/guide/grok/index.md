@@ -51,12 +51,17 @@ Only rows with `sessionUpdate == "turn_completed"` and a usable usage breakdown 
 
 These views support `--json`, `--compact`, `--mode`, and `--offline`.
 
+Focused terminal tables omit the `Cache Create` column when the selected Grok
+rows report no cache-creation tokens. The column reappears when selected rows
+contain a non-zero value; [JSON output](/guide/json-output) keeps
+`cacheCreationTokens` in the stable report schema either way.
+
 ## What Gets Calculated
 
 - **Token usage** - Grok records OpenAI-style usage where `inputTokens` includes cache. ccusage splits it into uncached input, cache read (`cachedReadTokens`) and cache write (`cacheCreationTokens`), and stores the full `outputTokens` as output.
 - **Reasoning tokens** - `reasoningTokens` are a subset of `outputTokens`, so they are already counted in the total. They are **not** added on top of output for either tokens or cost.
 - **Precomputed cost** - Grok records `costUsdTicks` on each completed turn, in units of 1e-10 USD. ccusage uses it as the invoice cost, so `display` and the default `auto` report exactly what Grok billed.
-- **Pricing** - `calculate`, and `auto` for turns that recorded no ticks, fall back to LiteLLM estimates. Model ids such as `grok-4.5-build` try candidates with the trailing `-build` stripped and `xai/` / `x-ai/` prefixes. A `turn_completed` row aggregates several API requests, so this fallback cannot reproduce Grok's per-request long-context tiering and only approximates the invoice.
+- **Pricing** - `calculate`, and `auto` for turns that recorded no ticks, fall back to table estimates. Model ids such as `grok-4.5-build` try candidates with the trailing `-build` stripped and `xai/` / `x-ai/` prefixes, exact matches first. xAI's long-context rates apply when a turn's whole context — fresh input plus cache reads and writes — exceeds the model's boundary (200K for `grok-4.5` and `grok-4.6`). A `turn_completed` row aggregates several API requests, so the tier is chosen per turn rather than per request and the estimate only approximates the invoice.
 - **Model labels** - Display form is the raw `modelUsage` key (e.g. `grok-4.5-build`). The Agent column identifies the Grok source in unified reports.
 
 ## Environment Variables
@@ -96,7 +101,7 @@ Ensure completed turns exist under `~/.grok/sessions/**/updates.jsonl`. In-progr
 :::
 
 ::: details Costs showing as $0.00
-Turns written before Grok started recording `costUsdTicks` carry no cost, so `display` shows zero for them. Use `--mode calculate` to price those from LiteLLM instead. If a model is missing from pricing, the cost stays at zero and a missing-pricing warning may appear.
+Turns written before Grok started recording `costUsdTicks` carry no cost, so `display` shows zero for them. Use `--mode calculate` to price those from the pricing tables instead. If a model is missing from pricing, the cost stays at zero and a missing-pricing warning may appear.
 :::
 
 ::: details Totals lower than expected while a turn is open

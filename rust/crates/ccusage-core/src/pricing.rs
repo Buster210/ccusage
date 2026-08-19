@@ -9,12 +9,45 @@ use ccusage_cli::PricingOverride;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::fast::FxHashMap;
+use crate::fast::{FxHashMap, FxHashSet};
 
-const BUILD_TIME_PRICING_JSON: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/litellm-pricing.json"));
-const BUILD_TIME_MODELS_DEV_JSON: &str = include_str!("models-dev-pricing.json");
+// The embedded snapshots ship deflated - the models.dev one alone would
+// otherwise add a quarter megabyte of JSON to the binary - and are inflated
+// once, on first use, by the accessors below.
+const BUILD_TIME_PRICING_DEFLATE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/litellm-pricing.json.deflate"));
+const BUILD_TIME_MODELS_DEV_DEFLATE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/models-dev-pricing.json.deflate"));
+const MODELS_DEV_CATALOG_RULES_DEFLATE: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/models-dev-catalog-rules.json.deflate"
+));
 const FAST_MULTIPLIER_OVERRIDES_JSON: &str = include_str!("fast-multiplier-overrides.json");
+
+/// Inflate one of the deflated snapshots above. Infallible by construction:
+/// build.rs produced the bytes from JSON it had just serialized.
+fn inflate_snapshot(cell: &'static OnceLock<String>, deflated: &[u8]) -> &'static str {
+    cell.get_or_init(|| {
+        let bytes = miniz_oxide::inflate::decompress_to_vec(deflated)
+            .expect("inflate embedded pricing snapshot");
+        String::from_utf8(bytes).expect("embedded pricing snapshot is UTF-8")
+    })
+}
+
+fn build_time_pricing_json() -> &'static str {
+    static JSON: OnceLock<String> = OnceLock::new();
+    inflate_snapshot(&JSON, BUILD_TIME_PRICING_DEFLATE)
+}
+
+fn build_time_models_dev_json() -> &'static str {
+    static JSON: OnceLock<String> = OnceLock::new();
+    inflate_snapshot(&JSON, BUILD_TIME_MODELS_DEV_DEFLATE)
+}
+
+fn models_dev_catalog_rules_json() -> &'static str {
+    static JSON: OnceLock<String> = OnceLock::new();
+    inflate_snapshot(&JSON, MODELS_DEV_CATALOG_RULES_DEFLATE)
+}
 const LITELLM_PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
@@ -147,6 +180,9 @@ pub struct Pricing {
     pub(crate) cache_create: f64,
     pub cache_read: f64,
     pub cache_read_explicit: bool,
+    /// Whether `cache_create` came from published data rather than the derived
+    /// `input * 1.25` default, so provider-fact patches know what they may fix.
+    cache_create_explicit: bool,
     pub input_above_200k: Option<f64>,
     pub output_above_200k: Option<f64>,
     pub(crate) cache_create_above_200k: Option<f64>,
@@ -162,11 +198,6 @@ pub struct Pricing {
 /// Default tier boundary for LiteLLM `*_above_200k_tokens` pricing fields.
 pub(crate) const DEFAULT_LONG_CONTEXT_THRESHOLD_TOKENS: u64 = 200_000;
 
-/// OpenAI long-context pricing boundary: requests with more than 272K input
-/// tokens (GPT-5's maximum short-context input size) are billed at
-/// long-context rates.
-const OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS: u64 = 272_000;
-
 impl Pricing {
     const fn empty() -> Self {
         Self {
@@ -175,6 +206,7 @@ impl Pricing {
             cache_create: 0.0,
             cache_read: 0.0,
             cache_read_explicit: false,
+            cache_create_explicit: false,
             input_above_200k: None,
             output_above_200k: None,
             cache_create_above_200k: None,
@@ -185,9 +217,24 @@ impl Pricing {
     }
 }
 
+/// Whether a lookup may fall back to the fuzzy scan, or has to answer from
+/// exact entries because a fuzzy match would shadow an exact-only id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fuzzy {
+    Allowed,
+    Denied,
+}
+
 #[derive(Debug)]
 pub struct PricingMap {
     entries: FxHashMap<String, Pricing>,
+    /// Entries that only a request recording that exact id may use.
+    ///
+    /// A separately priced tier such as `kimi-k2.7-code-highspeed` is the right
+    /// rate only for a request that names it. Left in the fuzzy scan it wins over
+    /// the base model, because that scan prefers the longest matching key, so
+    /// `kimi-k2-7-code` would be billed at the premium tier.
+    exact_only: ExactOnlyKeys,
     context_limits: FxHashMap<String, u64>,
     enable_models_dev_fallback: bool,
     enable_embedded_models_dev_fallback: bool,
@@ -201,10 +248,92 @@ pub struct PricingMap {
     find_cache: std::sync::RwLock<(u64, FxHashMap<String, Option<Pricing>>)>,
 }
 
+/// The ids of [`PricingMap::exact_only`], indexed both as written and under the
+/// separator-normalized spelling `pricing_key_matches` compares.
+///
+/// The gate that keeps a request naming an exact-only id off the fuzzy scan has
+/// to recognize the same spellings that scan does, or `claude-opus-5@eu` written
+/// as `claude-opus-5-eu` passes the gate and is billed at the base model's rate,
+/// which is exactly what marking the id exact-only was meant to prevent. That
+/// spelling names the tier, so it resolves to it rather than losing its rate.
+#[derive(Debug, Default)]
+struct ExactOnlyKeys {
+    raw: FxHashSet<String>,
+    /// Every id under its normalized spelling, mapped back to the id it names.
+    /// An id spelled with dashes alone is indexed too, or a request writing it
+    /// with `.` or `@` would answer neither membership question; `None` marks a
+    /// spelling two exact-only ids share, which therefore names neither on its
+    /// own.
+    normalized: FxHashMap<String, Option<String>>,
+}
+
+impl ExactOnlyKeys {
+    fn insert(&mut self, key: String) {
+        self.normalized
+            .entry(normalized_pricing_key(&key).into_owned())
+            .and_modify(|named| {
+                if named.as_deref() != Some(key.as_str()) {
+                    *named = None;
+                }
+            })
+            .or_insert_with(|| Some(key.clone()));
+        self.raw.insert(key);
+    }
+
+    fn remove(&mut self, key: &str) {
+        if !self.raw.remove(key) {
+            return;
+        }
+        let normalized = normalized_pricing_key(key).into_owned();
+        // Another id can share the normalized spelling, and dropping it while
+        // that id is still exact-only would reopen the gate for both.
+        let mut sharing = self
+            .raw
+            .iter()
+            .filter(|other| normalized_pricing_key(other) == normalized);
+        let only = sharing.next().cloned();
+        let shared = sharing.next().is_some();
+        match only {
+            None => {
+                self.normalized.remove(&normalized);
+            }
+            Some(only) => {
+                self.normalized
+                    .insert(normalized, (!shared).then_some(only));
+            }
+        }
+    }
+
+    /// Whether the id is exact-only as written, the question the fuzzy scan asks
+    /// of its own candidate keys.
+    fn contains(&self, key: &str) -> bool {
+        self.raw.contains(key)
+    }
+
+    /// Whether the id is any spelling of an exact-only id, the question a
+    /// requested model name has to answer before it may be fuzzy-matched.
+    fn contains_any_spelling(&self, key: &str) -> bool {
+        self.raw.contains(key)
+            || self
+                .normalized
+                .contains_key(normalized_pricing_key(key).as_ref())
+    }
+
+    /// The exact-only id an alternate separator spelling names, if exactly one
+    /// does. The fuzzy scan already treats those spellings as one id, so this
+    /// only decides which entry answers, not whether they match.
+    fn id_spelled_by(&self, key: &str) -> Option<&str> {
+        self.normalized
+            .get(normalized_pricing_key(key).as_ref())?
+            .as_deref()
+    }
+}
+
 impl Default for PricingMap {
     fn default() -> Self {
         Self {
             entries: FxHashMap::default(),
+            exact_only: ExactOnlyKeys::default(),
             context_limits: FxHashMap::default(),
             enable_models_dev_fallback: false,
             enable_embedded_models_dev_fallback: false,
@@ -248,7 +377,213 @@ struct CompactLiteLlmPricing {
 
 #[derive(Debug, Deserialize)]
 struct ModelsDevProvider {
+    /// models.dev sets this to the catalog's directory name, which is also the
+    /// key it is filed under. The generator reads `provider.id ?? providerId`, so
+    /// prefer it here too rather than relying on the two agreeing.
+    id: Option<String>,
     models: FxHashMap<String, ModelsDevModel>,
+}
+
+/// The selection rules for reading a live models.dev response, generated from
+/// the pinned catalog by `just gen-models-dev-pricing`.
+///
+/// models.dev repeats every model once per catalog that serves it, and reseller
+/// catalogs carry their own promotions, markups, and looser descriptions. The
+/// live `api.json` records neither who authored a model nor the authored
+/// modalities, so both have to be carried in from generation time; without them
+/// the online path would make different decisions than the embedded snapshot.
+///
+/// The artifact also carries the tiers each author prices itself, which the
+/// generator's own rules use; the loader has no decision left that distinguishes
+/// them, so the field is simply not read here.
+#[derive(Debug, Deserialize)]
+struct ModelsDevCatalogRules {
+    /// Catalogs of the providers that author models.
+    owners: FxHashSet<String>,
+    /// Cloud platforms that resell at list price plus a published regional
+    /// premium, and the only source of platform-specific model ids.
+    platforms: FxHashSet<String>,
+    /// Every model the authored catalog lists. One that is absent from
+    /// `asset_priced_model_ids` is authored as token-priced, which settles it
+    /// whatever the catalog serving it claims.
+    #[serde(rename = "authoredModelIds")]
+    authored_model_ids: FxHashSet<String>,
+    /// Models the authored catalog prices per asset - per second of audio, per
+    /// generated image - rather than per token.
+    #[serde(rename = "assetPricedModelIds")]
+    asset_priced_model_ids: FxHashSet<String>,
+    /// `authored_model_ids` normalized the way `normalizeModelId` normalizes them,
+    /// for the prefix comparison the tier check makes. Derived after parsing
+    /// rather than carried, because it is the same data spelled differently.
+    #[serde(skip)]
+    normalized_authored_model_ids: Vec<String>,
+}
+
+/// How strong one catalog's claim on a model id is.
+///
+/// Ordered exactly as `shouldReplaceModelsDevPricingCandidate` compares
+/// candidates at generation time - trust first, then a long-context band, then
+/// cache-read, cache-write and context-limit presence - so the online path
+/// resolves the same catalog the committed snapshot did. `derive(PartialOrd)`
+/// compares the fields in declaration order, which is that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ModelsDevClaim {
+    trust: u8,
+    has_long_context_tier: bool,
+    has_cache_read: bool,
+    has_cache_write: bool,
+    has_context_limit: bool,
+}
+
+/// The spelling and strength under which a model id was claimed this pass.
+#[derive(Debug, Clone)]
+struct ModelsDevClaimSlot {
+    claim: ModelsDevClaim,
+    stored_id: String,
+    /// The declared id of the catalog that claimed it, and the source key it
+    /// claimed under: generation breaks exact-strength ties by
+    /// `(sourceProviderId, sourceModelId)`, and two catalogs can declare the
+    /// same provider id.
+    provider_id: String,
+    source_key: String,
+}
+
+/// Trust tiers, matching the generator's.
+const MODELS_DEV_TRUST_OWNER: u8 = 3;
+const MODELS_DEV_TRUST_PLATFORM: u8 = 2;
+const MODELS_DEV_TRUST_RESELLER: u8 = 1;
+
+impl ModelsDevCatalogRules {
+    fn rank(&self, provider_id: &str) -> u8 {
+        if self.owners.contains(provider_id) {
+            return MODELS_DEV_TRUST_OWNER;
+        }
+        if self.platforms.contains(provider_id) {
+            return MODELS_DEV_TRUST_PLATFORM;
+        }
+        MODELS_DEV_TRUST_RESELLER
+    }
+
+    /// Whether only a request naming this id exactly may use its rates, the
+    /// verdict the generator records as `exactOnly` on the embedded snapshot.
+    ///
+    /// A live models.dev response carries no such field, so the online refresh
+    /// has to reach the same verdict from the same rules or the fuzzy lookup
+    /// would resolve a premium tier for the base model it shadows.
+    ///
+    /// The tier check reads the catalog's own key, as generation does, while the
+    /// unversioned check reads the pricing key the entry resolves to, because
+    /// that is the key the fuzzy scan would offer as a candidate.
+    fn is_exact_only(&self, source_model_id: &str, pricing_key: &str) -> bool {
+        self.is_tier_variant_of_authored_model(source_model_id)
+            || is_unversioned_models_dev_model_id(pricing_key)
+    }
+
+    /// Whether an id names a separately priced tier of a model the catalog also
+    /// carries under its base id, such as `kimi-k2.6-nitro`, `glm-5.2-flex` or
+    /// `claude-opus-5-fast`, following `isTierVariantOfAuthoredModel` with its
+    /// `includeAuthorPricedModes` option: the shadowing hazard does not care who
+    /// set the rate.
+    ///
+    /// Only bare ids qualify: an id carrying a provider path is that gateway's
+    /// addressing of a model rather than a distinct tier of it, and it has to
+    /// stay fuzzy-reachable so the gateway's own tier spellings still resolve.
+    fn is_tier_variant_of_authored_model(&self, source_model_id: &str) -> bool {
+        if source_model_id.contains('/') {
+            return false;
+        }
+        let normalized = normalized_models_dev_model_id(source_model_id);
+        self.normalized_authored_model_ids.iter().any(|authored| {
+            normalized
+                .strip_prefix(authored.as_str())
+                .is_some_and(|rest| rest.starts_with('-'))
+        })
+    }
+
+    /// Whether the embedded `input` and `output` rates mean per-token rates.
+    ///
+    /// The authored catalog decides both ways where it knows the model: a
+    /// reseller describing an image model as text-only must not let a per-image
+    /// rate through, and one describing a token-priced model as image-output
+    /// must not drop a model the snapshot carries. Only models the authored
+    /// catalog never listed fall back to the serving catalog's own modalities.
+    ///
+    /// `source_model_id` is the catalog's own key for the model, the same id
+    /// `isTokenPricedModel` is given at generation time, because that is what
+    /// `assetPricedModelIds` records - not the pricing key the entry's `id`
+    /// field may resolve to.
+    fn is_token_priced(
+        &self,
+        source_model_id: &str,
+        modalities: Option<&ModelsDevModalities>,
+    ) -> bool {
+        // The artifact lists are normalized, so a catalog spelling the model
+        // with different separators or case still gets the authored verdict.
+        let normalized = normalized_models_dev_model_id(source_model_id);
+        if self.asset_priced_model_ids.contains(normalized.as_ref()) {
+            return false;
+        }
+        if self.authored_model_ids.contains(normalized.as_ref()) {
+            return true;
+        }
+        let Some(modalities) = modalities else {
+            return true;
+        };
+        // An absent list says nothing about the model, so it reads as plain text
+        // rather than disqualifying the entry. An explicitly empty one is not
+        // text, which is how `isTokenPricedModel` reads it too: it defaults only
+        // a missing list to `['text']`.
+        let text_only_output = match modalities.output.as_deref() {
+            None => true,
+            Some([single]) => single == "text",
+            Some(_) => false,
+        };
+        let accepts_text = match modalities.input.as_deref() {
+            None => true,
+            Some(input) => input.iter().any(|modality| modality == "text"),
+        };
+        text_only_output && accepts_text
+    }
+}
+
+/// Model ids are spelled with dots, dashes or an `@` regional suffix for the
+/// same model, as `normalizeModelId` reads them. Missing `@` here left Vertex
+/// ids such as `claude-opus-5@eu` unrecognized as tiers of the model they
+/// shadow, which the snapshot marks exact-only.
+fn normalized_models_dev_model_id(model_id: &str) -> Cow<'_, str> {
+    if model_id
+        .bytes()
+        .any(|byte| byte == b'.' || byte == b'@' || byte.is_ascii_uppercase())
+    {
+        Cow::Owned(model_id.to_lowercase().replace(['.', '@'], "-"))
+    } else {
+        Cow::Borrowed(model_id)
+    }
+}
+
+/// Whether an id names no particular model, as `isUnversionedModelId` reads it.
+///
+/// A model id nearly always carries a version, so an id with no digit at all is
+/// a family or a routing label - models.dev publishes one called `auto` - and it
+/// is short enough to be a substring of ids it has nothing to do with.
+fn is_unversioned_models_dev_model_id(model_id: &str) -> bool {
+    !model_id.bytes().any(|byte| byte.is_ascii_digit())
+}
+
+fn models_dev_catalog_rules() -> &'static ModelsDevCatalogRules {
+    static RULES: OnceLock<ModelsDevCatalogRules> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let mut rules: ModelsDevCatalogRules =
+            serde_json::from_str(models_dev_catalog_rules_json())
+                .expect("parse embedded models-dev-catalog-rules.json");
+        rules.normalized_authored_model_ids = rules
+            .authored_model_ids
+            .iter()
+            .map(|model_id| normalized_models_dev_model_id(model_id).into_owned())
+            .collect();
+        rules.normalized_authored_model_ids.sort();
+        rules
+    })
 }
 
 #[derive(Debug)]
@@ -304,6 +639,17 @@ struct ModelsDevModel {
     id: Option<String>,
     cost: Option<ModelsDevCost>,
     limit: Option<ModelsDevLimit>,
+    modalities: Option<ModelsDevModalities>,
+    /// Set by the snapshot generator on separately priced tiers, which are only
+    /// the right rate for a request that names them.
+    #[serde(rename = "exactOnly")]
+    exact_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsDevModalities {
+    input: Option<Vec<String>>,
+    output: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +658,60 @@ struct ModelsDevCost {
     output: Option<f64>,
     cache_read: Option<f64>,
     cache_write: Option<f64>,
+    /// Above-base rate bands. The embedded snapshot keeps the upstream shape, so
+    /// this reads a live `api.json` response and the snapshot alike.
+    tiers: Option<Vec<ModelsDevCostTier>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsDevCostTier {
+    input: Option<f64>,
+    output: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+    tier: Option<ModelsDevTierBound>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsDevTierBound {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    size: Option<u64>,
+}
+
+impl ModelsDevCost {
+    /// The band a request crosses first, in per-token rates.
+    ///
+    /// `Pricing` holds one above-base band, so the lowest context threshold wins:
+    /// a handful of models publish a second, higher one, and dropping the lower
+    /// would price everything between the two thresholds at the base rate.
+    /// Bands keyed by anything but context are skipped, because the runtime
+    /// compares the threshold against an input-token count.
+    fn long_context_tier(&self) -> Option<LongContextRates> {
+        self.tiers
+            .as_deref()?
+            .iter()
+            .filter_map(|tier| {
+                let bound = tier.tier.as_ref()?;
+                if bound.kind.as_deref() != Some("context") {
+                    return None;
+                }
+                let threshold = bound.size.filter(|size| *size > 0)?;
+                Some(LongContextRates {
+                    threshold,
+                    input: tier.input.map(per_token),
+                    output: tier.output.map(per_token),
+                    cache_create: tier.cache_write.map(per_token),
+                    cache_read: tier.cache_read.map(per_token),
+                })
+            })
+            .min_by_key(|rates| rates.threshold)
+    }
+}
+
+/// models.dev publishes rates per million tokens; everything else here is per token.
+fn per_token(per_million: f64) -> f64 {
+    per_million / 1_000_000.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,9 +755,9 @@ impl PricingMap {
     pub fn load_embedded() -> Self {
         let mut map = Self::default();
         let fast_multiplier_overrides = FastMultiplierOverrides::load();
-        map.load_json_with_overrides(BUILD_TIME_PRICING_JSON, &fast_multiplier_overrides);
+        map.load_json_with_overrides(build_time_pricing_json(), &fast_multiplier_overrides);
         map.put_builtin_pricing(&fast_multiplier_overrides);
-        map.apply_builtin_long_context_rates();
+        map.fill_long_context_rates_from_models_dev();
         // Resolve models that LiteLLM and the built-in table miss from the
         // embedded models.dev snapshot. This works offline, unlike the network
         // source gated by `enable_models_dev_fallback`.
@@ -397,7 +797,7 @@ impl PricingMap {
         // A live LiteLLM refresh replaces whole entries, so re-apply the
         // built-in long-context rates it does not publish before user
         // overrides get the final word.
-        map.apply_builtin_long_context_rates();
+        map.fill_long_context_rates_from_models_dev();
         map.enable_models_dev_fallback = !offline;
         map.apply_overrides(overrides);
         map
@@ -429,6 +829,7 @@ impl PricingMap {
             };
             let context_limit = pricing.max_input_tokens;
             let cache_read_explicit = pricing.cache_read_input_token_cost.is_some();
+            let cache_create_explicit = pricing.cache_creation_input_token_cost.is_some();
             let fast_multiplier = pricing
                 .provider_specific_entry
                 .and_then(|entry| entry.fast)
@@ -444,6 +845,7 @@ impl PricingMap {
                         .unwrap_or(input * 1.25),
                     cache_read: pricing.cache_read_input_token_cost.unwrap_or(input * 0.1),
                     cache_read_explicit,
+                    cache_create_explicit,
                     input_above_200k: pricing.input_cost_per_token_above_200k_tokens,
                     output_above_200k: pricing.output_cost_per_token_above_200k_tokens,
                     cache_create_above_200k: pricing
@@ -465,19 +867,115 @@ impl PricingMap {
     fn load_models_dev_json_missing(&mut self, json: &str) -> Option<usize> {
         let raw = parse_models_dev_json(json)?;
         Some(match raw {
-            ModelsDevJson::Providers(providers) => providers
-                .into_values()
-                .map(|provider| self.load_models_dev_models(provider.models))
-                .sum(),
-            ModelsDevJson::Models(models) => self.load_models_dev_models(models),
+            ModelsDevJson::Providers(providers) => {
+                let rules = models_dev_catalog_rules();
+                let mut ranked: Vec<_> = providers.into_iter().collect();
+                // The most trustworthy catalog has to be loaded first, because it
+                // claims the model id. Sorting by id within a tier keeps the
+                // result from depending on hash iteration order.
+                let provider_id = |key: &String, provider: &ModelsDevProvider| {
+                    provider.id.clone().unwrap_or_else(|| key.clone())
+                };
+                ranked.sort_by(|(left_key, left), (right_key, right)| {
+                    let left_id = provider_id(left_key, left);
+                    let right_id = provider_id(right_key, right);
+                    rules
+                        .rank(&right_id)
+                        .cmp(&rules.rank(&left_id))
+                        .then_with(|| left_id.cmp(&right_id))
+                        // Two catalogs can declare the same id; the map key is
+                        // unique, so it settles the order the way generation's
+                        // provider-key walk does.
+                        .then_with(|| left_key.cmp(right_key))
+                });
+                // Within one tier the generator prefers the entry carrying more
+                // pricing detail, so track what claimed each id to make the same
+                // choice here rather than keeping whichever came first.
+                let mut claims: FxHashMap<String, ModelsDevClaimSlot> = FxHashMap::default();
+                ranked
+                    .into_iter()
+                    .map(|(provider_key, provider)| {
+                        let provider_id = provider.id.unwrap_or(provider_key);
+                        let trust = rules.rank(&provider_id);
+                        // A live catalog is the raw upstream shape, so none of
+                        // generation's verdicts are recorded in it.
+                        self.load_models_dev_models(
+                            provider.models,
+                            &provider_id,
+                            trust,
+                            true,
+                            &mut claims,
+                        )
+                    })
+                    .sum()
+            }
+            ModelsDevJson::Models(models) => {
+                let mut claims = FxHashMap::default();
+                // A flat map is the generated snapshot, which carries its
+                // verdicts as fields rather than leaving them to be rederived.
+                // The flat snapshot has one implicit source, so any constant id
+                // works: ties inside it are settled by the source keys.
+                self.load_models_dev_models(models, "", MODELS_DEV_TRUST_OWNER, false, &mut claims)
+            }
         })
     }
 
-    fn load_models_dev_models(&mut self, models: FxHashMap<String, ModelsDevModel>) -> usize {
+    /// Load the entries of one provider catalog.
+    ///
+    /// `claims` records the claim strength of whichever catalog supplied each
+    /// model id so far in this pass, so a better candidate can replace a weaker
+    /// one. Ids absent from it belong to another pricing source and are left
+    /// alone.
+    ///
+    /// `derive_exact_only` recomputes the generator's `exactOnly` verdict for
+    /// payloads that do not carry it, which is every live models.dev response.
+    fn load_models_dev_models(
+        &mut self,
+        models: FxHashMap<String, ModelsDevModel>,
+        provider_id: &str,
+        trust: u8,
+        derive_exact_only: bool,
+        claims: &mut FxHashMap<String, ModelsDevClaimSlot>,
+    ) -> usize {
+        let rules = models_dev_catalog_rules();
         let mut loaded_count = 0;
-        for (model_key, model) in models {
-            let model_id = model.id.unwrap_or(model_key);
-            if self.entries.contains_key(&model_id) {
+        // Two source keys in one catalog can resolve to the same model id, and the
+        // generator walks each catalog in key order, so match that instead of
+        // depending on hash iteration order.
+        let mut sources: Vec<_> = models.into_iter().collect();
+        sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (model_key, model) in sources {
+            // Asked of the catalog's source key rather than the pricing key it
+            // resolves to, because generation asks that way: an authored
+            // asset-priced model served under a different `id` would otherwise
+            // slip past and bill per-image or per-second rates as per-token ones.
+            // It is generation's only remaining gate, so the online refresh
+            // carries the same ids the snapshot does.
+            if !rules.is_token_priced(&model_key, model.modalities.as_ref()) {
+                continue;
+            }
+            // Same reason: the tier half of the verdict reads the source key,
+            // before it is resolved away.
+            let declared_id = model.id.as_deref().filter(|id| !id.is_empty());
+            let exact_only = model.exact_only.unwrap_or_else(|| {
+                derive_exact_only
+                    && rules.is_exact_only(&model_key, declared_id.unwrap_or(&model_key))
+            });
+            let source_key = model_key;
+            // An empty declared id falls back to the source key, exactly as the
+            // generator's `selectModelsDevPricingKey` does: keeping "" would
+            // store the model under a name no lookup ever asks for.
+            let model_id = match model.id.filter(|id| !id.is_empty()) {
+                Some(id) => id,
+                None => source_key.clone(),
+            };
+            // Dotted, dashed and case spellings name one model, so they contend
+            // for one slot; kept apart, the fuzzy lookup ties between a tiered
+            // spelling and a reseller's flat one and can pick either. Normalized
+            // exactly as the generator normalizes, case folding included.
+            let normalized_id = normalized_models_dev_model_id(&model_id).into_owned();
+            let claimed = claims.get(&normalized_id).cloned();
+            if claimed.is_none() && self.entries.contains_key(&model_id) {
                 continue;
             }
             let Some(cost) = model.cost else {
@@ -489,9 +987,50 @@ impl PricingMap {
             let Some(output) = cost.output else {
                 continue;
             };
+            // Flat-fee subscription catalogs such as `kimi-for-coding` publish
+            // all-zero token costs, which would report every request as free.
+            if input == 0.0 && output == 0.0 {
+                continue;
+            }
+            let context_limit = model.limit.and_then(|limit| limit.context);
+            let long_context = cost.long_context_tier();
+            let claim = ModelsDevClaim {
+                trust,
+                has_long_context_tier: long_context.is_some(),
+                has_cache_read: cost.cache_read.is_some(),
+                has_cache_write: cost.cache_write.is_some(),
+                has_context_limit: context_limit.is_some(),
+            };
+            let replaces_equal_claim = |previous: &ModelsDevClaimSlot| {
+                // Generation compares equal-strength candidates by
+                // `(sourceProviderId, sourceModelId)`, smaller first. Providers
+                // load here in ascending declared-id order, so a differing
+                // declared id is already settled by arrival; only a collision
+                // falls through to the source keys.
+                previous.claim == claim
+                    && previous.provider_id == provider_id
+                    && source_key < previous.source_key
+            };
+            if claimed.as_ref().is_some_and(|claimed| {
+                claimed.claim > claim || (claimed.claim == claim && !replaces_equal_claim(claimed))
+            }) {
+                continue;
+            }
+            // A replacement under a different spelling supersedes the losing
+            // spelling's entry entirely, or both would stay findable and the
+            // fuzzy tie would return.
+            if let Some(previous) = claimed
+                .as_ref()
+                .filter(|previous| previous.stored_id != model_id)
+            {
+                self.entries.remove(&previous.stored_id);
+                self.exact_only.remove(&previous.stored_id);
+                self.context_limits.remove(&previous.stored_id);
+            }
             let input = input / 1_000_000.0;
             let output = output / 1_000_000.0;
             let cache_read_explicit = cost.cache_read.is_some();
+            let cache_create_explicit = cost.cache_write.is_some();
             self.entries.insert(
                 model_id.clone(),
                 Pricing {
@@ -506,18 +1045,47 @@ impl PricingMap {
                         .map(|value| value / 1_000_000.0)
                         .unwrap_or(input * 0.1),
                     cache_read_explicit,
-                    input_above_200k: None,
-                    output_above_200k: None,
-                    cache_create_above_200k: None,
-                    cache_read_above_200k: None,
-                    long_context_threshold: None,
+                    cache_create_explicit,
+                    input_above_200k: long_context.and_then(|rates| rates.input),
+                    output_above_200k: long_context.and_then(|rates| rates.output),
+                    cache_create_above_200k: long_context.and_then(|rates| rates.cache_create),
+                    cache_read_above_200k: long_context.and_then(|rates| rates.cache_read),
+                    long_context_threshold: long_context.map(|rates| rates.threshold),
                     fast_multiplier: 1.0,
                 },
             );
-            if let Some(context_limit) = model.limit.and_then(|limit| limit.context) {
-                self.context_limits.insert(model_id, context_limit);
+            if exact_only {
+                self.exact_only.insert(model_id.clone());
+            } else {
+                self.exact_only.remove(&model_id);
             }
-            loaded_count += 1;
+            match context_limit {
+                Some(context_limit) => {
+                    self.context_limits.insert(model_id.clone(), context_limit);
+                }
+                // A replacement that publishes no limit must not keep the limit of
+                // the catalog it replaced.
+                None if claimed.is_some() => {
+                    self.context_limits.remove(&model_id);
+                }
+                None => {}
+            }
+            // Replacing a weaker claim is not a new model, so it must not count
+            // twice: the count is how many models the payload resolved.
+            if claims
+                .insert(
+                    normalized_id,
+                    ModelsDevClaimSlot {
+                        claim,
+                        stored_id: model_id,
+                        provider_id: provider_id.to_string(),
+                        source_key,
+                    },
+                )
+                .is_none()
+            {
+                loaded_count += 1;
+            }
         }
         self.clear_find_cache();
         loaded_count
@@ -550,17 +1118,19 @@ impl PricingMap {
     fn find_uncached(&self, model: &str) -> Option<Pricing> {
         let alias = crate::model_aliases::resolve_model_name(model);
         let resolved_alias = alias.as_ref();
-        self.find_entry_or_alias(model)
+        let fuzzy = self.allows_fuzzy_lookup(model, resolved_alias);
+        self.find_entry_or_alias(model, fuzzy)
             .or_else(|| {
                 (resolved_alias != model)
-                    .then(|| self.find_entry_or_alias(resolved_alias))
+                    .then(|| self.find_entry_or_alias(resolved_alias, Fuzzy::Allowed))
                     .flatten()
             })
             .or_else(|| {
                 self.enable_models_dev_fallback
                     .then(|| {
-                        models_dev_pricing()
-                            .and_then(|pricing| pricing.find_entry_or_alias(resolved_alias))
+                        models_dev_pricing().and_then(|pricing| {
+                            pricing.find_entry_or_alias(resolved_alias, Fuzzy::Allowed)
+                        })
                     })
                     .flatten()
             })
@@ -569,7 +1139,10 @@ impl PricingMap {
             // fuzzy alias matching. It works offline, unlike the network source.
             .or_else(|| {
                 self.enable_embedded_models_dev_fallback
-                    .then(|| embedded_models_dev_pricing().find_entry_or_alias(resolved_alias))
+                    .then(|| {
+                        embedded_models_dev_pricing()
+                            .find_entry_or_alias(resolved_alias, Fuzzy::Allowed)
+                    })
                     .flatten()
             })
     }
@@ -578,19 +1151,28 @@ impl PricingMap {
         self.entries.get(model).copied()
     }
 
-    fn find_entry_or_alias(&self, model: &str) -> Option<Pricing> {
+    fn find_entry_or_alias(&self, model: &str, fuzzy: Fuzzy) -> Option<Pricing> {
         self.entries
             .get(model)
             .copied()
-            .or_else(|| pricing_alias(model).and_then(|alias| self.find_entry(alias)))
-            .or_else(|| self.find_entry(model))
+            .or_else(|| pricing_alias(model).and_then(|alias| self.find_entry(alias, fuzzy)))
+            .or_else(|| self.find_entry(model, fuzzy))
     }
 
-    fn find_entry(&self, model: &str) -> Option<Pricing> {
+    fn find_entry(&self, model: &str, fuzzy: Fuzzy) -> Option<Pricing> {
         self.entries.get(model).copied().or_else(|| {
+            // A separator spelling of an exact-only id names that entry, so it
+            // is answered from it rather than gated into a miss below.
+            if let Some(id) = self.exact_only.id_spelled_by(model) {
+                return self.entries.get(id).copied();
+            }
+            if fuzzy == Fuzzy::Denied || self.is_exact_only_lookup(model) {
+                return None;
+            }
             let normalized_model = normalized_pricing_key(model);
             self.entries
                 .iter()
+                .filter(|(candidate, _)| !self.exact_only.contains(candidate.as_str()))
                 .filter(|(candidate, _)| {
                     pricing_key_matches(candidate, model, normalized_model.as_ref())
                 })
@@ -601,20 +1183,63 @@ impl PricingMap {
         })
     }
 
+    /// Whether `model` names an entry that only an exact request may use, which
+    /// is the other half of the `exact_only` rule: such a key must not be
+    /// answered by a fuzzy match on a different model either, or the tier it
+    /// names is unreachable and the base model's rate is billed for it.
+    ///
+    /// The check has to reach past this map because the embedded models.dev
+    /// snapshot is a separate map consulted only after the primary one misses:
+    /// `claude-opus-5-fast` would otherwise fuzzy-match LiteLLM's
+    /// `claude-opus-5` here and never reach the snapshot's tier entry. Only a
+    /// carried entry gates the scan, so a key nothing prices exactly still falls
+    /// back to fuzzy matching rather than losing its rate.
+    ///
+    /// The network catalog is deliberately not consulted: reading it would fetch
+    /// models.dev before the primary lookup has even missed, and it is generated
+    /// from the same rules as the snapshot the check already reads.
+    /// Membership is asked of every spelling of the id, not just the one the
+    /// catalog wrote: the fuzzy scan the gate protects matches `.`, `@` and `-`
+    /// interchangeably, so `claude-opus-5-eu` reaches the base model's entry
+    /// just as `claude-opus-5@eu` would and has to be gated with it.
+    fn is_exact_only_lookup(&self, model: &str) -> bool {
+        self.exact_only.contains_any_spelling(model)
+            || (self.enable_embedded_models_dev_fallback
+                && embedded_models_dev_pricing()
+                    .exact_only
+                    .contains_any_spelling(model))
+    }
+
+    /// Whether the spelling a lookup recorded may be fuzzy-matched at all.
+    ///
+    /// A `CCUSAGE_MODEL_ALIASES` entry pointing at an exact-only id is tried
+    /// only after this map has answered for the recorded spelling, so a spelling
+    /// that fuzzy-matches some other model - `claude-opus-5-turbo` aliased to
+    /// `claude-opus-5-fast` matches LiteLLM's `claude-opus-5` - would be billed
+    /// at that model's rate and never reach the tier the alias names. Exact
+    /// entries for the recorded spelling still win, as they do without an alias.
+    fn allows_fuzzy_lookup(&self, model: &str, resolved_alias: &str) -> Fuzzy {
+        if resolved_alias != model && self.is_exact_only_lookup(resolved_alias) {
+            return Fuzzy::Denied;
+        }
+        Fuzzy::Allowed
+    }
+
     pub fn context_limit(&self, model: &str) -> Option<u64> {
         let alias = crate::model_aliases::resolve_model_name(model);
         let resolved_alias = alias.as_ref();
-        self.context_limit_entry_or_alias(model)
+        let fuzzy = self.allows_fuzzy_lookup(model, resolved_alias);
+        self.context_limit_entry_or_alias(model, fuzzy)
             .or_else(|| {
                 (resolved_alias != model)
-                    .then(|| self.context_limit_entry_or_alias(resolved_alias))
+                    .then(|| self.context_limit_entry_or_alias(resolved_alias, Fuzzy::Allowed))
                     .flatten()
             })
             .or_else(|| {
                 self.enable_models_dev_fallback
                     .then(|| {
                         models_dev_pricing().and_then(|pricing| {
-                            pricing.context_limit_entry_or_alias(resolved_alias)
+                            pricing.context_limit_entry_or_alias(resolved_alias, Fuzzy::Allowed)
                         })
                     })
                     .flatten()
@@ -622,25 +1247,35 @@ impl PricingMap {
             .or_else(|| {
                 self.enable_embedded_models_dev_fallback
                     .then(|| {
-                        embedded_models_dev_pricing().context_limit_entry_or_alias(resolved_alias)
+                        embedded_models_dev_pricing()
+                            .context_limit_entry_or_alias(resolved_alias, Fuzzy::Allowed)
                     })
                     .flatten()
             })
     }
 
-    fn context_limit_entry_or_alias(&self, model: &str) -> Option<u64> {
+    fn context_limit_entry_or_alias(&self, model: &str, fuzzy: Fuzzy) -> Option<u64> {
         self.context_limits
             .get(model)
             .copied()
-            .or_else(|| pricing_alias(model).and_then(|alias| self.context_limit_entry(alias)))
-            .or_else(|| self.context_limit_entry(model))
+            .or_else(|| {
+                pricing_alias(model).and_then(|alias| self.context_limit_entry(alias, fuzzy))
+            })
+            .or_else(|| self.context_limit_entry(model, fuzzy))
     }
 
-    fn context_limit_entry(&self, model: &str) -> Option<u64> {
+    fn context_limit_entry(&self, model: &str, fuzzy: Fuzzy) -> Option<u64> {
         self.context_limits.get(model).copied().or_else(|| {
+            if let Some(id) = self.exact_only.id_spelled_by(model) {
+                return self.context_limits.get(id).copied();
+            }
+            if fuzzy == Fuzzy::Denied || self.is_exact_only_lookup(model) {
+                return None;
+            }
             let normalized_model = normalized_pricing_key(model);
             self.context_limits
                 .iter()
+                .filter(|(candidate, _)| !self.exact_only.contains(candidate.as_str()))
                 .filter(|(candidate, _)| {
                     pricing_key_matches(candidate, model, normalized_model.as_ref())
                 })
@@ -731,6 +1366,8 @@ impl PricingMap {
             cache_read,
             cache_read_explicit: override_value.cache_read_input_token_cost.is_some()
                 || base.cache_read_explicit,
+            cache_create_explicit: override_value.cache_creation_input_token_cost.is_some()
+                || base.cache_create_explicit,
             input_above_200k: override_value
                 .input_cost_per_token_above_200k_tokens
                 .or(base.input_above_200k),
@@ -768,14 +1405,18 @@ impl PricingMap {
     }
 
     /// Fills in long-context tier rates for models whose upstream pricing
-    /// entries only carry the flat rates. Runs after every pricing load
-    /// (embedded and live) because LiteLLM refreshes replace whole entries.
-    /// Entries that already carry any tier rate are left untouched so
-    /// upstream data wins once it exists. The check is deliberately
-    /// all-or-nothing rather than per field: upstream `*_above_200k_tokens`
-    /// values assume the 200K boundary, so mixing them with built-in rates
-    /// that assume the OpenAI 272K boundary would price both tiers wrong.
-    fn apply_builtin_long_context_rates(&mut self) {
+    /// entries only carry the flat rates, from the embedded models.dev
+    /// snapshot's `cost.tiers`. LiteLLM publishes no long-context rates for
+    /// OpenAI or xAI at all, so without this every request above the boundary
+    /// is billed at the base rate. Runs after every pricing load (embedded and
+    /// live) because LiteLLM refreshes replace whole entries.
+    ///
+    /// Entries that already carry any tier rate are left untouched so upstream
+    /// data wins once it exists. The check is deliberately all-or-nothing
+    /// rather than per field: each source's rates assume that source's own
+    /// boundary, so mixing fields across sources would price both tiers wrong.
+    fn fill_long_context_rates_from_models_dev(&mut self) {
+        let tiers = embedded_models_dev_pricing();
         for (model, pricing) in &mut self.entries {
             if pricing.input_above_200k.is_some()
                 || pricing.output_above_200k.is_some()
@@ -784,20 +1425,65 @@ impl PricingMap {
             {
                 continue;
             }
-            let Some(rates) = builtin_long_context_rates(model_without_date_suffix(model)) else {
+            // Only exact ids are consulted (after date-suffix and alias
+            // resolution): a fuzzy match here could graft one model's tier onto
+            // another's base rates.
+            let base = model_without_date_suffix(model);
+            let resolved = pricing_alias(base).unwrap_or(base);
+            let Some(source) = tiers
+                .entries
+                .get(resolved)
+                .or_else(|| tiers.entries.get(base))
+            else {
                 continue;
             };
-            pricing.input_above_200k = rates.input;
-            pricing.output_above_200k = rates.output;
-            pricing.cache_create_above_200k = rates.cache_create;
-            pricing.cache_read_above_200k = rates.cache_read;
-            pricing.long_context_threshold = Some(rates.threshold);
+            if source.long_context_threshold.is_none() {
+                continue;
+            }
+            pricing.input_above_200k = source.input_above_200k;
+            pricing.output_above_200k = source.output_above_200k;
+            pricing.cache_create_above_200k = source.cache_create_above_200k;
+            pricing.cache_read_above_200k = source.cache_read_above_200k;
+            pricing.long_context_threshold = source.long_context_threshold;
         }
         self.clear_find_cache();
     }
 
+    fn put_builtin_entry(&mut self, model: String, pricing: Pricing) {
+        self.entries.entry(model).or_insert(pricing);
+    }
+
+    /// z.ai's catalog needs one provider fact LiteLLM does not publish: GLM
+    /// bills no cache writes, and its cache reads have their own rate. Base
+    /// rates stay whatever the loaded snapshot says - overwriting them froze
+    /// stale prices before - and only the cache fields are patched, and only
+    /// when the snapshot did not publish them itself.
+    fn put_builtin_glm(&mut self, model: &str, pricing: Pricing) {
+        match self.entries.entry(model.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                if !existing.cache_read_explicit {
+                    existing.cache_read = pricing.cache_read;
+                    existing.cache_read_explicit = true;
+                }
+                if !existing.cache_create_explicit {
+                    existing.cache_create = pricing.cache_create;
+                    existing.cache_create_explicit = true;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(pricing);
+            }
+        }
+    }
+
+    /// Last-resort rates for models ccusage must always price, used only when
+    /// the loaded snapshots miss the key: upstream data is refreshed hourly,
+    /// so overwriting it with these frozen numbers would reintroduce stale
+    /// prices whenever a vendor changes theirs (OpenAI cut the gpt-5.6 rates
+    /// after these were written).
     fn put_builtin_pricing(&mut self, fast_multiplier_overrides: &FastMultiplierOverrides) {
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-opus-4-5".to_string(),
             Pricing {
                 input: 5e-6,
@@ -805,6 +1491,7 @@ impl PricingMap {
                 cache_create: 6.25e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -813,7 +1500,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-opus-4-6".to_string(),
             Pricing {
                 input: 5e-6,
@@ -821,6 +1508,7 @@ impl PricingMap {
                 cache_create: 6.25e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -831,7 +1519,7 @@ impl PricingMap {
                     .unwrap_or(1.0),
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-opus-4-7".to_string(),
             Pricing {
                 input: 5e-6,
@@ -839,6 +1527,7 @@ impl PricingMap {
                 cache_create: 6.25e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -849,7 +1538,7 @@ impl PricingMap {
                     .unwrap_or(1.0),
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-opus-4-8".to_string(),
             Pricing {
                 input: 5e-6,
@@ -857,6 +1546,7 @@ impl PricingMap {
                 cache_create: 6.25e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -867,7 +1557,7 @@ impl PricingMap {
                     .unwrap_or(1.0),
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-haiku-4-5".to_string(),
             Pricing {
                 input: 1e-6,
@@ -875,6 +1565,7 @@ impl PricingMap {
                 cache_create: 1.25e-6,
                 cache_read: 0.1e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -883,7 +1574,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-opus-4".to_string(),
             Pricing {
                 input: 15e-6,
@@ -891,6 +1582,7 @@ impl PricingMap {
                 cache_create: 18.75e-6,
                 cache_read: 1.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -899,7 +1591,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-sonnet-4-6".to_string(),
             Pricing {
                 input: 3e-6,
@@ -907,6 +1599,7 @@ impl PricingMap {
                 cache_create: 3.75e-6,
                 cache_read: 0.3e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -915,7 +1608,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-sonnet-4".to_string(),
             Pricing {
                 input: 3e-6,
@@ -923,6 +1616,7 @@ impl PricingMap {
                 cache_create: 3.75e-6,
                 cache_read: 0.3e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: Some(6e-6),
                 output_above_200k: Some(22.5e-6),
                 cache_create_above_200k: Some(7.5e-6),
@@ -937,6 +1631,7 @@ impl PricingMap {
             cache_create: 1.0e-6,
             cache_read: 0.08e-6,
             cache_read_explicit: true,
+            cache_create_explicit: true,
             input_above_200k: None,
             output_above_200k: None,
             cache_create_above_200k: None,
@@ -944,11 +1639,9 @@ impl PricingMap {
             long_context_threshold: None,
             fast_multiplier: 1.0,
         };
-        self.entries
-            .insert("claude-3-5-haiku".to_string(), claude_3_5_haiku);
-        self.entries
-            .insert("claude-3-5-haiku-20241022".to_string(), claude_3_5_haiku);
-        self.entries.insert(
+        self.put_builtin_entry("claude-3-5-haiku".to_string(), claude_3_5_haiku);
+        self.put_builtin_entry("claude-3-5-haiku-20241022".to_string(), claude_3_5_haiku);
+        self.put_builtin_entry(
             "claude-3-opus".to_string(),
             Pricing {
                 input: 15e-6,
@@ -956,6 +1649,7 @@ impl PricingMap {
                 cache_create: 18.75e-6,
                 cache_read: 1.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -964,7 +1658,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-3-sonnet".to_string(),
             Pricing {
                 input: 3e-6,
@@ -972,6 +1666,7 @@ impl PricingMap {
                 cache_create: 3.75e-6,
                 cache_read: 0.3e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -980,7 +1675,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "claude-3-haiku".to_string(),
             Pricing {
                 input: 0.25e-6,
@@ -988,6 +1683,7 @@ impl PricingMap {
                 cache_create: 0.3e-6,
                 cache_read: 0.03e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -996,7 +1692,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5".to_string(),
             Pricing {
                 input: 1.25e-6,
@@ -1004,6 +1700,7 @@ impl PricingMap {
                 cache_create: 1.25e-6,
                 cache_read: 0.125e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1012,7 +1709,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5.5".to_string(),
             Pricing {
                 input: 5e-6,
@@ -1020,6 +1717,7 @@ impl PricingMap {
                 cache_create: 5e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1030,7 +1728,7 @@ impl PricingMap {
                     .unwrap_or(1.0),
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "grok-4.3".to_string(),
             Pricing {
                 input: 1.25e-6,
@@ -1038,6 +1736,7 @@ impl PricingMap {
                 cache_create: 1.25e-6,
                 cache_read: 0.125e-6,
                 cache_read_explicit: false,
+                cache_create_explicit: false,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1047,7 +1746,7 @@ impl PricingMap {
             },
         );
         // Source: https://platform.kimi.ai/docs/pricing/chat-k25
-        self.entries.insert(
+        self.put_builtin_entry(
             "moonshot/kimi-k2.5".to_string(),
             Pricing {
                 input: 0.6e-6,
@@ -1055,6 +1754,7 @@ impl PricingMap {
                 cache_create: 0.75e-6,
                 cache_read: 0.1e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1064,7 +1764,7 @@ impl PricingMap {
             },
         );
         // Source: https://platform.kimi.ai/docs/pricing/chat-k26
-        self.entries.insert(
+        self.put_builtin_entry(
             "moonshot/kimi-k2.6".to_string(),
             Pricing {
                 input: 0.95e-6,
@@ -1072,6 +1772,7 @@ impl PricingMap {
                 cache_create: 1.1875e-6,
                 cache_read: 0.16e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1086,6 +1787,7 @@ impl PricingMap {
             cache_create: 1.25e-6,
             cache_read: 0.125e-6,
             cache_read_explicit: true,
+            cache_create_explicit: true,
             input_above_200k: None,
             output_above_200k: None,
             cache_create_above_200k: None,
@@ -1093,7 +1795,7 @@ impl PricingMap {
             long_context_threshold: None,
             fast_multiplier: 1.0,
         };
-        self.entries.insert("gpt-5.1".to_string(), gpt_5_1_pricing);
+        self.put_builtin_entry("gpt-5.1".to_string(), gpt_5_1_pricing);
         self.entries
             .insert("gpt-5.1-codex".to_string(), gpt_5_1_pricing);
         let gpt_5_codex_pricing = Pricing {
@@ -1102,6 +1804,7 @@ impl PricingMap {
             cache_create: 1.75e-6,
             cache_read: 0.175e-6,
             cache_read_explicit: true,
+            cache_create_explicit: true,
             input_above_200k: None,
             output_above_200k: None,
             cache_create_above_200k: None,
@@ -1111,7 +1814,7 @@ impl PricingMap {
         };
         self.entries
             .insert("gpt-5.2-codex".to_string(), gpt_5_codex_pricing);
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5.3-codex".to_string(),
             Pricing {
                 fast_multiplier: fast_multiplier_overrides
@@ -1122,7 +1825,7 @@ impl PricingMap {
         );
         self.entries
             .insert("gpt-5.2".to_string(), gpt_5_codex_pricing);
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5.4".to_string(),
             Pricing {
                 input: 2.5e-6,
@@ -1130,6 +1833,7 @@ impl PricingMap {
                 cache_create: 2.5e-6,
                 cache_read: 0.25e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1140,7 +1844,7 @@ impl PricingMap {
                     .unwrap_or(1.0),
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5.4-mini".to_string(),
             Pricing {
                 input: 0.75e-6,
@@ -1148,6 +1852,7 @@ impl PricingMap {
                 cache_create: 0.75e-6,
                 cache_read: 0.075e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1156,7 +1861,7 @@ impl PricingMap {
                 fast_multiplier: 1.0,
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "gpt-5.4-nano".to_string(),
             Pricing {
                 input: 0.2e-6,
@@ -1164,6 +1869,7 @@ impl PricingMap {
                 cache_create: 0.2e-6,
                 cache_read: 0.02e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -1173,14 +1879,15 @@ impl PricingMap {
             },
         );
         // Source: https://platform.openai.com/docs/pricing (Standard tier,
-        // short context). The long-context tier rates live in
-        // `builtin_long_context_rates`, which runs after every pricing load.
+        // short context). The long-context tier rates come from the embedded
+        // models.dev snapshot via `fill_long_context_rates_from_models_dev`,
+        // which runs after every pricing load.
         for (model, input, output, cache_create, cache_read) in [
             ("gpt-5.6-sol", 5e-6, 30e-6, 6.25e-6, 0.5e-6),
             ("gpt-5.6-terra", 2.5e-6, 15e-6, 3.125e-6, 0.25e-6),
             ("gpt-5.6-luna", 1e-6, 6e-6, 1.25e-6, 0.1e-6),
         ] {
-            self.entries.insert(
+            self.put_builtin_entry(
                 model.to_string(),
                 Pricing {
                     input,
@@ -1188,6 +1895,7 @@ impl PricingMap {
                     cache_create,
                     cache_read,
                     cache_read_explicit: true,
+                    cache_create_explicit: true,
                     input_above_200k: None,
                     output_above_200k: None,
                     cache_create_above_200k: None,
@@ -1206,6 +1914,7 @@ impl PricingMap {
             cache_create: 0.0,
             cache_read,
             cache_read_explicit: true,
+            cache_create_explicit: true,
             input_above_200k: None,
             output_above_200k: None,
             cache_create_above_200k: None,
@@ -1214,33 +1923,17 @@ impl PricingMap {
             fast_multiplier: 1.0,
         };
         let glm_base = glm_pricing(0.6e-6, 2.2e-6, 0.11e-6);
-        self.entries.insert("glm-4.5".to_string(), glm_base);
-        self.entries.insert("zai/glm-4.5".to_string(), glm_base);
-        self.entries.insert(
-            "zai/glm-4.5-x".to_string(),
-            glm_pricing(2.2e-6, 8.9e-6, 0.45e-6),
-        );
-        self.entries.insert(
-            "zai/glm-4.5-air".to_string(),
-            glm_pricing(0.2e-6, 1.1e-6, 0.03e-6),
-        );
-        self.entries.insert(
-            "zai/glm-4.5-airx".to_string(),
-            glm_pricing(1.1e-6, 4.5e-6, 0.22e-6),
-        );
-        self.entries.insert(
-            "zai/glm-4.5v".to_string(),
-            glm_pricing(0.6e-6, 1.8e-6, 0.11e-6),
-        );
-        self.entries.insert(
-            "zai/glm-4-32b-0414-128k".to_string(),
-            glm_pricing(0.1e-6, 0.1e-6, 0.0),
-        );
-        self.entries
-            .insert("zai/glm-4.5-flash".to_string(), glm_pricing(0.0, 0.0, 0.0));
-        self.entries.insert("glm-4.6".to_string(), glm_base);
-        self.entries.insert("glm-4.7".to_string(), glm_base);
-        self.entries.insert(
+        self.put_builtin_glm("glm-4.5", glm_base);
+        self.put_builtin_glm("zai/glm-4.5", glm_base);
+        self.put_builtin_glm("zai/glm-4.5-x", glm_pricing(2.2e-6, 8.9e-6, 0.45e-6));
+        self.put_builtin_glm("zai/glm-4.5-air", glm_pricing(0.2e-6, 1.1e-6, 0.03e-6));
+        self.put_builtin_glm("zai/glm-4.5-airx", glm_pricing(1.1e-6, 4.5e-6, 0.22e-6));
+        self.put_builtin_glm("zai/glm-4.5v", glm_pricing(0.6e-6, 1.8e-6, 0.11e-6));
+        self.put_builtin_glm("zai/glm-4-32b-0414-128k", glm_pricing(0.1e-6, 0.1e-6, 0.0));
+        self.put_builtin_glm("zai/glm-4.5-flash", glm_pricing(0.0, 0.0, 0.0));
+        self.put_builtin_glm("glm-4.6", glm_base);
+        self.put_builtin_glm("glm-4.7", glm_base);
+        self.put_builtin_entry(
             "glm-5".to_string(),
             Pricing {
                 input: 1.0e-6,
@@ -1249,7 +1942,7 @@ impl PricingMap {
                 ..glm_base
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "glm-5-turbo".to_string(),
             Pricing {
                 input: 1.2e-6,
@@ -1258,7 +1951,7 @@ impl PricingMap {
                 ..glm_base
             },
         );
-        self.entries.insert(
+        self.put_builtin_entry(
             "glm-5.1".to_string(),
             Pricing {
                 input: 1.4e-6,
@@ -1438,8 +2131,9 @@ fn normalized_pricing_key(value: &str) -> Cow<'_, str> {
     }
 }
 
-/// Long-context tier rates (per token) for a base model, applied on top of
-/// loaded pricing entries by `apply_builtin_long_context_rates`.
+/// Long-context tier rates (per token) for a base model, parsed from a
+/// models.dev `cost.tiers` band and applied on top of loaded pricing entries
+/// by `fill_long_context_rates_from_models_dev`.
 #[derive(Clone, Copy)]
 struct LongContextRates {
     threshold: u64,
@@ -1449,49 +2143,23 @@ struct LongContextRates {
     cache_read: Option<f64>,
 }
 
-/// Built-in two-stage rates that upstream pricing sources do not publish.
-/// Source: https://platform.openai.com/docs/pricing (Standard tier); OpenAI
-/// bills requests with more than 272K input tokens at long-context rates.
-fn builtin_long_context_rates(base_model: &str) -> Option<LongContextRates> {
-    let openai = |input: f64, output: f64, cache_create: Option<f64>, cache_read: Option<f64>| {
-        LongContextRates {
-            threshold: OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
-            input: Some(input),
-            output: Some(output),
-            cache_create,
-            cache_read,
-        }
-    };
-    // A default family alias bills at the variant it points to, so it must pick
-    // up that variant's tier rates. Upstream pricing data publishes the alias as
-    // its own entry without long-context rates, which would otherwise leave the
-    // alias on flat pricing.
-    let base_model = pricing_alias(base_model).unwrap_or(base_model);
-    match base_model {
-        "gpt-5.6-sol" => Some(openai(10e-6, 45e-6, Some(12.5e-6), Some(1e-6))),
-        "gpt-5.6-terra" => Some(openai(5e-6, 22.5e-6, Some(6.25e-6), Some(0.5e-6))),
-        "gpt-5.6-luna" => Some(openai(2e-6, 9e-6, Some(2.5e-6), Some(0.2e-6))),
-        // gpt-5.5 and gpt-5.4 have no separate cache-write price, so cache
-        // writes are billed as regular input in both tiers.
-        "gpt-5.5" => Some(openai(10e-6, 45e-6, Some(10e-6), Some(1e-6))),
-        "gpt-5.4" => Some(openai(5e-6, 22.5e-6, Some(5e-6), Some(0.5e-6))),
-        // The pro models have no prompt-caching prices, so only the input and
-        // output rates change in the long-context tier.
-        "gpt-5.5-pro" | "gpt-5.4-pro" => Some(openai(60e-6, 270e-6, None, None)),
-        _ => None,
-    }
-}
-
 /// Input-token boundary above which a request is billed at a model's
 /// long-context tier. Codex aggregates per-model token sums before pricing is
 /// applied, so each request's tier must be decided during aggregation from the
-/// model's own threshold rather than a single global constant. This returns the
-/// same value `apply_builtin_long_context_rates` stamps onto
-/// `Pricing::long_context_threshold`, and falls back to the default 200K
+/// model's own threshold rather than a single global constant. The boundary
+/// comes from the embedded models.dev snapshot's `cost.tiers` - the same data
+/// `fill_long_context_rates_from_models_dev` stamps onto
+/// `Pricing::long_context_threshold` - and falls back to the default 200K
 /// boundary used for LiteLLM `*_above_200k_tokens` data.
 pub fn long_context_split_threshold(model: &str) -> u64 {
-    builtin_long_context_rates(model_without_date_suffix(model))
-        .map(|rates| rates.threshold)
+    let tiers = embedded_models_dev_pricing();
+    let base = model_without_date_suffix(model);
+    let resolved = pricing_alias(base).unwrap_or(base);
+    tiers
+        .entries
+        .get(resolved)
+        .or_else(|| tiers.entries.get(base))
+        .and_then(|pricing| pricing.long_context_threshold)
         .unwrap_or(DEFAULT_LONG_CONTEXT_THRESHOLD_TOKENS)
 }
 
@@ -1558,7 +2226,7 @@ fn embedded_models_dev_pricing() -> &'static PricingMap {
     static EMBEDDED_MODELS_DEV_PRICING: OnceLock<PricingMap> = OnceLock::new();
     EMBEDDED_MODELS_DEV_PRICING.get_or_init(|| {
         let mut map = PricingMap::default();
-        map.load_models_dev_json_missing(BUILD_TIME_MODELS_DEV_JSON)
+        map.load_models_dev_json_missing(build_time_models_dev_json())
             .expect("embedded models-dev-pricing.json must parse");
         map
     })
@@ -1624,7 +2292,7 @@ fn fetch_json_url(url: &str) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILD_TIME_MODELS_DEV_JSON, BUILD_TIME_PRICING_JSON, Pricing, PricingMap,
+        Fuzzy, Pricing, PricingMap, build_time_models_dev_json, build_time_pricing_json,
         embedded_models_dev_pricing, long_context_split_threshold, model_without_date_suffix,
     };
     use ccusage_test_support::fs_fixture;
@@ -1668,6 +2336,158 @@ mod tests {
         assert!(kimi_k26.cache_read_explicit);
         assert_eq!(pricing.context_limit("moonshot/kimi-k2.5"), Some(262_144));
         assert_eq!(pricing.context_limit("moonshot/kimi-k2.6"), Some(262_144));
+    }
+
+    #[test]
+    fn offline_prices_models_outside_the_claude_and_moonshot_families() {
+        // The snapshot used to be filtered by a model-name pattern, so families
+        // nobody had added to it were unpriced offline even when models.dev
+        // published them and LiteLLM did not.
+        let pricing = PricingMap::load_embedded();
+        let grok_build = pricing
+            .find("grok-build-0.1")
+            .expect("embedded models.dev should include xAI pricing");
+
+        // Compared per million tokens, which is how models.dev publishes rates.
+        assert!((grok_build.input * 1e6 - 1.0).abs() < 1e-9);
+        assert!((grok_build.output * 1e6 - 2.0).abs() < 1e-9);
+        assert_eq!(pricing.context_limit("grok-build-0.1"), Some(256_000));
+    }
+
+    #[test]
+    fn embedded_models_dev_omits_models_priced_per_asset() {
+        // These rates are per second of audio and per generated image. The
+        // runtime divides by a million and multiplies by token counts, so
+        // embedding them reports a wrong cost rather than no cost.
+        let embedded = embedded_models_dev_pricing();
+
+        for model in [
+            "whisper-large-v3",
+            "gemini-2.5-flash-image",
+            "gemini-3-pro-image-preview",
+        ] {
+            assert!(
+                embedded.find_exact(model).is_none(),
+                "{model} prices assets rather than text tokens and must stay out of the snapshot"
+            );
+        }
+        // The guard keys on modalities, not on the name, so text models that
+        // merely accept audio or video input have to survive it.
+        assert!(embedded.find_exact("kimi-k3").is_some());
+        assert!(embedded.find_exact("gemini-3-flash-preview").is_some());
+    }
+
+    #[test]
+    fn embedded_models_dev_prices_resold_models_from_their_author() {
+        // models.dev lists kimi-k2.7-code once per catalog that serves it, and
+        // reseller catalogs publish their own promotional rates. Selecting one of
+        // those would undercharge every Kimi report.
+        let pricing = PricingMap::load_embedded();
+        let kimi_k27_code = pricing.find("kimi-k2.7-code").unwrap();
+
+        // MoonshotAI's list rate. Reseller catalogs publish 0.73 and 0.75.
+        assert!((kimi_k27_code.input * 1e6 - 0.95).abs() < 1e-9);
+        assert!((kimi_k27_code.output * 1e6 - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn embedded_pricing_prefers_an_exact_only_tier_over_a_fuzzy_litellm_match() {
+        // The snapshot lives in its own map, consulted only after the primary
+        // LiteLLM one misses, so marking `claude-opus-5-fast` exact-only there is
+        // not enough on its own: the primary fuzzy scan would answer with the
+        // base `claude-opus-5` entry it does carry and bill the tier at list
+        // price. Exercised through `load_embedded` to cover that lookup order.
+        let pricing = PricingMap::load_embedded();
+
+        let base = pricing.find("claude-opus-5").unwrap();
+        assert!((base.input * 1e6 - 5.0).abs() < 1e-9);
+
+        let fast = pricing
+            .find("claude-opus-5-fast")
+            .expect("the embedded snapshot prices the Fast tier");
+        assert!((fast.input * 1e6 - 12.0).abs() < 1e-9);
+        assert!((fast.output * 1e6 - 60.0).abs() < 1e-9);
+        assert_eq!(pricing.context_limit("claude-opus-5-fast"), Some(1_000_000));
+
+        // A regional alias shadows the same base entry, and is exact-only for
+        // the same reason: its premium is not the list rate.
+        let eu = pricing
+            .find("claude-opus-5@eu")
+            .expect("the embedded snapshot prices the EU alias");
+        assert!(eu.input > base.input);
+
+        // Gating keys the snapshot carries must not cost keys nothing prices
+        // exactly their fuzzy match.
+        assert!(pricing.find("claude-opus-5-20260115").is_some());
+    }
+
+    #[test]
+    fn a_separator_spelling_of_an_exact_only_id_is_priced_as_that_id() {
+        // `pricing_key_matches` reads `@`, `.` and `-` as one separator, so
+        // `claude-opus-5-eu` fuzzy-matches LiteLLM's base `claude-opus-5` exactly
+        // as `claude-opus-5@eu` would. Gating only the spelling the catalog wrote
+        // would bill the regional premium at list price, and gating the spelling
+        // without answering from the id it names would lose the rate entirely.
+        let pricing = PricingMap::load_embedded();
+
+        let base = pricing.find("claude-opus-5").unwrap();
+        let eu = pricing.find("claude-opus-5@eu").unwrap();
+        let dashed = pricing
+            .find("claude-opus-5-eu")
+            .expect("the dashed spelling names the EU alias");
+        assert!(dashed.input > base.input);
+        assert!((dashed.input - eu.input).abs() < 1e-12);
+        assert!((dashed.output - eu.output).abs() < 1e-12);
+        assert_eq!(
+            pricing.context_limit("claude-opus-5-eu"),
+            pricing.context_limit("claude-opus-5@eu")
+        );
+
+        // Only a spelling of the whole id is that id: a longer name that merely
+        // contains it keeps the fuzzy match it has always had.
+        assert!(pricing.find("claude-opus-5-eu-preview").is_some());
+    }
+
+    #[test]
+    fn a_dotted_spelling_of_a_dash_spelled_exact_only_id_is_priced_as_that_id() {
+        // The catalog writes most exact-only ids with dashes alone, and those
+        // have to be indexed under their normalized spelling too: a request for
+        // `claude-opus-5.fast` normalizes to the id the snapshot carries, so
+        // leaving it out of the index lets the primary fuzzy scan answer with
+        // the base `claude-opus-5` entry and bill the tier at list price.
+        let pricing = PricingMap::load_embedded();
+
+        let base = pricing.find("claude-opus-5").unwrap();
+        let dotted = pricing
+            .find("claude-opus-5.fast")
+            .expect("the dotted spelling names the Fast tier");
+        assert!((dotted.input * 1e6 - 12.0).abs() < 1e-9);
+        assert!((dotted.output * 1e6 - 60.0).abs() < 1e-9);
+        assert!(dotted.input > base.input);
+        assert_eq!(pricing.context_limit("claude-opus-5.fast"), Some(1_000_000));
+    }
+
+    #[test]
+    fn configured_alias_of_an_exact_only_tier_beats_a_fuzzy_match_on_the_alias() {
+        // The alias target is only tried after this map has answered for the
+        // recorded spelling, and that spelling can fuzzy-match a different model
+        // on its own - here LiteLLM's base `claude-opus-5` - which would bill the
+        // tier at list price and never reach what the alias names.
+        let _aliases = crate::model_aliases::set_model_aliases_for_tests([(
+            "claude-opus-5-turbo",
+            "claude-opus-5-fast",
+        )]);
+        let pricing = PricingMap::load_embedded();
+
+        let turbo = pricing
+            .find("claude-opus-5-turbo")
+            .expect("the alias resolves to the Fast tier");
+        assert!((turbo.input * 1e6 - 12.0).abs() < 1e-9);
+        assert!((turbo.output * 1e6 - 60.0).abs() < 1e-9);
+        assert_eq!(
+            pricing.context_limit("claude-opus-5-turbo"),
+            Some(1_000_000)
+        );
     }
 
     #[test]
@@ -1741,6 +2561,37 @@ mod tests {
         assert_eq!(zai_glm_45.cache_create, 0.0);
         assert_eq!(zai_glm_45.cache_read, 0.11e-6);
         assert_eq!(pricing.context_limit("zai/glm-4.5"), Some(128_000));
+    }
+
+    #[test]
+    fn glm_cache_patch_keeps_an_explicitly_published_cache_write_rate() {
+        // A published cache-write rate survives the z.ai patch even when it
+        // happens to equal the derived `input * 1.25` default: explicitness is
+        // tracked, not inferred from the value.
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "zai/glm-test-model": {
+                    "input_cost_per_token": 0.2,
+                    "output_cost_per_token": 1.1,
+                    "cache_read_input_token_cost": 0.03,
+                    "cache_creation_input_token_cost": 0.25
+                }
+            }"#,
+        );
+        let zeroed = Pricing {
+            cache_create: 0.0,
+            cache_read: 0.03,
+            cache_read_explicit: true,
+            cache_create_explicit: true,
+            ..Pricing::empty()
+        };
+
+        pricing.put_builtin_glm("zai/glm-test-model", zeroed);
+
+        let entry = pricing.find_exact("zai/glm-test-model").unwrap();
+        assert_eq!(entry.cache_create, 0.25);
+        assert_eq!(entry.cache_read, 0.03);
     }
 
     #[test]
@@ -1920,11 +2771,14 @@ mod tests {
             .expect("models.dev retry should cache successful pricing");
 
         let gpt_retry = pricing
-            .find_entry("gpt-retry")
+            .find_entry("gpt-retry", Fuzzy::Allowed)
             .expect("successful retry should load pricing");
         assert_eq!(gpt_retry.input, 0.000001);
         assert_eq!(gpt_retry.output, 0.000002);
-        assert_eq!(pricing.context_limit_entry("gpt-retry"), Some(42));
+        assert_eq!(
+            pricing.context_limit_entry("gpt-retry", Fuzzy::Allowed),
+            Some(42)
+        );
     }
 
     #[test]
@@ -2057,6 +2911,619 @@ mod tests {
     }
 
     #[test]
+    fn live_models_dev_pricing_prefers_the_authoring_catalog_over_resellers() {
+        // The same model id appears in every catalog that serves it, and the
+        // first one loaded keeps it. Reseller rates are their own, so loading a
+        // reseller before the author would bill at a promotional price.
+        // `302ai` sorts before `moonshotai`, so an id-only ordering would pick a
+        // reseller here.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "kimi-k2.7-code": {
+                            "cost": { "input": 0.6, "output": 3.0 }
+                        }
+                    }
+                },
+                "openrouter": {
+                    "models": {
+                        "kimi-k2.7-code": {
+                            "cost": { "input": 0.73, "output": 3.5 }
+                        }
+                    }
+                },
+                "moonshotai": {
+                    "models": {
+                        "kimi-k2.7-code": {
+                            "cost": { "input": 0.95, "output": 4.0 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        // One entry loaded, not three: the reseller duplicates are skipped
+        // because the authoring catalog claimed the id first.
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let kimi = pricing.find_exact("kimi-k2.7-code").unwrap();
+        assert!((kimi.input * 1e6 - 0.95).abs() < 1e-9);
+        assert!((kimi.output * 1e6 - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_skips_models_priced_per_asset() {
+        // The embedded snapshot excludes these, so the online refresh has to as
+        // well or `--offline` and the default path disagree. The authored
+        // catalog's verdict is carried in, so a reseller calling an image model
+        // text-only cannot reintroduce it.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "gemini-2.5-flash-image": {
+                            "modalities": { "input": ["text", "image"], "output": ["text"] },
+                            "cost": { "input": 0.3, "output": 30 }
+                        }
+                    }
+                },
+                "scaleway": {
+                    "models": {
+                        "some-unlisted-transcriber": {
+                            "modalities": { "input": ["audio"], "output": ["text"] },
+                            "cost": { "input": 0.003, "output": 0 }
+                        }
+                    }
+                },
+                "moonshotai": {
+                    "models": {
+                        "kimi-k3": {
+                            "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+                            "cost": { "input": 3, "output": 15 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        // Only kimi-k3 loads: audio-only input is rejected from the payload
+        // itself, and the image model is rejected by the authored catalog.
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("gemini-2.5-flash-image").is_none());
+        assert!(pricing.find_exact("some-unlisted-transcriber").is_none());
+        assert!(pricing.find_exact("kimi-k3").is_some());
+    }
+
+    #[test]
+    fn live_models_dev_pricing_keys_asset_pricing_on_the_source_model_id() {
+        // `assetPricedModelIds` records the authored source ids generation
+        // matches on, so a catalog serving one under a different `id` must be
+        // rejected on its key, not on the pricing key that key resolves to.
+        let json = r#"{
+                "google": {
+                    "models": {
+                        "gemini-2.5-flash-image": {
+                            "id": "models/gemini-2.5-flash-image",
+                            "modalities": { "input": ["text"], "output": ["text"] },
+                            "cost": { "input": 0.3, "output": 30 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(0));
+        assert!(
+            pricing
+                .find_exact("models/gemini-2.5-flash-image")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn live_models_dev_pricing_rejects_explicitly_empty_modalities() {
+        // `isTokenPricedModel` defaults only a *missing* list to `['text']`, so an
+        // empty one has to fail here too or the snapshot and the online refresh
+        // disagree about the same payload.
+        let json = r#"{
+                "moonshotai": {
+                    "models": {
+                        "empty-output-model": {
+                            "modalities": { "input": ["text"], "output": [] },
+                            "cost": { "input": 1, "output": 2 }
+                        },
+                        "empty-input-model": {
+                            "modalities": { "input": [], "output": ["text"] },
+                            "cost": { "input": 1, "output": 2 }
+                        },
+                        "no-modalities-model": {
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("empty-output-model").is_none());
+        assert!(pricing.find_exact("empty-input-model").is_none());
+        assert!(pricing.find_exact("no-modalities-model").is_some());
+    }
+
+    #[test]
+    fn live_models_dev_pricing_carries_the_reseller_ids_generation_carries() {
+        // Generation prunes no ids any more: every id a catalog publishes is
+        // embedded, and the fuzzy lookup is gated instead. Pruning here would
+        // price a smaller set of ids online than `--offline` carries, and leave
+        // the two maps offering different candidates to the same fuzzy lookup.
+        let json = r#"{
+                "fireworks-ai": {
+                    "models": {
+                        "accounts/fireworks/models/kimi-k2p6": {
+                            "cost": { "input": 0.6, "output": 2.5 }
+                        }
+                    }
+                },
+                "venice": {
+                    "models": {
+                        "claude-opus-5-fast": {
+                            "cost": { "input": 12, "output": 60 }
+                        }
+                    }
+                },
+                "openrouter": {
+                    "models": {
+                        "claude-3-haiku-20240307": {
+                            "cost": { "input": 0.25, "output": 1.25 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(3));
+        assert!(
+            pricing
+                .find_exact("accounts/fireworks/models/kimi-k2p6")
+                .is_some()
+        );
+        assert!(pricing.find_exact("claude-opus-5-fast").is_some());
+        assert!(pricing.find_exact("claude-3-haiku-20240307").is_some());
+        // Carried, but a tier is the right rate only for a request naming it,
+        // even one the author prices itself.
+        assert!(pricing.exact_only.contains("claude-opus-5-fast"));
+        assert!(!pricing.exact_only.contains("claude-3-haiku-20240307"));
+    }
+
+    #[test]
+    fn live_models_dev_pricing_prefers_the_more_detailed_entry_within_a_tier() {
+        // Generation breaks same-tier ties by how much pricing detail an entry
+        // carries, so the online path has to as well or the two disagree.
+        // `kimi-k2.6-nitro` is a separately priced tier of a carried model, so it
+        // is one of the ids resellers alone may supply. The ordering tests below
+        // use it for that reason.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                },
+                "openrouter": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2, "cache_read": 0.1 },
+                            "limit": { "context": 128000 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        // One model, counted once even though the second entry replaced the first.
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("kimi-k2.6-nitro").unwrap();
+        assert!(entry.cache_read_explicit);
+        assert!((entry.cache_read * 1e6 - 0.1).abs() < 1e-9);
+        assert_eq!(
+            pricing.context_limits.get("kimi-k2.6-nitro"),
+            Some(&128_000)
+        );
+    }
+
+    #[test]
+    fn live_models_dev_pricing_keeps_authored_token_models_a_catalog_mislabels() {
+        // A catalog serving claude-opus-5 as image-output would drop a model the
+        // snapshot carries. The authored classification settles it both ways, so
+        // only models the authored catalog never listed fall back to the live
+        // modalities.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "claude-opus-5": {
+                            "modalities": { "input": ["text"], "output": ["text", "image"] },
+                            "cost": { "input": 5, "output": 25 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("claude-opus-5").is_some());
+    }
+
+    #[test]
+    fn live_models_dev_pricing_ranks_by_the_catalog_s_own_provider_id() {
+        // The generator reads `provider.id ?? providerId`, so a catalog filed
+        // under a different key than its id must still rank as its id - here the
+        // authoring catalog, which has to win over the reseller.
+        let json = r#"{
+                "aaa-filed-under-another-key": {
+                    "id": "moonshotai",
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 3, "output": 4 }
+                        }
+                    }
+                },
+                "302ai": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("kimi-k2.6-nitro").unwrap();
+        assert!((entry.input * 1e6 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_orders_detail_the_way_generation_does() {
+        // Generation compares cache-read, then cache-write, then context limit, so
+        // a cache-read-only entry outranks one carrying the other two. Counting
+        // fields instead would pick the other catalog online.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2, "cache_read": 0.1 }
+                        }
+                    }
+                },
+                "openrouter": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2, "cache_write": 1.25 },
+                            "limit": { "context": 128000 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("kimi-k2.6-nitro").unwrap();
+        assert!(entry.cache_read_explicit);
+        assert!((entry.cache_read * 1e6 - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_drops_the_context_limit_of_a_replaced_catalog() {
+        // The winning catalog publishes no limit, so keeping the loser's would
+        // report a context window the selected rates do not belong to.
+        let json = r#"{
+                "302ai": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 1, "output": 2 },
+                            "limit": { "context": 128000 }
+                        }
+                    }
+                },
+                "moonshotai": {
+                    "models": {
+                        "kimi-k2.6-nitro": {
+                            "cost": { "input": 3, "output": 4 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("kimi-k2.6-nitro").unwrap();
+        assert!((entry.input * 1e6 - 3.0).abs() < 1e-9);
+        assert_eq!(pricing.context_limits.get("kimi-k2.6-nitro"), None);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_resolves_duplicate_ids_inside_one_catalog_stably() {
+        // Two source keys can carry the same `id`. Generation walks a catalog in
+        // key order and keeps the first of an equal-strength tie, so the lower key
+        // has to win here too rather than whichever the hash map yields first.
+        let json = r#"{
+                "moonshotai": {
+                    "models": {
+                        "b-alias": {
+                            "id": "shared-model",
+                            "cost": { "input": 9, "output": 9 }
+                        },
+                        "a-alias": {
+                            "id": "shared-model",
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("shared-model").unwrap();
+        assert!((entry.input * 1e6 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_merges_spelling_duplicates_onto_one_entry() {
+        // The dotted and dashed spellings name one model. Kept apart, the fuzzy
+        // lookup ties between them by length and can return whichever, so the
+        // flat reseller spelling must lose its slot to the tiered owner one
+        // entirely - entry included, not just the claim.
+        let json = r#"{
+                "llmgateway": {
+                    "models": {
+                        "grok-9-5": {
+                            "cost": { "input": 2, "output": 6 }
+                        }
+                    }
+                },
+                "xai": {
+                    "models": {
+                        "grok-9.5": {
+                            "cost": {
+                                "input": 2, "output": 6, "cache_read": 0.3,
+                                "tiers": [{
+                                    "input": 4, "output": 12, "cache_read": 0.6,
+                                    "tier": { "type": "context", "size": 200000 }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("grok-9-5").is_none());
+        let entry = pricing.find_exact("grok-9.5").unwrap();
+        assert_eq!(entry.long_context_threshold, Some(200_000));
+        // The dashed spelling still resolves - through the fuzzy lookup - and
+        // lands on the tiered entry rather than a flat duplicate.
+        let via_dash = pricing.find("grok-9-5").unwrap();
+        assert_eq!(via_dash.long_context_threshold, Some(200_000));
+    }
+
+    #[test]
+    fn live_models_dev_pricing_prefers_a_tiered_catalog_within_a_trust_tier() {
+        // Within one trust tier, the catalog publishing a long-context band
+        // outranks one with more cache detail: the band is the rate data
+        // hardest to come by.
+        let json = r#"{
+                "llmgateway": {
+                    "models": {
+                        "some-reseller-only-model": {
+                            "cost": { "input": 1, "output": 2, "cache_read": 0.1, "cache_write": 1.25 },
+                            "limit": { "context": 500000 }
+                        }
+                    }
+                },
+                "venice": {
+                    "models": {
+                        "some-reseller-only-model": {
+                            "cost": {
+                                "input": 1, "output": 2,
+                                "tiers": [{
+                                    "input": 2, "output": 4,
+                                    "tier": { "type": "context", "size": 200000 }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("some-reseller-only-model").unwrap();
+        assert_eq!(entry.long_context_threshold, Some(200_000));
+    }
+
+    #[test]
+    fn live_models_dev_pricing_stores_a_model_with_an_empty_declared_id_by_its_key() {
+        // A live catalog can declare `id` as an empty string. The generator's
+        // `selectModelsDevPricingKey` falls back to the source key; keeping ""
+        // would store the model under a name no lookup ever asks for.
+        let json = r#"{
+                "moonshotai": {
+                    "models": {
+                        "kimi-k9": {
+                            "id": "",
+                            "cost": { "input": 3, "output": 15 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("kimi-k9").is_some());
+        assert!(pricing.find_exact("").is_none());
+    }
+
+    #[test]
+    fn live_models_dev_pricing_orders_same_id_catalogs_by_their_map_key() {
+        // Two catalogs can declare the same provider id. The declared id ties,
+        // so the unique map key settles the order - the same order generation's
+        // provider-key walk uses - instead of hash iteration.
+        let json = r#"{
+                "zzz-alias": {
+                    "id": "some-gateway",
+                    "models": {
+                        "some-reseller-only-model": {
+                            "cost": { "input": 9, "output": 9 }
+                        }
+                    }
+                },
+                "aaa-alias": {
+                    "id": "some-gateway",
+                    "models": {
+                        "some-reseller-only-model": {
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("some-reseller-only-model").unwrap();
+        assert!((entry.input * 1e6 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_breaks_exact_ties_by_source_key_across_same_id_catalogs() {
+        // Two catalogs declaring the same provider id are one provider to
+        // generation, which breaks exact-strength ties by the source model key.
+        // The smaller source key lives in the catalog with the LARGER map key
+        // here, so keeping whichever arrived first would pick the other rate.
+        let json = r#"{
+                "aaa-key": {
+                    "id": "some-gateway",
+                    "models": {
+                        "zz-spelling": {
+                            "id": "some-reseller-only-model",
+                            "cost": { "input": 9, "output": 9 }
+                        }
+                    }
+                },
+                "zzz-key": {
+                    "id": "some-gateway",
+                    "models": {
+                        "aa-spelling": {
+                            "id": "some-reseller-only-model",
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        let entry = pricing.find_exact("some-reseller-only-model").unwrap();
+        assert!((entry.input * 1e6 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_skips_flat_fee_catalogs() {
+        // `kimi-for-coding` is a subscription plan, so it publishes zero token
+        // costs. Loading it would make the model free for everyone. The rule is
+        // about the rates rather than about who publishes them, so an authoring
+        // catalog listing a zero-cost entry has to be skipped as well.
+        let json = r#"{
+                "kimi-for-coding": {
+                    "models": {
+                        "kimi-for-coding": {
+                            "cost": { "input": 0, "output": 0 }
+                        }
+                    }
+                },
+                "moonshotai": {
+                    "models": {
+                        "kimi-k3": {
+                            "cost": { "input": 0, "output": 0 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(0));
+        assert!(pricing.find_exact("kimi-for-coding").is_none());
+        assert!(pricing.find_exact("kimi-k3").is_none());
+    }
+
+    #[test]
+    fn live_models_dev_pricing_keeps_a_tier_out_of_the_fuzzy_lookup() {
+        // `exactOnly` is a field the generator writes, and a live catalog has no
+        // such field, so the verdict has to be rederived here. Otherwise the
+        // premium tier stays a fuzzy candidate and wins the base model's lookup,
+        // which prefers the longest matching key.
+        let json = r#"{
+                "moonshotai": {
+                    "models": {
+                        "kimi-k2.7-code": {
+                            "cost": { "input": 1, "output": 2 }
+                        },
+                        "kimi-k2.7-code-highspeed": {
+                            "cost": { "input": 9, "output": 9 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(2));
+        let base = pricing.find("kimi-k2-7-code").unwrap();
+        assert!((base.input * 1e6 - 1.0).abs() < 1e-9);
+        let tier = pricing.find("kimi-k2.7-code-highspeed").unwrap();
+        assert!((tier.input * 1e6 - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_models_dev_pricing_marks_a_regional_alias_of_a_model_exact_only() {
+        // Vertex spells its regional entries with `@`, which the tier check has
+        // to fold the way `normalizeModelId` does or `claude-opus-5@eu` stays a
+        // fuzzy candidate online while the snapshot marks it exact-only.
+        let json = r#"{
+                "google-vertex-anthropic": {
+                    "models": {
+                        "claude-opus-5@eu": {
+                            "cost": { "input": 9, "output": 9 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.exact_only.contains("claude-opus-5@eu"));
+    }
+
+    #[test]
+    fn live_models_dev_pricing_keeps_an_unversioned_id_out_of_the_fuzzy_lookup() {
+        // `auto` names no particular model, so as a fuzzy candidate it answered
+        // `codex-auto-review`, a label the Codex adapter resolves by date.
+        let json = r#"{
+                "moonshotai": {
+                    "models": {
+                        "auto": {
+                            "cost": { "input": 1, "output": 2 }
+                        }
+                    }
+                }
+            }"#;
+        let mut pricing = PricingMap::default();
+
+        assert_eq!(pricing.load_models_dev_json_missing(json), Some(1));
+        assert!(pricing.find_exact("auto").is_some());
+        assert!(pricing.find("codex-auto-review").is_none());
+        assert!(pricing.context_limit("codex-auto-review").is_none());
+    }
+
+    #[test]
     fn rejects_malformed_models_dev_provider_payload() {
         let fixture = fs_fixture!({
             "models-dev.json": r#"{
@@ -2116,7 +3583,7 @@ mod tests {
     fn embedded_models_dev_snapshot_is_parseable() {
         let mut map = PricingMap::default();
         assert!(
-            map.load_models_dev_json_missing(BUILD_TIME_MODELS_DEV_JSON)
+            map.load_models_dev_json_missing(build_time_models_dev_json())
                 .is_some()
         );
     }
@@ -2134,13 +3601,13 @@ mod tests {
         let Some(model) = embedded_models_dev_pricing()
             .entries
             .keys()
-            .find(|model| offline.find_entry(model).is_none())
+            .find(|model| offline.find_entry(model, Fuzzy::Allowed).is_none())
         else {
             return;
         };
         // The primary table alone misses it, but the offline embedded fallback
         // resolves it; a bare map without the fallback flag must not.
-        assert!(offline.find_entry(model).is_none());
+        assert!(offline.find_entry(model, Fuzzy::Allowed).is_none());
         assert!(offline.find(model).is_some());
         assert!(PricingMap::default().find(model).is_none());
     }
@@ -2150,7 +3617,7 @@ mod tests {
         use ccusage_cli::PricingOverride;
         assert!(
             embedded_models_dev_pricing()
-                .find_entry("claude-fable-5")
+                .find_entry("claude-fable-5", Fuzzy::Allowed)
                 .is_some(),
             "embedded models.dev snapshot should include claude-fable-5"
         );
@@ -2219,17 +3686,21 @@ mod tests {
         assert_eq!(sol.long_context_threshold, Some(272_000));
         assert_eq!(pricing.context_limit("gpt-5.6-sol"), Some(1_050_000));
 
+        // OpenAI cut the terra and luna rates after launch. The snapshots carry
+        // the new prices, and the frozen built-in table must not undo them.
         let terra = pricing.find("gpt-5.6-terra").unwrap();
-        assert_eq!(terra.input, 2.5e-6);
-        assert_eq!(terra.cache_create, 3.125e-6);
-        assert_eq!(terra.input_above_200k, Some(5e-6));
-        assert_eq!(terra.output_above_200k, Some(22.5e-6));
+        assert_eq!(terra.input, 2e-6);
+        assert_eq!(terra.output, 12e-6);
+        assert_eq!(terra.input_above_200k, Some(4e-6));
+        assert_eq!(terra.output_above_200k, Some(18e-6));
 
         let luna = pricing.find("gpt-5.6-luna").unwrap();
-        assert_eq!(luna.input, 1e-6);
-        assert_eq!(luna.output, 6e-6);
-        assert_eq!(luna.input_above_200k, Some(2e-6));
-        assert_eq!(luna.output_above_200k, Some(9e-6));
+        // Compared per million tokens: the per-token division leaves the rates
+        // one ulp away from the equivalent literals.
+        assert!((luna.input * 1e6 - 0.2).abs() < 1e-9);
+        assert!((luna.output * 1e6 - 1.2).abs() < 1e-9);
+        assert!((luna.input_above_200k.unwrap() * 1e6 - 0.4).abs() < 1e-9);
+        assert!((luna.output_above_200k.unwrap() * 1e6 - 1.8).abs() < 1e-9);
     }
 
     #[test]
@@ -2289,7 +3760,7 @@ mod tests {
                 }
             }"#,
         );
-        pricing.apply_builtin_long_context_rates();
+        pricing.fill_long_context_rates_from_models_dev();
 
         let gpt_55 = pricing.find("gpt-5.5").unwrap();
         assert_eq!(gpt_55.input, 6e-6);
@@ -2309,11 +3780,35 @@ mod tests {
                 }
             }"#,
         );
-        pricing.apply_builtin_long_context_rates();
+        pricing.fill_long_context_rates_from_models_dev();
 
         let gpt_55 = pricing.find("gpt-5.5").unwrap();
         assert_eq!(gpt_55.input_above_200k, Some(12e-6));
         assert_eq!(gpt_55.long_context_threshold, None);
+    }
+
+    #[test]
+    fn embedded_models_dev_carries_grok_long_context_tiers() {
+        // xAI bills grok-4.5 and grok-4.6 at double rates above 200K input
+        // tokens. LiteLLM's embed does not carry xai keys at all, so these come
+        // from the models.dev snapshot's `cost.tiers` - without them every
+        // long-context Grok request is billed at the base rate (#1541).
+        let pricing = PricingMap::load_embedded();
+
+        for model in ["grok-4.5", "grok-4.6"] {
+            let entry = pricing.find(model).unwrap();
+            assert!((entry.input * 1e6 - 2.0).abs() < 1e-9, "{model} base input");
+            assert!(
+                (entry.input_above_200k.unwrap() * 1e6 - 4.0).abs() < 1e-9,
+                "{model} long-context input"
+            );
+            assert!(
+                (entry.output_above_200k.unwrap() * 1e6 - 12.0).abs() < 1e-9,
+                "{model} long-context output"
+            );
+            assert_eq!(entry.long_context_threshold, Some(200_000), "{model}");
+        }
+        assert_eq!(long_context_split_threshold("grok-4.5"), 200_000);
     }
 
     #[test]
@@ -2364,13 +3859,15 @@ mod tests {
             crate::model_aliases::set_model_aliases_for_tests([("claude-opus-4-8", "mythos-5")]);
         let pricing = PricingMap::load_embedded();
 
-        let original = pricing.find_entry("claude-opus-4-8").unwrap();
+        let original = pricing
+            .find_entry("claude-opus-4-8", Fuzzy::Allowed)
+            .unwrap();
         let resolved = pricing.find("claude-opus-4-8").unwrap();
 
         assert_eq!(resolved.input, original.input);
         assert_eq!(
             pricing.context_limit("claude-opus-4-8"),
-            pricing.context_limit_entry("claude-opus-4-8")
+            pricing.context_limit_entry("claude-opus-4-8", Fuzzy::Allowed)
         );
     }
 
@@ -2502,6 +3999,7 @@ mod tests {
                 cache_create: 6.25e-6,
                 cache_read: 0.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -2518,6 +4016,7 @@ mod tests {
                 cache_create: 18.75e-6,
                 cache_read: 1.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -2541,6 +4040,7 @@ mod tests {
                 cache_create: 18.75e-6,
                 cache_read: 1.5e-6,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -2662,10 +4162,11 @@ mod tests {
 
     #[test]
     fn embedded_build_time_pricing_is_compact() {
-        assert!(BUILD_TIME_PRICING_JSON.len() < 200_000);
-        assert!(!BUILD_TIME_PRICING_JSON.contains("\"source\""));
-        assert!(!BUILD_TIME_PRICING_JSON.contains("vertex_ai/"));
-        assert!(BUILD_TIME_PRICING_JSON.contains("claude-opus-4-6"));
+        let json = build_time_pricing_json();
+        assert!(json.len() < 200_000);
+        assert!(!json.contains("\"source\""));
+        assert!(!json.contains("vertex_ai/"));
+        assert!(json.contains("claude-opus-4-6"));
     }
 
     #[test]
@@ -2679,6 +4180,7 @@ mod tests {
                 cache_create: 0.0,
                 cache_read: 0.0,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -2695,6 +4197,7 @@ mod tests {
                 cache_create: 0.0,
                 cache_read: 0.0,
                 cache_read_explicit: true,
+                cache_create_explicit: true,
                 input_above_200k: None,
                 output_above_200k: None,
                 cache_create_above_200k: None,
@@ -2787,6 +4290,7 @@ mod tests {
                     cache_create: 30e-6,
                     cache_read: 40e-6,
                     cache_read_explicit: true,
+                    cache_create_explicit: true,
                     input_above_200k: Some(15e-6),
                     output_above_200k: None,
                     cache_create_above_200k: None,
@@ -2872,6 +4376,7 @@ mod tests {
                     cache_create: 3.75e-6,
                     cache_read: 3e-7,
                     cache_read_explicit: false,
+                    cache_create_explicit: false,
                     input_above_200k: None,
                     output_above_200k: None,
                     cache_create_above_200k: Some(4.6875e-6),
@@ -2911,6 +4416,7 @@ mod tests {
                     cache_create: 0.0,
                     cache_read: 0.0,
                     cache_read_explicit: false,
+                    cache_create_explicit: false,
                     input_above_200k: None,
                     output_above_200k: None,
                     cache_create_above_200k: None,
@@ -2942,6 +4448,7 @@ mod tests {
                     cache_create: 3.75e-6,
                     cache_read: 3e-7,
                     cache_read_explicit: false,
+                    cache_create_explicit: false,
                     input_above_200k: None,
                     output_above_200k: None,
                     cache_create_above_200k: None,
@@ -3182,9 +4689,11 @@ mod tests {
         from_projected.load_models_dev_json_missing(&projected);
 
         for model in ["gpt-4o", "claude-sonnet-4"] {
-            let raw_entry = from_raw.find_entry(model).expect("raw should have {model}");
+            let raw_entry = from_raw
+                .find_entry(model, Fuzzy::Allowed)
+                .expect("raw should have {model}");
             let proj_entry = from_projected
-                .find_entry(model)
+                .find_entry(model, Fuzzy::Allowed)
                 .expect("projected should have {model}");
             assert_eq!(
                 raw_entry.input, proj_entry.input,
@@ -3195,8 +4704,8 @@ mod tests {
                 "output mismatch for {model}"
             );
             assert_eq!(
-                from_raw.context_limit_entry(model),
-                from_projected.context_limit_entry(model),
+                from_raw.context_limit_entry(model, Fuzzy::Allowed),
+                from_projected.context_limit_entry(model, Fuzzy::Allowed),
                 "context_limit mismatch for {model}"
             );
         }
@@ -3277,9 +4786,11 @@ mod tests {
         from_projected.load_models_dev_json_missing(&projected);
 
         for model in ["gemini-2.5-pro", "claude-3-haiku"] {
-            let raw_entry = from_raw.find_entry(model).expect("raw should have {model}");
+            let raw_entry = from_raw
+                .find_entry(model, Fuzzy::Allowed)
+                .expect("raw should have {model}");
             let proj_entry = from_projected
-                .find_entry(model)
+                .find_entry(model, Fuzzy::Allowed)
                 .expect("projected should have {model}");
             assert_eq!(
                 raw_entry.input, proj_entry.input,
@@ -3290,8 +4801,8 @@ mod tests {
                 "output mismatch for {model}"
             );
             assert_eq!(
-                from_raw.context_limit_entry(model),
-                from_projected.context_limit_entry(model),
+                from_raw.context_limit_entry(model, Fuzzy::Allowed),
+                from_projected.context_limit_entry(model, Fuzzy::Allowed),
                 "context_limit mismatch for {model}"
             );
         }
@@ -3351,7 +4862,7 @@ mod tests {
     /// Embedded litellm blob is byte-identical when compacted with the filter.
     #[test]
     fn embedded_litellm_blob_unchanged_with_filter() {
-        let embedded = BUILD_TIME_PRICING_JSON;
+        let embedded = build_time_pricing_json();
         // Re-parse and re-compact the embedded blob through the shared function
         // with the filter enabled (keep_all=false). The output must be identical.
         // We can't re-fetch the raw litellm data in a unit test, but we can
@@ -3403,15 +4914,15 @@ mod tests {
         from_cached.load_json(&cached.body);
 
         for model in ["gpt-4o", "claude-sonnet-4-20250514"] {
-            let raw_entry = from_raw.find_entry(model).unwrap();
-            let proj_entry = from_projected.find_entry(model).unwrap();
-            let cached_entry = from_cached.find_entry(model).unwrap();
+            let raw_entry = from_raw.find_entry(model, Fuzzy::Allowed).unwrap();
+            let proj_entry = from_projected.find_entry(model, Fuzzy::Allowed).unwrap();
+            let cached_entry = from_cached.find_entry(model, Fuzzy::Allowed).unwrap();
             assert_eq!(raw_entry.input, proj_entry.input);
             assert_eq!(raw_entry.input, cached_entry.input);
             assert_eq!(raw_entry.output, cached_entry.output);
             assert_eq!(
-                from_raw.context_limit_entry(model),
-                from_cached.context_limit_entry(model)
+                from_raw.context_limit_entry(model, Fuzzy::Allowed),
+                from_cached.context_limit_entry(model, Fuzzy::Allowed)
             );
         }
     }
@@ -3437,10 +4948,13 @@ mod tests {
         let mut pricing = super::PricingMap::default();
         let loaded = pricing.load_json(&cached.body);
         assert_eq!(loaded, 1);
-        let entry = pricing.find_entry("gpt-4o").unwrap();
+        let entry = pricing.find_entry("gpt-4o", Fuzzy::Allowed).unwrap();
         assert_eq!(entry.input, 2.5e-6);
         assert_eq!(entry.output, 10e-6);
-        assert_eq!(pricing.context_limit_entry("gpt-4o"), Some(128000));
+        assert_eq!(
+            pricing.context_limit_entry("gpt-4o", Fuzzy::Allowed),
+            Some(128000)
+        );
     }
 
 

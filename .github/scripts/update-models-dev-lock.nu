@@ -5,6 +5,7 @@ use ./pricing-lock.nu report
 
 const SNAPSHOTS = [
     'rust/crates/ccusage-core/src/models-dev-pricing.json'
+    'rust/crates/ccusage-core/src/models-dev-catalog-rules.json'
     'rust/adapters/codex/src/codex-auto-review-fallbacks.json'
 ]
 

@@ -9,7 +9,11 @@ use serde_json::{Map, Value};
 const FLAKE_LOCK_JSON: &str = "../../../flake.lock";
 #[cfg(feature = "fetch-litellm-pricing")]
 const LITELLM_PRICING_JSON: &str = "model_prices_and_context_window.json";
-const OUT_PRICING_JSON: &str = "litellm-pricing.json";
+const OUT_PRICING_JSON: &str = "litellm-pricing.json.deflate";
+const MODELS_DEV_PRICING_JSON: &str = "src/models-dev-pricing.json";
+const OUT_MODELS_DEV_PRICING_JSON: &str = "models-dev-pricing.json.deflate";
+const MODELS_DEV_CATALOG_RULES_JSON: &str = "src/models-dev-catalog-rules.json";
+const OUT_MODELS_DEV_CATALOG_RULES_JSON: &str = "models-dev-catalog-rules.json.deflate";
 const PRICING_JSON_PATH_ENV: &str = "CCUSAGE_PRICING_JSON_PATH";
 #[cfg(feature = "fetch-litellm-pricing")]
 const PRICING_FETCH_TIMEOUT_SECONDS: u64 = 10;
@@ -28,7 +32,38 @@ fn main() {
     };
     let pricing_json = compact_litellm(&pricing_json, false).expect("compact LiteLLM pricing JSON");
 
-    fs::write(out_path, pricing_json).expect("write build-time pricing snapshot");
+    fs::write(out_path, deflate(pricing_json.as_bytes()))
+        .expect("write build-time pricing snapshot");
+
+    embed_snapshot(MODELS_DEV_PRICING_JSON, OUT_MODELS_DEV_PRICING_JSON);
+    embed_snapshot(
+        MODELS_DEV_CATALOG_RULES_JSON,
+        OUT_MODELS_DEV_CATALOG_RULES_JSON,
+    );
+}
+
+/// The committed snapshots stay indented so their regeneration diffs stay
+/// reviewable, but they are embedded verbatim, so the indentation - and, at
+/// 2K+ models, most of the JSON itself - would ship in the binary. Minify and
+/// deflate on the way in; the runtime inflates once on first use.
+fn embed_snapshot(source: &str, out_name: &str) {
+    println!("cargo:rerun-if-changed={source}");
+    let snapshot =
+        fs::read_to_string(source).unwrap_or_else(|error| panic!("read {source}: {error}"));
+    // Qualified: the `use serde_json::{Map, Value}` above is gated behind the
+    // fetch feature, and this runs on every build.
+    let value = serde_json::from_str::<serde_json::Value>(&snapshot)
+        .unwrap_or_else(|error| panic!("parse {source}: {error}"));
+    let minified =
+        serde_json::to_string(&value).unwrap_or_else(|error| panic!("serialize {source}: {error}"));
+    fs::write(out_dir_path(out_name), deflate(minified.as_bytes()))
+        .unwrap_or_else(|error| panic!("write {out_name}: {error}"));
+}
+
+/// Raw deflate at maximum effort: the cost is paid once per changed snapshot at
+/// build time, and the level only matters there.
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    miniz_oxide::deflate::compress_to_vec(bytes, 10)
 }
 
 fn out_dir_path(file_name: &str) -> PathBuf {

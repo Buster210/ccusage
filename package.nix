@@ -27,6 +27,7 @@ let
       || lib.hasSuffix "/cli-commands.json" path
       || lib.hasSuffix "/fast-multiplier-overrides.json" path
       || lib.hasSuffix "/models-dev-pricing.json" path
+      || lib.hasSuffix "/models-dev-catalog-rules.json" path
       || lib.hasSuffix "/codex-auto-review-fallbacks.json" path;
   };
   # sqlite3-src's build script turns every SQLITE_* environment variable into a -D
