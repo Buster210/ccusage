@@ -34,9 +34,14 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::UNIX_EPOCH,
 };
+
+static PRICING_V2_MIGRATED: AtomicBool = AtomicBool::new(false);
 
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
@@ -439,18 +444,30 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         st.bind((8, PRICING_SCHEMA_VERSION)).ok()?;
         st.next().ok()?;
     }
-    // pricing v2: `updated_at` (unix seconds of the last store) drives the
-    // freshness window. Probe the column with a read — PRAGMA table_info
-    // returns no rows in the bundled sqlite runtime. NULL rows refetch once.
-    if conn
-        .prepare("SELECT updated_at FROM pricing LIMIT 1")
-        .is_err()
+    // pricing v2: `updated_at` drives the freshness window. Memoize the
+    // probe in prod - CREATE TABLE already includes the column for new DBs,
+    // so after the first successful check we skip the prepare on every
+    // open_db (called per adapter, ~15x per run). In tests each CacheEnv is a
+    // fresh temp DB, and one test deliberately creates a legacy DB without the
+    // column, so we must not memoize there.
+    let should_check = if cfg!(test) {
+        true
+    } else {
+        !PRICING_V2_MIGRATED.load(Ordering::Relaxed)
+    };
+    if should_check
+        && conn
+            .prepare("SELECT updated_at FROM pricing LIMIT 1")
+            .is_err()
         && let Err(e) = conn.execute("ALTER TABLE pricing ADD COLUMN updated_at INTEGER")
     {
         eprintln!(
             "WARN  Failed to upgrade pricing cache schema ({e}); refreshing without the cache."
         );
         return None;
+    }
+    if !cfg!(test) {
+        PRICING_V2_MIGRATED.store(true, Ordering::Relaxed);
     }
     if let Ok(mut st) = conn.prepare("UPDATE schema_meta SET version = ? WHERE name = 'pricing'") {
         let _ = st.bind((1, PRICING_SCHEMA_VERSION));
