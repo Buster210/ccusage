@@ -179,8 +179,7 @@ fn fit_widths_to_terminal(
     terminal_width: usize,
     first_column_min: usize,
 ) -> Vec<usize> {
-    let required = cli_table_required_width(&widths);
-    if required <= terminal_width {
+    if cli_table_required_width(&widths) <= terminal_width {
         return widths;
     }
 
@@ -200,8 +199,7 @@ fn fit_widths_to_terminal(
         })
         .collect::<Vec<_>>();
 
-    // Smart shrink: keep the date column (index 0) at its natural width as long as possible.
-    // First shrink non-date columns (especially the flexible Models column), only shrink date last.
+    // Smart shrink: keep Date (index 0) intact as long as possible.
     while cli_table_required_width(&widths) > terminal_width {
         let candidate = widths
             .iter()
