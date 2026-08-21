@@ -1,9 +1,25 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ccusage_core::{cache, pricing::project_pricing_body};
 
 const PRICING_FETCH_TIMEOUT_SECONDS: u64 = 10;
 const PRICING_FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// How long a cached pricing document is served before revalidating. Prices
+/// move slowly, so one refresh per day keeps other runs off the network.
+const PRICING_REFRESH_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Re-stamp a served-from-cache copy as fresh (unix seconds) so later runs
+/// skip the network within the refresh window.
+fn latch_fresh(url: &str, cached: &cache::CachedPricing) {
+    cache::refresh_pricing_if_unchanged(url, cached, now_unix_secs());
+}
 
 /// Fetches a JSON document for the pricing refresh, revalidating against the
 /// cached copy with `If-None-Match`/`If-Modified-Since` so an unchanged document
@@ -14,6 +30,15 @@ const PRICING_FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// through `ccusage_core::pricing::set_json_fetcher`.
 pub(crate) fn fetch_json(url: &str) -> std::io::Result<String> {
     let cached = cache::load_pricing(url);
+
+    // Serve a recently refreshed copy without touching the network. Revalidating
+    // on every run turns each invocation into a latency bet on the endpoint.
+    if let Some(c) = cached.as_ref()
+        && let Some(updated_at) = c.updated_at
+        && now_unix_secs().saturating_sub(updated_at) < PRICING_REFRESH_INTERVAL_SECS
+    {
+        return Ok(c.body.clone());
+    }
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(PRICING_FETCH_TIMEOUT_SECONDS)))
@@ -31,17 +56,20 @@ pub(crate) fn fetch_json(url: &str) -> std::io::Result<String> {
 
     let mut response = match req.call() {
         Ok(resp) => resp,
-        Err(error) if cached.is_some() => {
-            // Network failure: degrade to last-known cached pricing, warning that
-            // prices may be stale.
-            if ccusage_core::log_level().is_some_and(|level| level >= 4) {
-                eprintln!(
-                    "WARN  Failed to refresh LiteLLM pricing ({error}); using last-known cached pricing."
-                );
+        Err(error) => {
+            if let Some(c) = cached {
+                // Degrade to last-known pricing, latching into the freshness
+                // window so a flaky endpoint costs one slow run, not every run.
+                if ccusage_core::log_level().is_some_and(|level| level >= 4) {
+                    eprintln!(
+                        "WARN  Failed to refresh LiteLLM pricing ({error}); using last-known cached pricing."
+                    );
+                }
+                latch_fresh(url, &c);
+                return Ok(c.body);
             }
-            return Ok(cached.unwrap().body);
+            return Err(std::io::Error::other(error.to_string()));
         }
-        Err(error) => return Err(std::io::Error::other(error.to_string())),
     };
 
     let status = response.status().as_u16();
@@ -49,7 +77,11 @@ pub(crate) fn fetch_json(url: &str) -> std::io::Result<String> {
     // 304 Not Modified — server confirmed nothing changed.
     if status == 304 {
         return match cached {
-            Some(c) => Ok(c.body),
+            Some(c) => {
+                // 304 confirms the copy is current; re-stamp it as fresh.
+                latch_fresh(url, &c);
+                Ok(c.body)
+            }
             // Edge case: server said 304 but we had no cache. Fall back to an
             // unconditional GET.
             None => fetch_uncached(&agent, url),
@@ -63,7 +95,13 @@ pub(crate) fn fetch_json(url: &str) -> std::io::Result<String> {
     let (etag, last_modified) = revalidation_headers(&response);
     let body = read_body(&mut response)?;
     let body = project_pricing_body(url, &body);
-    cache::store_pricing(url, &body, etag.as_deref(), last_modified.as_deref());
+    cache::store_pricing(
+        url,
+        &body,
+        etag.as_deref(),
+        last_modified.as_deref(),
+        now_unix_secs(),
+    );
     Ok(body)
 }
 
@@ -79,7 +117,13 @@ fn fetch_uncached(agent: &ureq::Agent, url: &str) -> std::io::Result<String> {
     let (etag, last_modified) = revalidation_headers(&resp);
     let body = read_body(&mut resp)?;
     let body = project_pricing_body(url, &body);
-    cache::store_pricing(url, &body, etag.as_deref(), last_modified.as_deref());
+    cache::store_pricing(
+        url,
+        &body,
+        etag.as_deref(),
+        last_modified.as_deref(),
+        now_unix_secs(),
+    );
     Ok(body)
 }
 
@@ -177,36 +221,33 @@ mod tests {
         format!("http://{addr}/pricing.json")
     }
 
-    /// Cold fetch stores body + ETag; warm fetch sends `If-None-Match`, gets a
-    /// bodyless `304`, and is served the cached body. The request log
-    /// (`[unconditional, conditional]`) plus the empty `304` prove the warm
-    /// body came from the cache — an ETag-ignoring re-GET would log two
-    /// unconditional requests and fail here.
+    /// Unix seconds well before the test runs (2023-11-14), so rows seeded with
+    /// it are always outside the refresh window regardless of when tests run.
+    const STALE_TS: i64 = 1_700_000_000;
+
+    /// Cold fetch stores body + ETag. The warm fetch is served from the fresh
+    /// cache without any network request — the origin thread sees exactly one
+    /// request, proving the warm body did not come over the wire.
     #[test]
-    fn etag_conditional_fetch_round_trip() {
+    fn fresh_cache_serves_warm_fetch_without_network() {
         let _env = CacheEnv::new("etag-round-trip");
-        let (url, log) =
-            spawn_scripted_origin(vec![resp_200("\"v1\"", "PRICING_V1"), resp_304("\"v1\"")]);
+        let (url, log) = spawn_scripted_origin(vec![resp_200("\"v1\"", "PRICING_V1")]);
 
         let cold = fetch_json(&url).unwrap();
         assert_eq!(cold, "PRICING_V1");
-        assert_eq!(
-            ccusage_core::cache::load_pricing(&url)
-                .expect("etag stored after 200")
-                .etag
-                .as_deref(),
-            Some("\"v1\"")
+        let cached = ccusage_core::cache::load_pricing(&url).expect("etag stored after 200");
+        assert_eq!(cached.etag.as_deref(), Some("\"v1\""));
+        assert!(
+            cached.updated_at.is_some(),
+            "a successful refresh stamps the freshness window"
         );
 
         let warm = fetch_json(&url).unwrap();
-        assert_eq!(
-            warm, "PRICING_V1",
-            "304 has no body, so this is the cached copy"
-        );
+        assert_eq!(warm, "PRICING_V1");
         assert_eq!(
             *log.lock().unwrap(),
-            vec![false, true],
-            "cold request unconditional, warm request conditional"
+            vec![false],
+            "warm fetch within the refresh window must not hit the network"
         );
     }
 
@@ -222,6 +263,8 @@ mod tests {
         ]);
 
         assert_eq!(fetch_json(&url).unwrap(), "PRICING_V1");
+        // Age the copy past the refresh window so the next fetch revalidates.
+        ccusage_core::cache::store_pricing(&url, "PRICING_V1", Some("\"v1\""), None, STALE_TS);
         let warm = fetch_json(&url).unwrap();
         assert_eq!(warm, "PRICING_V2", "changed pricing must be re-downloaded");
 
@@ -294,16 +337,27 @@ mod tests {
     }
 
     /// Network failure with a primed cache degrades to the last-known body
-    /// rather than erroring.
+    /// rather than erroring, and latches the failure into the refresh window so
+    /// the next fetch skips the broken endpoint entirely.
     #[test]
     fn fetch_degrades_to_cache_on_network_failure() {
         let _env = CacheEnv::new("degrade-on-failure");
         let url = spawn_closing_origin();
-        ccusage_core::cache::store_pricing(&url, "CACHED_BODY", Some("\"v1\""), None);
+        ccusage_core::cache::store_pricing(&url, "CACHED_BODY", Some("\"v1\""), None, STALE_TS);
         assert_eq!(
             fetch_json(&url).unwrap(),
             "CACHED_BODY",
             "must serve cached body when the response read fails"
+        );
+        let cached = ccusage_core::cache::load_pricing(&url).unwrap();
+        assert!(
+            cached.updated_at.is_some(),
+            "the failed refresh stamps the window so later runs skip the network"
+        );
+        assert_eq!(
+            fetch_json(&url).unwrap(),
+            "CACHED_BODY",
+            "a second fetch is served from the now-fresh cache"
         );
     }
 
@@ -327,7 +381,7 @@ mod tests {
         let _env = CacheEnv::new("etag-304-projected");
         let projected = r#"{"gpt-4o-proj":{"input":2.5e-6,"output":1e-5,"maxInput":128000}}"#;
         let (url, log) = spawn_scripted_origin(vec![resp_304("\"v1\"")]);
-        ccusage_core::cache::store_pricing(&url, projected, Some("\"v1\""), None);
+        ccusage_core::cache::store_pricing(&url, projected, Some("\"v1\""), None, STALE_TS);
 
         let body = fetch_json(&url).unwrap();
         assert_eq!(body, projected, "304 must return the stored body");
@@ -336,5 +390,31 @@ mod tests {
             vec![true],
             "request should be conditional"
         );
+        assert!(
+            ccusage_core::cache::load_pricing(&url)
+                .unwrap()
+                .updated_at
+                .is_some(),
+            "a 304 refresh stamps the freshness window"
+        );
+    }
+
+    #[test]
+    fn stale_latch_does_not_overwrite_newer_pricing() {
+        let _env = CacheEnv::new("stale-latch");
+        let url = "https://example.com/pricing.json";
+        const NEW_TS: i64 = 1_800_000_100;
+
+        ccusage_core::cache::store_pricing(url, "v1", Some("old-etag"), Some("old-date"), STALE_TS);
+        let stale = ccusage_core::cache::load_pricing(url).expect("cache miss after v1 store");
+        ccusage_core::cache::store_pricing(url, "v2", Some("new-etag"), Some("new-date"), NEW_TS);
+
+        super::latch_fresh(url, &stale);
+
+        let cached = ccusage_core::cache::load_pricing(url).expect("cache miss after stale latch");
+        assert_eq!(cached.body, "v2");
+        assert_eq!(cached.etag.as_deref(), Some("new-etag"));
+        assert_eq!(cached.last_modified.as_deref(), Some("new-date"));
+        assert_eq!(cached.updated_at, Some(NEW_TS));
     }
 }

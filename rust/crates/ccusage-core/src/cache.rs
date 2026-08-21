@@ -267,7 +267,7 @@ const LEDGER_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the `opencode` table, tracked in `schema_meta`.
 const OPENCODE_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the `pricing` table, tracked in `schema_meta`.
-const PRICING_SCHEMA_VERSION: i64 = 1;
+const PRICING_SCHEMA_VERSION: i64 = 2;
 
 /// Encode parsed entries into the compact blob stored in the `files` table.
 fn encode_entries(entries: &[LoadedEntry]) -> Option<Vec<u8>> {
@@ -413,7 +413,8 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
              url TEXT PRIMARY KEY,\
              etag TEXT,\
              last_modified TEXT,\
-             body TEXT NOT NULL\
+             body TEXT NOT NULL,\
+             updated_at INTEGER\
         );\
         CREATE TABLE IF NOT EXISTS schema_meta (\
              name TEXT PRIMARY KEY,\
@@ -437,6 +438,23 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         st.bind((7, "pricing")).ok()?;
         st.bind((8, PRICING_SCHEMA_VERSION)).ok()?;
         st.next().ok()?;
+    }
+    // pricing v2: `updated_at` (unix seconds of the last store) drives the
+    // freshness window. Probe the column with a read — PRAGMA table_info
+    // returns no rows in the bundled sqlite runtime. NULL rows refetch once.
+    if conn
+        .prepare("SELECT updated_at FROM pricing LIMIT 1")
+        .is_err()
+        && let Err(e) = conn.execute("ALTER TABLE pricing ADD COLUMN updated_at INTEGER")
+    {
+        eprintln!(
+            "WARN  Failed to upgrade pricing cache schema ({e}); refreshing without the cache."
+        );
+        return None;
+    }
+    if let Ok(mut st) = conn.prepare("UPDATE schema_meta SET version = ? WHERE name = 'pricing'") {
+        let _ = st.bind((1, PRICING_SCHEMA_VERSION));
+        let _ = st.next();
     }
     if let Some(stored) = read_schema_version(conn, "ledger")
         && stored != LEDGER_SCHEMA_VERSION
@@ -806,6 +824,8 @@ pub struct CachedPricing {
     pub body: String,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    /// Unix seconds of the last store; None for pre-migration rows (stale, refetch once).
+    pub updated_at: Option<i64>,
 }
 
 /// Load cached pricing metadata for `url`. Returns `None` on any miss or
@@ -813,7 +833,7 @@ pub struct CachedPricing {
 pub fn load_pricing(url: &str) -> Option<CachedPricing> {
     let conn = open_db()?;
     let mut st = conn
-        .prepare("SELECT etag, last_modified, body FROM pricing WHERE url = ?")
+        .prepare("SELECT etag, last_modified, body, updated_at FROM pricing WHERE url = ?")
         .ok()?;
     st.bind((1, url)).ok()?;
     match st.next().ok()? {
@@ -821,23 +841,26 @@ pub fn load_pricing(url: &str) -> Option<CachedPricing> {
             etag: st.read::<Option<String>, _>(0).ok().flatten(),
             last_modified: st.read::<Option<String>, _>(1).ok().flatten(),
             body: st.read::<String, _>(2).ok()?,
+            updated_at: st.read::<Option<i64>, _>(3).ok().flatten(),
         }),
         sqlite::State::Done => None,
     }
 }
 
 /// Persist pricing metadata for `url`. Best-effort: all IO errors are
-/// silently ignored (the cache is an optimization, not correctness).
+/// silently ignored (the cache is an optimization, not correctness). `updated_at`
+/// stamps the write so callers can serve warm copies without revalidating.
 pub fn store_pricing(
     url: &str,
     body: &str,
     etag: Option<&str>,
     last_modified: Option<&str>,
+    updated_at: i64,
 ) {
     let Some(conn) = open_db() else { return };
     let Ok(mut st) = conn.prepare(
-        "INSERT OR REPLACE INTO pricing(url, etag, last_modified, body) \
-         VALUES (?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO pricing(url, etag, last_modified, body, updated_at) \
+         VALUES (?, ?, ?, ?, ?)",
     ) else {
         return;
     };
@@ -845,6 +868,26 @@ pub fn store_pricing(
     let _ = st.bind((2, etag));
     let _ = st.bind((3, last_modified));
     let _ = st.bind((4, body));
+    let _ = st.bind((5, updated_at));
+    let _ = st.next();
+}
+
+/// Update only the freshness timestamp when `cached` is still the stored row.
+/// Best-effort: all IO errors are silently ignored, like `store_pricing`.
+pub fn refresh_pricing_if_unchanged(url: &str, cached: &CachedPricing, updated_at: i64) {
+    let Some(conn) = open_db() else { return };
+    let Ok(mut st) = conn.prepare(
+        "UPDATE pricing SET updated_at = ? \
+         WHERE url = ? AND body IS ? AND etag IS ? AND last_modified IS ? AND updated_at IS ?",
+    ) else {
+        return;
+    };
+    let _ = st.bind((1, updated_at));
+    let _ = st.bind((2, url));
+    let _ = st.bind((3, cached.body.as_str()));
+    let _ = st.bind((4, cached.etag.as_deref()));
+    let _ = st.bind((5, cached.last_modified.as_deref()));
+    let _ = st.bind((6, cached.updated_at));
     let _ = st.next();
 }
 
@@ -2259,12 +2302,13 @@ pub(crate) mod tests {
         let etag = Some(r#""abc123""#);
         let last_modified = Some("Wed, 09 Apr 2025 12:00:00 GMT");
 
-        store_pricing(url, body, etag, last_modified);
+        store_pricing(url, body, etag, last_modified, 1_800_000_000);
         let cached = load_pricing(url).expect("cache miss after store");
 
         assert_eq!(cached.body, body);
         assert_eq!(cached.etag.as_deref(), etag);
         assert_eq!(cached.last_modified.as_deref(), last_modified);
+        assert_eq!(cached.updated_at, Some(1_800_000_000));
     }
 
     #[test]
@@ -2278,13 +2322,14 @@ pub(crate) mod tests {
         let _env = CacheEnv::new("pricing-upsert");
         let url = "https://example.com/pricing.json";
 
-        store_pricing(url, "v1", Some("old-etag"), Some("old-date"));
-        store_pricing(url, "v2", Some("new-etag"), Some("new-date"));
+        store_pricing(url, "v1", Some("old-etag"), Some("old-date"), 1_800_000_000);
+        store_pricing(url, "v2", Some("new-etag"), Some("new-date"), 1_800_000_100);
 
         let cached = load_pricing(url).expect("cache miss after upsert");
         assert_eq!(cached.body, "v2");
         assert_eq!(cached.etag.as_deref(), Some("new-etag"));
         assert_eq!(cached.last_modified.as_deref(), Some("new-date"));
+        assert_eq!(cached.updated_at, Some(1_800_000_100));
     }
 
     #[test]
@@ -2292,12 +2337,56 @@ pub(crate) mod tests {
         let _env = CacheEnv::new("pricing-none-headers");
         let url = "https://example.com/pricing.json";
 
-        store_pricing(url, "body", None, None);
+        store_pricing(url, "body", None, None, 1_800_000_000);
         let cached = load_pricing(url).expect("cache miss after store");
 
         assert_eq!(cached.body, "body");
         assert!(cached.etag.is_none());
         assert!(cached.last_modified.is_none());
+        assert_eq!(cached.updated_at, Some(1_800_000_000));
+    }
+
+    /// A v1 database (no `updated_at` column) is migrated in place: the column
+    /// appears, the schema version is stamped 2, and pre-existing rows read back
+    /// with `updated_at: None` so they refetch once instead of being served warm.
+    #[test]
+    fn migrate_adds_updated_at_to_legacy_pricing_table() {
+        let _env = CacheEnv::new("pricing-migrate-legacy");
+        let dir = cache_dir().expect("cache dir");
+        fs::create_dir_all(&dir).expect("create cache dir");
+        let legacy = sqlite::open(dir.join(DB_FILE)).expect("open legacy db");
+        legacy
+            .execute(
+                "CREATE TABLE pricing (\
+                     url TEXT PRIMARY KEY,\
+                     etag TEXT,\
+                     last_modified TEXT,\
+                     body TEXT NOT NULL\
+                 );\
+                 CREATE TABLE schema_meta (\
+                     name TEXT PRIMARY KEY,\
+                     version INTEGER NOT NULL\
+                 );\
+                 INSERT INTO schema_meta(name, version) VALUES ('pricing', 1);\
+                 INSERT INTO pricing(url, etag, last_modified, body) \
+                     VALUES ('test://legacy', 'e', 'd', 'BODY');",
+            )
+            .expect("seed legacy schema");
+        drop(legacy);
+
+        let conn = open_db().expect("open_db should migrate the legacy schema");
+        assert_eq!(
+            read_schema_version(&conn, "pricing"),
+            Some(PRICING_SCHEMA_VERSION),
+            "migration must stamp the new version"
+        );
+        let cached = load_pricing("test://legacy").expect("legacy row survives");
+        assert_eq!(cached.body, "BODY");
+        assert_eq!(cached.etag.as_deref(), Some("e"));
+        assert_eq!(
+            cached.updated_at, None,
+            "legacy rows are stale until a refresh stores a timestamp"
+        );
     }
 
     /// `migrate()` must create `schema_meta` with exactly four rows, each

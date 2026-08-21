@@ -4506,14 +4506,6 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
-
-
     // -----------------------------------------------------------------------
     // Pricing projection tests
     // -----------------------------------------------------------------------
@@ -4907,7 +4899,13 @@ mod tests {
         from_projected.load_json(&projected);
 
         let _env = PricingCacheEnv::new("projected-round-trip");
-        crate::cache::store_pricing("test://round-trip", &projected, Some("\"v1\""), None);
+        crate::cache::store_pricing(
+            "test://round-trip",
+            &projected,
+            Some("\"v1\""),
+            None,
+            1_800_000_000,
+        );
         let cached =
             crate::cache::load_pricing("test://round-trip").expect("cache should have entry");
         let mut from_cached = super::PricingMap::default();
@@ -4942,7 +4940,13 @@ mod tests {
         }"#;
 
         let _env = PricingCacheEnv::new("legacy-row");
-        crate::cache::store_pricing("test://legacy", legacy_body, Some("\"old\""), None);
+        crate::cache::store_pricing(
+            "test://legacy",
+            legacy_body,
+            Some("\"old\""),
+            None,
+            1_800_000_000,
+        );
         let cached = crate::cache::load_pricing("test://legacy").expect("cache should have entry");
 
         let mut pricing = super::PricingMap::default();
@@ -4956,7 +4960,6 @@ mod tests {
             Some(128000)
         );
     }
-
 
     /// Size sanity: projected litellm body is materially smaller than raw.
     #[test]
