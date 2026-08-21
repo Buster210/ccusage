@@ -75,6 +75,7 @@ fn parse_duration_secs(raw: &str) -> Option<i64> {
     }
 }
 
+#[cfg(test)]
 fn is_fresh(updated_at: i64, now: i64) -> bool {
     is_fresh_with_interval(updated_at, now, pricing_refresh_interval_secs())
 }

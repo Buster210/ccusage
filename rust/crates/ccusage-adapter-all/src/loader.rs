@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
+    time::Instant,
 };
 
 use serde_json::{Value, json};
@@ -102,6 +103,7 @@ fn load_base_rows(
     shared: &SharedArgs,
     pricing: &PricingMap,
 ) -> Result<AllLoadResult> {
+    let __base_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
     let mut progress = crate::progress::UsageLoadProgress::new(
         crate::log_level() != Some(0)
             && crate::progress::should_show_usage_load_progress(
@@ -348,7 +350,14 @@ fn load_base_rows(
             }),
         });
     }
+    let __par_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
     let loaded = load_agent_rows_parallel(specs, &mut progress)?;
+    if let Some(s) = __par_start {
+        eprintln!("[timing] load_agent_rows_parallel {:?}", s.elapsed());
+    }
+    if let Some(s) = __base_start {
+        eprintln!("[timing] load_base_rows TOTAL {:?}", s.elapsed());
+    }
     let mut detected_agents = Vec::new();
     let mut rows = Vec::new();
     for loaded in loaded {
@@ -383,27 +392,47 @@ pub(super) fn load_agent_rows_parallel(
     specs: Vec<AgentLoadSpec<'_>>,
     progress: &mut crate::progress::UsageLoadProgress,
 ) -> Result<Vec<LoadedAgentRows>> {
+    let __lap_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
     for spec in &specs {
         progress.start(spec.progress_agent);
     }
 
+    // Limit thread count to available parallelism to reduce spawn overhead.
+    // Chunk specs so each worker handles ~2 specs sequentially when there are
+    // more specs than cores (e.g., 16 specs on 8 cores -> 8 workers).
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .min(specs.len())
+        .max(1);
+    let mut chunks: Vec<Vec<AgentLoadSpec<'_>>> = (0..worker_count).map(|_| Vec::new()).collect();
+    for (i, spec) in specs.into_iter().enumerate() {
+        chunks[i % worker_count].push(spec);
+    }
+
     thread::scope(|scope| {
         let (sender, receiver) = mpsc::channel();
-        let mut handles = Vec::with_capacity(specs.len());
-        for spec in specs {
+        let mut handles = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
             let sender = sender.clone();
+            // Capture chunk's progress agents for panic handling
+            let chunk_meta: Vec<(usize, crate::progress::UsageLoadAgent)> = chunk
+                .iter()
+                .map(|s| (s.index, s.progress_agent))
+                .collect();
             handles.push((
-                spec.index,
-                spec.progress_agent,
+                chunk_meta,
                 scope.spawn(move || {
-                    let result = (spec.load)();
-                    let _ = sender.send((spec.index, spec.agent, spec.progress_agent, result));
+                    for spec in chunk {
+                        let result = (spec.load)();
+                        let _ = sender.send((spec.index, spec.agent, spec.progress_agent, result));
+                    }
                 }),
             ));
         }
         drop(sender);
 
-        let mut loaded = Vec::with_capacity(handles.len());
+        let mut loaded = Vec::with_capacity(16);
         let mut errors = Vec::new();
         for (index, agent, progress_agent, result) in receiver {
             match result {
@@ -422,10 +451,12 @@ pub(super) fn load_agent_rows_parallel(
             }
         }
 
-        for (index, progress_agent, handle) in handles {
+        for (chunk_meta, handle) in handles {
             if handle.join().is_err() {
-                progress.fail(progress_agent);
-                errors.push((index, crate::cli_error("agent loader panicked")));
+                for (index, progress_agent) in chunk_meta {
+                    progress.fail(progress_agent);
+                    errors.push((index, crate::cli_error("agent loader panicked")));
+                }
             }
         }
 
@@ -435,6 +466,9 @@ pub(super) fn load_agent_rows_parallel(
         }
 
         loaded.sort_by_key(|loaded| loaded.index);
+        if let Some(s) = __lap_start {
+            eprintln!("[timing] load_agent_rows_parallel inner {:?}", s.elapsed());
+        }
         Ok(loaded)
     })
 }
