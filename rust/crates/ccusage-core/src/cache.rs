@@ -34,9 +34,59 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::UNIX_EPOCH,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Instant, UNIX_EPOCH},
 };
+
+static PRICING_V2_MIGRATED: AtomicBool = AtomicBool::new(false);
+static WAL_DONE: AtomicBool = AtomicBool::new(false);
+static EMPTY_CACHE: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn is_known_empty(namespace: &str) -> bool {
+    EMPTY_CACHE
+        .get()
+        .and_then(|m| m.lock().ok())
+        .is_some_and(|set| set.contains(namespace))
+}
+
+fn mark_known_empty(namespace: &str) {
+    let set = EMPTY_CACHE.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    if let Ok(mut s) = set.lock() {
+        s.insert(namespace.to_string());
+    }
+}
+
+fn clear_known_empty(namespace: &str) {
+    if let Some(m) = EMPTY_CACHE.get() {
+        if let Ok(mut s) = m.lock() {
+            s.remove(namespace);
+        }
+    }
+}
+
+#[inline]
+fn timing_enabled() -> bool {
+    std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some()
+}
+
+macro_rules! timed {
+    ($label:expr, $block:expr) => {{
+        let __start = if timing_enabled() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let __res = $block;
+        if let Some(s) = __start {
+            eprintln!("[timing] {} took {:?}", $label, s.elapsed());
+        }
+        __res
+    }};
+}
 
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
@@ -285,21 +335,28 @@ fn decode_entries(bytes: &[u8]) -> Option<Vec<LoadedEntry>> {
 /// schema. Returns `None` on any failure so the caller degrades to parsing
 /// without a cache, consistent with this module's non-fatal philosophy.
 fn open_db() -> Option<sqlite::Connection> {
-    let dir = cache_dir()?;
-    fs::create_dir_all(&dir).ok()?;
-    let conn = sqlite::open(dir.join(DB_FILE)).ok()?;
-    // Set the busy timeout first so ordinary lock waits — BEGIN IMMEDIATE and the
-    // schema migration — block and retry instead of failing outright.
-    conn.execute("PRAGMA busy_timeout=5000;").ok()?;
-    // SQLite treats mmap_size as a hint; if it fails we still have a usable
-    // connection, so ignore the error rather than discarding the DB.
-    let _ = conn.execute("PRAGMA mmap_size=268435456;");
-    // Switch to WAL so readers run while one writer commits (NORMAL stays durable
-    // under WAL). The switch needs a lock upgrade that busy_timeout cannot cover,
-    // so it carries its own bounded retry and never discards the connection.
-    set_wal_mode(&conn);
-    migrate(&conn)?;
-    Some(conn)
+    timed!("open_db", {
+        let dir = cache_dir()?;
+        fs::create_dir_all(&dir).ok()?;
+        let conn = sqlite::open(dir.join(DB_FILE)).ok()?;
+        // Set the busy timeout first so ordinary lock waits — BEGIN IMMEDIATE and the
+        // schema migration — block and retry instead of failing outright.
+        conn.execute("PRAGMA busy_timeout=5000;").ok()?;
+        // SQLite treats mmap_size as a hint; if it fails we still have a usable
+        // connection, so ignore the error rather than discarding the DB.
+        let _ = conn.execute("PRAGMA mmap_size=268435456;");
+        // Switch to WAL so readers run while one writer commits (NORMAL stays durable
+        // under WAL). The switch needs a lock upgrade that busy_timeout cannot cover,
+        // so it carries its own bounded retry and never discards the connection.
+        if !WAL_DONE.load(Ordering::Relaxed) {
+            let wal_ok = set_wal_mode(&conn);
+            if wal_ok && !cfg!(test) {
+                WAL_DONE.store(true, Ordering::Relaxed);
+            }
+        }
+        migrate(&conn)?;
+        Some(conn)
+    })
 }
 
 /// Switch `conn` to WAL journaling, retrying past the cold-open upgrade deadlock.
@@ -314,16 +371,19 @@ fn open_db() -> Option<sqlite::Connection> {
 /// the connection stays in its default rollback journal; writes still serialize
 /// through `busy_timeout`, so no row is lost, only cross-process read concurrency
 /// is reduced until a later uncontended run flips it to WAL.
-fn set_wal_mode(conn: &sqlite::Connection) {
+fn set_wal_mode(conn: &sqlite::Connection) -> bool {
     for attempt in 0..8u64 {
         if conn
             .execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .is_ok()
         {
-            return;
+            return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(attempt + 1));
+        if attempt < 7 {
+            std::thread::sleep(std::time::Duration::from_millis(attempt + 1));
+        }
     }
+    false
 }
 /// Remove the entire cache database and its sidecars. Non-fatal: all IO
 /// errors are ignored and there is no output. If the cache directory does not
@@ -439,18 +499,30 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         st.bind((8, PRICING_SCHEMA_VERSION)).ok()?;
         st.next().ok()?;
     }
-    // pricing v2: `updated_at` (unix seconds of the last store) drives the
-    // freshness window. Probe the column with a read — PRAGMA table_info
-    // returns no rows in the bundled sqlite runtime. NULL rows refetch once.
-    if conn
-        .prepare("SELECT updated_at FROM pricing LIMIT 1")
-        .is_err()
+    // pricing v2: `updated_at` drives the freshness window. Memoize the
+    // probe in prod - CREATE TABLE already includes the column for new DBs,
+    // so after the first successful check we skip the prepare on every
+    // open_db (called per adapter, ~15x per run). In tests each CacheEnv is a
+    // fresh temp DB, and one test deliberately creates a legacy DB without the
+    // column, so we must not memoize there.
+    let should_check = if cfg!(test) {
+        true
+    } else {
+        !PRICING_V2_MIGRATED.load(Ordering::Relaxed)
+    };
+    if should_check
+        && conn
+            .prepare("SELECT updated_at FROM pricing LIMIT 1")
+            .is_err()
         && let Err(e) = conn.execute("ALTER TABLE pricing ADD COLUMN updated_at INTEGER")
     {
         eprintln!(
             "WARN  Failed to upgrade pricing cache schema ({e}); refreshing without the cache."
         );
         return None;
+    }
+    if !cfg!(test) {
+        PRICING_V2_MIGRATED.store(true, Ordering::Relaxed);
     }
     if let Ok(mut st) = conn.prepare("UPDATE schema_meta SET version = ? WHERE name = 'pricing'") {
         let _ = st.bind((1, PRICING_SCHEMA_VERSION));
@@ -631,18 +703,115 @@ where
     F: Fn(&Path) -> crate::Result<Vec<LoadedEntry>> + Sync,
     R: Fn(&mut LoadedEntry) + Sync,
 {
+    let __lwc_start = timing_enabled().then(Instant::now);
+    if files.is_empty() {
+        if is_known_empty(namespace) {
+            if let Some(s) = __lwc_start {
+                eprintln!(
+                    "[timing] load_with_cache:{namespace}: empty known-empty fast path {:?}",
+                    s.elapsed()
+                );
+            }
+            return Ok(Vec::new());
+        }
+        let conn = open_db();
+        if let Some(s) = __lwc_start {
+            eprintln!("[timing] load_with_cache:{namespace}: open_db {:?}", s.elapsed());
+        }
+        // Quick probe for truly empty (no files, no ledger) to cache the
+        // negative and skip DB work on subsequent warm runs. This is the
+        // common case for adapters with no data (e.g., amp, goose on a
+        // Claude-only machine).
+        let mut has_files = false;
+        let mut has_ledger = false;
+        if let Some(c) = conn.as_ref() {
+            if let Ok(mut st) = c.prepare("SELECT 1 FROM files WHERE namespace = ? LIMIT 1") {
+                let _ = st.bind((1, namespace));
+                has_files = matches!(st.next(), Ok(sqlite::State::Row));
+            }
+            if let Ok(mut st) = c.prepare("SELECT 1 FROM ledger WHERE namespace = ? LIMIT 1") {
+                let _ = st.bind((1, namespace));
+                has_ledger = matches!(st.next(), Ok(sqlite::State::Row));
+            }
+        }
+        if !has_files && !has_ledger {
+            mark_known_empty(namespace);
+            if let Some(total) = __lwc_start {
+                eprintln!("[timing] load_with_cache:{namespace}: TOTAL (truly empty) {:?}", total.elapsed());
+            }
+            return Ok(Vec::new());
+        }
+        // Even with no live files we must prune deleted `files` rows and
+        // re-emit ledger entries, otherwise the ledger test fails. This is
+        // what `write_back` does when `fresh` is empty. Only prune if we
+        // know there are files rows to prune.
+        if has_files {
+            if let Some(c) = conn.as_ref() {
+                if c.execute("BEGIN IMMEDIATE").is_ok() {
+                    let ok = prune_deleted(c, namespace, files).is_some();
+                    let _ = c.execute(if ok { "COMMIT" } else { "ROLLBACK" });
+                }
+            }
+        }
+        let __merge_start = timing_enabled().then(Instant::now);
+        let res = Ok(match conn {
+            Some(conn) => {
+                if has_ledger {
+                    merge_ledger(&conn, namespace, Vec::new(), opts.live_only)
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        });
+        if let Some(s) = __merge_start {
+            eprintln!("[timing] load_with_cache:{namespace}: merge_ledger {:?}", s.elapsed());
+        }
+        if let Some(total) = __lwc_start {
+            eprintln!("[timing] load_with_cache:{namespace}: TOTAL {:?}", total.elapsed());
+        }
+        return res;
+    }
+    clear_known_empty(namespace);
     let conn = open_db();
-
+    if let Some(s) = __lwc_start {
+        eprintln!("[timing] load_with_cache:{namespace}: open_db {:?}", s.elapsed());
+    }
+    let __stored_start = timing_enabled().then(Instant::now);
     // Partition against the stored namespace snapshot (empty when the cache is
     // unavailable, which forces every file to be parsed fresh).
     let stored = conn
         .as_ref()
         .map(|conn| load_namespace_files(conn, namespace))
         .unwrap_or_default();
+    if let Some(s) = __stored_start {
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: load_namespace_files {:?} (files={})",
+            s.elapsed(),
+            files.len()
+        );
+    }
+    let __part_start = timing_enabled().then(Instant::now);
     let partition = partition_files(files, &stored, &freshness);
+    if let Some(s) = __part_start {
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: partition_files {:?} cached={} fresh={}",
+            s.elapsed(),
+            partition.cached.len(),
+            partition.fresh.len()
+        );
+    }
 
     let fresh_paths: Vec<PathBuf> = partition.fresh.iter().map(|f| f.path.clone()).collect();
+    let __parse_start = timing_enabled().then(Instant::now);
     let mut parsed = parse_fresh_files(&fresh_paths, opts.single_thread, &parse_file)?;
+    if let Some(s) = __parse_start {
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: parse_fresh_files {:?} fresh_count={}",
+            s.elapsed(),
+            fresh_paths.len()
+        );
+    }
 
     // Reprice fresh entries before persisting so cache and ledger store current cost.
     for entry in parsed.iter_mut().flatten() {
@@ -652,7 +821,11 @@ where
     // Persist fresh entries, append them to the ledger, and prune deleted sources
     // in one transaction. Skipped when the cache is unavailable.
     if let Some(conn) = conn.as_ref() {
-        write_back(conn, namespace, &partition.fresh, &parsed);
+        let __wb_start = timing_enabled().then(Instant::now);
+        write_back(conn, namespace, &partition.fresh, &parsed, files);
+        if let Some(s) = __wb_start {
+            eprintln!("[timing] load_with_cache:{namespace}: write_back {:?}", s.elapsed());
+        }
     }
 
     // Assemble live entries (cached hits first, then freshly parsed).
@@ -674,10 +847,18 @@ where
     // Merge the ledger: record new billable entries and re-emit entries whose
     // source file has since been deleted. Without a cache there is nothing to
     // merge, so the live entries pass through unchanged.
-    Ok(match conn {
+    let __merge_start = timing_enabled().then(Instant::now);
+    let res = Ok(match conn {
         Some(conn) => merge_ledger(&conn, namespace, live, opts.live_only),
         None => live,
-    })
+    });
+    if let Some(s) = __merge_start {
+        eprintln!("[timing] load_with_cache:{namespace}: merge_ledger {:?}", s.elapsed());
+    }
+    if let Some(total) = __lwc_start {
+        eprintln!("[timing] load_with_cache:{namespace}: TOTAL {:?}", total.elapsed());
+    }
+    res
 }
 
 /// Upsert fresh entries, append them to the ledger, and prune deleted sources in
@@ -688,6 +869,7 @@ fn write_back(
     namespace: &str,
     fresh: &[FreshFile],
     parsed: &[Vec<LoadedEntry>],
+    files: &[PathBuf],
 ) {
     if conn.execute("BEGIN IMMEDIATE").is_err() {
         return;
@@ -702,7 +884,7 @@ fn write_back(
             }
             append_entries_to_ledger(conn, namespace, entries)?;
         }
-        prune_deleted(conn, namespace)?;
+        prune_deleted(conn, namespace, files)?;
         Some(())
     })();
     let _ = conn.execute(if committed.is_some() {
@@ -742,7 +924,11 @@ fn upsert_file(
 /// Their spend is preserved in the ledger (appended while the file was last
 /// live), so the cached entries for a deleted file are dead weight; removing
 /// them keeps the cache bounded.
-fn prune_deleted(conn: &sqlite::Connection, namespace: &str) -> Option<()> {
+fn prune_deleted(conn: &sqlite::Connection, namespace: &str, files: &[PathBuf]) -> Option<()> {
+    // Build a set of live file paths for O(1) membership test, avoiding a
+    // per-row `stat` syscall. `files` is the full on-disk set for this
+    // namespace, so any stored path absent from it is a deleted source.
+    let live: HashSet<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
     let mut gone = Vec::new();
     {
         let mut st = conn
@@ -751,15 +937,18 @@ fn prune_deleted(conn: &sqlite::Connection, namespace: &str) -> Option<()> {
         st.bind((1, namespace)).ok()?;
         while let Ok(sqlite::State::Row) = st.next() {
             if let Ok(path) = st.read::<String, _>(0)
-                && file_metadata(Path::new(&path)).is_none()
+                && !live.contains(&path)
             {
                 gone.push(path);
             }
         }
     }
     for path in gone {
-        let mut st = conn.prepare("DELETE FROM files WHERE path = ?").ok()?;
-        st.bind((1, path.as_str())).ok()?;
+        let mut st = conn
+            .prepare("DELETE FROM files WHERE namespace = ? AND path = ?")
+            .ok()?;
+        st.bind((1, namespace)).ok()?;
+        st.bind((2, path.as_str())).ok()?;
         st.next().ok()?;
     }
     Some(())
