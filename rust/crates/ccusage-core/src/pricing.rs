@@ -39,10 +39,12 @@ fn build_time_pricing_json() -> &'static str {
     inflate_snapshot(&JSON, BUILD_TIME_PRICING_DEFLATE)
 }
 
+
 fn build_time_models_dev_json() -> &'static str {
     static JSON: OnceLock<String> = OnceLock::new();
     inflate_snapshot(&JSON, BUILD_TIME_MODELS_DEV_DEFLATE)
 }
+
 
 fn models_dev_catalog_rules_json() -> &'static str {
     static JSON: OnceLock<String> = OnceLock::new();
@@ -256,7 +258,7 @@ pub struct PricingMap {
 /// as `claude-opus-5-eu` passes the gate and is billed at the base model's rate,
 /// which is exactly what marking the id exact-only was meant to prevent. That
 /// spelling names the tier, so it resolves to it rather than losing its rate.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct ExactOnlyKeys {
     raw: FxHashSet<String>,
     /// Every id under its normalized spelling, mapped back to the id it names.
@@ -342,6 +344,19 @@ impl Default for PricingMap {
     }
 }
 
+impl Clone for PricingMap {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            exact_only: self.exact_only.clone(),
+            context_limits: self.context_limits.clone(),
+            enable_models_dev_fallback: self.enable_models_dev_fallback,
+            enable_embedded_models_dev_fallback: self.enable_embedded_models_dev_fallback,
+            find_cache: std::sync::RwLock::new((0, FxHashMap::default())),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LiteLlmPricing {
     input_cost_per_token: Option<f64>,
@@ -373,6 +388,20 @@ struct CompactLiteLlmPricing {
     cra: Option<f64>,
     ctx: Option<u64>,
     fast: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LiteLlmPricingEntry {
+    Compact(CompactLiteLlmPricing),
+    Full(LiteLlmPricing),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MaybePricingEntry {
+    Valid(LiteLlmPricingEntry),
+    Invalid(serde::de::IgnoredAny),
 }
 
 #[derive(Debug, Deserialize)]
@@ -753,16 +782,21 @@ impl FastMultiplierOverrides {
 
 impl PricingMap {
     pub fn load_embedded() -> Self {
-        let mut map = Self::default();
-        let fast_multiplier_overrides = FastMultiplierOverrides::load();
-        map.load_json_with_overrides(build_time_pricing_json(), &fast_multiplier_overrides);
-        map.put_builtin_pricing(&fast_multiplier_overrides);
-        map.fill_long_context_rates_from_models_dev();
-        // Resolve models that LiteLLM and the built-in table miss from the
-        // embedded models.dev snapshot. This works offline, unlike the network
-        // source gated by `enable_models_dev_fallback`.
-        map.enable_embedded_models_dev_fallback = true;
-        map
+        static CACHE: OnceLock<PricingMap> = OnceLock::new();
+        CACHE
+            .get_or_init(|| {
+                let mut map = Self::default();
+                let fast_multiplier_overrides = FastMultiplierOverrides::load();
+                map.load_json_with_overrides(build_time_pricing_json(), &fast_multiplier_overrides);
+                map.put_builtin_pricing(&fast_multiplier_overrides);
+                map.fill_long_context_rates_from_models_dev();
+                // Resolve models that LiteLLM and the built-in table miss from the
+                // embedded models.dev snapshot. This works offline, unlike the network
+                // source gated by `enable_models_dev_fallback`.
+                map.enable_embedded_models_dev_fallback = true;
+                map
+            })
+            .clone()
     }
 
     pub fn load_with_overrides<'a, I>(offline: bool, log: bool, overrides: I) -> Self
@@ -813,13 +847,33 @@ impl PricingMap {
         json: &str,
         fast_multiplier_overrides: &FastMultiplierOverrides,
     ) -> usize {
-        let Ok(raw) = serde_json::from_str::<FxHashMap<String, serde_json::Value>>(json) else {
+        // Direct deserialization without intermediate `Value` + `from_value`.
+        // The `untagged` enum tries `Compact` first (requires `i`/`o`) then
+        // `Full`; the outer `MaybePricingEntry` captures the single invalid
+        // entry (`sample_spec`) as `Invalid(IgnoredAny)` instead of failing the
+        // whole map.
+        let Ok(raw) = serde_json::from_str::<FxHashMap<String, MaybePricingEntry>>(json) else {
             return 0;
         };
         let mut loaded_count = 0;
-        for (model, value) in raw {
-            let Some(pricing) = parse_litellm_pricing(value) else {
-                continue;
+        for (model, entry) in raw {
+            let pricing = match entry {
+                MaybePricingEntry::Valid(LiteLlmPricingEntry::Compact(compact)) => LiteLlmPricing {
+                    input_cost_per_token: Some(compact.i),
+                    output_cost_per_token: Some(compact.o),
+                    cache_creation_input_token_cost: compact.cc,
+                    cache_read_input_token_cost: compact.cr,
+                    input_cost_per_token_above_200k_tokens: compact.ia,
+                    output_cost_per_token_above_200k_tokens: compact.oa,
+                    cache_creation_input_token_cost_above_200k_tokens: compact.cca,
+                    cache_read_input_token_cost_above_200k_tokens: compact.cra,
+                    max_input_tokens: compact.ctx,
+                    provider_specific_entry: compact
+                        .fast
+                        .map(|fast| ProviderSpecificEntry { fast: Some(fast) }),
+                },
+                MaybePricingEntry::Valid(LiteLlmPricingEntry::Full(pricing)) => pricing,
+                MaybePricingEntry::Invalid(_) => continue,
             };
             let Some(input) = pricing.input_cost_per_token else {
                 continue;
@@ -863,6 +917,7 @@ impl PricingMap {
         self.clear_find_cache();
         loaded_count
     }
+
 
     fn load_models_dev_json_missing(&mut self, json: &str) -> Option<usize> {
         let raw = parse_models_dev_json(json)?;
@@ -1998,53 +2053,34 @@ impl PricingMap {
     }
 }
 
-fn parse_litellm_pricing(value: Value) -> Option<LiteLlmPricing> {
-    if value
-        .as_object()
-        .is_some_and(|entry| entry.contains_key("i") && entry.contains_key("o"))
-        && let Ok(compact) = serde_json::from_value::<CompactLiteLlmPricing>(value.clone())
-    {
-        return Some(LiteLlmPricing {
-            input_cost_per_token: Some(compact.i),
-            output_cost_per_token: Some(compact.o),
-            cache_creation_input_token_cost: compact.cc,
-            cache_read_input_token_cost: compact.cr,
-            input_cost_per_token_above_200k_tokens: compact.ia,
-            output_cost_per_token_above_200k_tokens: compact.oa,
-            cache_creation_input_token_cost_above_200k_tokens: compact.cca,
-            cache_read_input_token_cost_above_200k_tokens: compact.cra,
-            max_input_tokens: compact.ctx,
-            provider_specific_entry: compact
-                .fast
-                .map(|fast| ProviderSpecificEntry { fast: Some(fast) }),
-        });
-    }
-    let pricing = serde_json::from_value::<LiteLlmPricing>(value).ok()?;
-    pricing
-        .input_cost_per_token
-        .zip(pricing.output_cost_per_token)
-        .map(|_| pricing)
-}
-
 fn parse_models_dev_json(json: &str) -> Option<ModelsDevJson> {
-    let value = serde_json::from_str::<Value>(json).ok()?;
-    let Value::Object(entries) = &value else {
-        return None;
-    };
-    if entries.values().any(models_dev_entry_has_models_field) {
-        if !entries.values().all(models_dev_entry_has_models_field) {
-            return None;
+    // Avoid the intermediate `Value` tree: try Provider shape directly.
+    // `FxHashMap<String, ModelsDevProvider>` succeeds iff every entry carries a
+    // `models` object, which is exactly the `any`+`all(models_field)` gate
+    // above. Mixed shapes fail both branches and correctly yield `None`.
+    if let Ok(providers) = serde_json::from_str::<FxHashMap<String, ModelsDevProvider>>(json)
+    {
+        // `from_str` on an empty map succeeds for both shapes; the original
+        // treats `{}` as the flat `Models` variant (empty), so normalize empty
+        // to `Models` to preserve that distinction even though 0 entries is 0.
+        if providers.is_empty() {
+            return Some(ModelsDevJson::Models(FxHashMap::default()));
         }
-        return serde_json::from_value::<FxHashMap<String, ModelsDevProvider>>(value)
-            .ok()
-            .map(ModelsDevJson::Providers);
+        return Some(ModelsDevJson::Providers(providers));
     }
-    if !entries.values().all(models_dev_entry_has_required_cost) {
-        return None;
+    // Not provider-shaped: must be the flat `Models` shape where every entry
+    // carries numeric `cost.input`+`cost.output`. Directly deserialize as that
+    // shape and validate the required cost fields, mirroring the original
+    // `all(required_cost)` gate without building a `Value` first.
+    if let Ok(models) = serde_json::from_str::<FxHashMap<String, ModelsDevModel>>(json) {
+        if models
+            .values()
+            .all(|m| m.cost.as_ref().is_some_and(|c| c.input.is_some() && c.output.is_some()))
+        {
+            return Some(ModelsDevJson::Models(models));
+        }
     }
-    serde_json::from_value::<FxHashMap<String, ModelsDevModel>>(value)
-        .ok()
-        .map(ModelsDevJson::Models)
+    None
 }
 
 fn models_dev_entry_has_models_field(value: &Value) -> bool {
