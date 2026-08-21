@@ -101,10 +101,10 @@ use super::report::{report_from_rows, summarize_entries};
 mod tests {
     use super::super::{parser::parse_usage_object, paths::CODEBUFF_DATA_DIR_ENV};
     use super::*;
-    use ccusage_test_support::CacheEnv;
     use crate::{
         TokenUsageRaw, UsageEntry, UsageMessage, cli::AgentReportKind, parse_ts_timestamp,
     };
+    use ccusage_test_support::CacheEnv;
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
     #[test]

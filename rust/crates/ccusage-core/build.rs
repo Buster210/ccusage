@@ -66,7 +66,6 @@ fn deflate(bytes: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec(bytes, 10)
 }
 
-
 fn out_dir_path(file_name: &str) -> PathBuf {
     PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo")).join(file_name)
 }

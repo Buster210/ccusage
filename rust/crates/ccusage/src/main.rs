@@ -42,13 +42,13 @@ fn main() -> Result<()> {
     // Detached background refresh for stale-while-revalidate. The parent
     // spawns `ccusage __internal-fetch-pricing <url>` and returns stale
     // immediately; this child does the blocking fetch and exits.
-    if let Some(arg) = std::env::args().nth(1) {
-        if arg == "__internal-fetch-pricing" {
-            if let Some(url) = std::env::args().nth(2) {
-                let _ = http::fetch_json_sync(&url);
-            }
-            return Ok(());
+    if let Some(arg) = std::env::args().nth(1)
+        && arg == "__internal-fetch-pricing"
+    {
+        if let Some(url) = std::env::args().nth(2) {
+            let _ = http::fetch_json_sync(&url);
         }
+        return Ok(());
     }
     pricing::set_json_fetcher(http::fetch_json);
     let cli = cli::parse();

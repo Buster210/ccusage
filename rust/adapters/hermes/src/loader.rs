@@ -172,8 +172,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use ccusage_test_support::CacheEnv;
     use crate::PricingMap;
+    use ccusage_test_support::CacheEnv;
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
     fn create_state_db(path: &Path) {

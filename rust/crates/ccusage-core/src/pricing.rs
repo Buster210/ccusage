@@ -39,12 +39,10 @@ fn build_time_pricing_json() -> &'static str {
     inflate_snapshot(&JSON, BUILD_TIME_PRICING_DEFLATE)
 }
 
-
 fn build_time_models_dev_json() -> &'static str {
     static JSON: OnceLock<String> = OnceLock::new();
     inflate_snapshot(&JSON, BUILD_TIME_MODELS_DEV_DEFLATE)
 }
-
 
 fn models_dev_catalog_rules_json() -> &'static str {
     static JSON: OnceLock<String> = OnceLock::new();
@@ -917,7 +915,6 @@ impl PricingMap {
         self.clear_find_cache();
         loaded_count
     }
-
 
     fn load_models_dev_json_missing(&mut self, json: &str) -> Option<usize> {
         let raw = parse_models_dev_json(json)?;
@@ -2058,8 +2055,7 @@ fn parse_models_dev_json(json: &str) -> Option<ModelsDevJson> {
     // `FxHashMap<String, ModelsDevProvider>` succeeds iff every entry carries a
     // `models` object, which is exactly the `any`+`all(models_field)` gate
     // above. Mixed shapes fail both branches and correctly yield `None`.
-    if let Ok(providers) = serde_json::from_str::<FxHashMap<String, ModelsDevProvider>>(json)
-    {
+    if let Ok(providers) = serde_json::from_str::<FxHashMap<String, ModelsDevProvider>>(json) {
         // `from_str` on an empty map succeeds for both shapes; the original
         // treats `{}` as the flat `Models` variant (empty), so normalize empty
         // to `Models` to preserve that distinction even though 0 entries is 0.
@@ -2072,13 +2068,14 @@ fn parse_models_dev_json(json: &str) -> Option<ModelsDevJson> {
     // carries numeric `cost.input`+`cost.output`. Directly deserialize as that
     // shape and validate the required cost fields, mirroring the original
     // `all(required_cost)` gate without building a `Value` first.
-    if let Ok(models) = serde_json::from_str::<FxHashMap<String, ModelsDevModel>>(json) {
-        if models
-            .values()
-            .all(|m| m.cost.as_ref().is_some_and(|c| c.input.is_some() && c.output.is_some()))
-        {
-            return Some(ModelsDevJson::Models(models));
-        }
+    if let Ok(models) = serde_json::from_str::<FxHashMap<String, ModelsDevModel>>(json)
+        && models.values().all(|m| {
+            m.cost
+                .as_ref()
+                .is_some_and(|c| c.input.is_some() && c.output.is_some())
+        })
+    {
+        return Some(ModelsDevJson::Models(models));
     }
     None
 }
