@@ -135,7 +135,7 @@ impl SimpleTable {
     }
 
     fn compact_date_row(&self, row: &[String], widths: &[usize]) -> Vec<String> {
-        if !self.compact_dates || widths.first().copied().unwrap_or_default() > 10 {
+        if !self.compact_dates || widths.first().copied().unwrap_or_default() >= 12 {
             return row.to_vec();
         }
         let mut row = row.to_vec();
@@ -199,24 +199,23 @@ fn fit_widths_to_terminal(
         })
         .collect::<Vec<_>>();
 
-    let available_width = terminal_width.saturating_sub(widths.len() + 1);
-    let total_content_width = widths.iter().sum::<usize>();
-    if total_content_width > 0 {
-        let scale = available_width as f64 / total_content_width as f64;
-        for (index, width) in widths.iter_mut().enumerate() {
-            let scaled = (*width as f64 * scale).floor() as usize;
-            *width = scaled.max(minimums[index]);
-        }
-    }
-
+    // Smart shrink: keep Date (index 0) intact as long as possible.
     while cli_table_required_width(&widths) > terminal_width {
-        let Some(index) = widths
+        let candidate = widths
             .iter()
             .enumerate()
-            .filter(|(index, width)| **width > minimums[*index])
-            .max_by_key(|(_, width)| **width)
-            .map(|(index, _)| index)
-        else {
+            .filter(|(idx, w)| **w > minimums[*idx] && *idx != 0)
+            .max_by_key(|(_, w)| **w)
+            .map(|(idx, _)| idx)
+            .or_else(|| {
+                widths
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, w)| **w > minimums[*idx])
+                    .max_by_key(|(_, w)| **w)
+                    .map(|(idx, _)| idx)
+            });
+        let Some(index) = candidate else {
             break;
         };
         widths[index] -= 1;

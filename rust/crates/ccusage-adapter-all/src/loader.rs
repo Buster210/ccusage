@@ -103,7 +103,9 @@ fn load_base_rows(
     shared: &SharedArgs,
     pricing: &PricingMap,
 ) -> Result<AllLoadResult> {
-    let __base_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
+    let __base_start = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(Instant::now);
     let mut progress = crate::progress::UsageLoadProgress::new(
         crate::log_level() != Some(0)
             && crate::progress::should_show_usage_load_progress(
@@ -350,7 +352,9 @@ fn load_base_rows(
             }),
         });
     }
-    let __par_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
+    let __par_start = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(Instant::now);
     let loaded = load_agent_rows_parallel(specs, &mut progress)?;
     if let Some(s) = __par_start {
         eprintln!("[timing] load_agent_rows_parallel {:?}", s.elapsed());
@@ -392,7 +396,9 @@ pub(super) fn load_agent_rows_parallel(
     specs: Vec<AgentLoadSpec<'_>>,
     progress: &mut crate::progress::UsageLoadProgress,
 ) -> Result<Vec<LoadedAgentRows>> {
-    let __lap_start = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(Instant::now);
+    let __lap_start = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(Instant::now);
     for spec in &specs {
         progress.start(spec.progress_agent);
     }
@@ -416,10 +422,8 @@ pub(super) fn load_agent_rows_parallel(
         for chunk in chunks {
             let sender = sender.clone();
             // Capture chunk's progress agents for panic handling
-            let chunk_meta: Vec<(usize, crate::progress::UsageLoadAgent)> = chunk
-                .iter()
-                .map(|s| (s.index, s.progress_agent))
-                .collect();
+            let chunk_meta: Vec<(usize, crate::progress::UsageLoadAgent)> =
+                chunk.iter().map(|s| (s.index, s.progress_agent)).collect();
             handles.push((
                 chunk_meta,
                 scope.spawn(move || {
@@ -893,8 +897,8 @@ pub(super) fn aggregate_rows(rows: Vec<AllRow>, kind: AgentReportKind) -> Vec<Al
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ccusage_test_support::CacheEnv;
     use ccusage_cli::NamedPiStore;
+    use ccusage_test_support::CacheEnv;
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
     fn usage_summary(date: &str, input_tokens: u64) -> UsageSummary {

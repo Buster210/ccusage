@@ -1,6 +1,5 @@
 use ccusage_adapter_common::{
-    read_files_parallel,
-    collect_files_with_extension, filter_loaded_entries_by_date,
+    collect_files_with_extension, filter_loaded_entries_by_date, read_files_parallel,
 };
 use ccusage_core::*;
 

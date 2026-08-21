@@ -8,9 +8,9 @@ use jiff::tz::TimeZone as JiffTimeZone;
 
 use crate::{
     LoadedEntry, PricingMap, Result,
-    sqlite_util::{open_readonly, read_id_session_data},
     cli::SharedArgs,
     debug_log, parse_tz,
+    sqlite_util::{open_readonly, read_id_session_data},
 };
 
 use super::{
@@ -211,8 +211,8 @@ mod tests {
     use std::{path::Path, sync::Mutex};
 
     use super::*;
-    use ccusage_test_support::CacheEnv;
     use crate::{PricingMap, cli::CostMode};
+    use ccusage_test_support::CacheEnv;
     use ccusage_test_support::{EnvVarGuard, fs_fixture};
 
     static KILO_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());

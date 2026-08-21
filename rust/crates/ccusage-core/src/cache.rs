@@ -61,10 +61,10 @@ fn mark_known_empty(namespace: &str) {
 }
 
 fn clear_known_empty(namespace: &str) {
-    if let Some(m) = EMPTY_CACHE.get() {
-        if let Ok(mut s) = m.lock() {
-            s.remove(namespace);
-        }
+    if let Some(m) = EMPTY_CACHE.get()
+        && let Ok(mut s) = m.lock()
+    {
+        s.remove(namespace);
     }
 }
 
@@ -716,7 +716,10 @@ where
         }
         let conn = open_db();
         if let Some(s) = __lwc_start {
-            eprintln!("[timing] load_with_cache:{namespace}: open_db {:?}", s.elapsed());
+            eprintln!(
+                "[timing] load_with_cache:{namespace}: open_db {:?}",
+                s.elapsed()
+            );
         }
         // Quick probe for truly empty (no files, no ledger) to cache the
         // negative and skip DB work on subsequent warm runs. This is the
@@ -737,7 +740,10 @@ where
         if !has_files && !has_ledger {
             mark_known_empty(namespace);
             if let Some(total) = __lwc_start {
-                eprintln!("[timing] load_with_cache:{namespace}: TOTAL (truly empty) {:?}", total.elapsed());
+                eprintln!(
+                    "[timing] load_with_cache:{namespace}: TOTAL (truly empty) {:?}",
+                    total.elapsed()
+                );
             }
             return Ok(Vec::new());
         }
@@ -745,13 +751,12 @@ where
         // re-emit ledger entries, otherwise the ledger test fails. This is
         // what `write_back` does when `fresh` is empty. Only prune if we
         // know there are files rows to prune.
-        if has_files {
-            if let Some(c) = conn.as_ref() {
-                if c.execute("BEGIN IMMEDIATE").is_ok() {
-                    let ok = prune_deleted(c, namespace, files).is_some();
-                    let _ = c.execute(if ok { "COMMIT" } else { "ROLLBACK" });
-                }
-            }
+        if has_files
+            && let Some(c) = conn.as_ref()
+            && c.execute("BEGIN IMMEDIATE").is_ok()
+        {
+            let ok = prune_deleted(c, namespace, files).is_some();
+            let _ = c.execute(if ok { "COMMIT" } else { "ROLLBACK" });
         }
         let __merge_start = timing_enabled().then(Instant::now);
         let res = Ok(match conn {
@@ -765,17 +770,26 @@ where
             None => Vec::new(),
         });
         if let Some(s) = __merge_start {
-            eprintln!("[timing] load_with_cache:{namespace}: merge_ledger {:?}", s.elapsed());
+            eprintln!(
+                "[timing] load_with_cache:{namespace}: merge_ledger {:?}",
+                s.elapsed()
+            );
         }
         if let Some(total) = __lwc_start {
-            eprintln!("[timing] load_with_cache:{namespace}: TOTAL {:?}", total.elapsed());
+            eprintln!(
+                "[timing] load_with_cache:{namespace}: TOTAL {:?}",
+                total.elapsed()
+            );
         }
         return res;
     }
     clear_known_empty(namespace);
     let conn = open_db();
     if let Some(s) = __lwc_start {
-        eprintln!("[timing] load_with_cache:{namespace}: open_db {:?}", s.elapsed());
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: open_db {:?}",
+            s.elapsed()
+        );
     }
     let __stored_start = timing_enabled().then(Instant::now);
     // Partition against the stored namespace snapshot (empty when the cache is
@@ -824,7 +838,10 @@ where
         let __wb_start = timing_enabled().then(Instant::now);
         write_back(conn, namespace, &partition.fresh, &parsed, files);
         if let Some(s) = __wb_start {
-            eprintln!("[timing] load_with_cache:{namespace}: write_back {:?}", s.elapsed());
+            eprintln!(
+                "[timing] load_with_cache:{namespace}: write_back {:?}",
+                s.elapsed()
+            );
         }
     }
 
@@ -853,10 +870,16 @@ where
         None => live,
     });
     if let Some(s) = __merge_start {
-        eprintln!("[timing] load_with_cache:{namespace}: merge_ledger {:?}", s.elapsed());
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: merge_ledger {:?}",
+            s.elapsed()
+        );
     }
     if let Some(total) = __lwc_start {
-        eprintln!("[timing] load_with_cache:{namespace}: TOTAL {:?}", total.elapsed());
+        eprintln!(
+            "[timing] load_with_cache:{namespace}: TOTAL {:?}",
+            total.elapsed()
+        );
     }
     res
 }
@@ -928,7 +951,10 @@ fn prune_deleted(conn: &sqlite::Connection, namespace: &str, files: &[PathBuf]) 
     // Build a set of live file paths for O(1) membership test, avoiding a
     // per-row `stat` syscall. `files` is the full on-disk set for this
     // namespace, so any stored path absent from it is a deleted source.
-    let live: HashSet<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let live: HashSet<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     let mut gone = Vec::new();
     {
         let mut st = conn

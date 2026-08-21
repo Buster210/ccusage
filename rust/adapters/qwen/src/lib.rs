@@ -1,6 +1,4 @@
-use ccusage_adapter_common::{
-    collect_files_with_extension, filter_loaded_entries_by_date,
-};
+use ccusage_adapter_common::{collect_files_with_extension, filter_loaded_entries_by_date};
 use ccusage_core::*;
 
 mod loader;
@@ -77,8 +75,8 @@ mod tests {
 
     use super::*;
     use crate::UsageSummary;
-    use ccusage_test_support::CacheEnv;
     use crate::cli::{CostMode, SharedArgs};
+    use ccusage_test_support::CacheEnv;
 
     #[test]
     fn loads_qwen_jsonl_usage_entries() {

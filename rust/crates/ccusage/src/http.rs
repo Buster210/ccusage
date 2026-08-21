@@ -23,28 +23,24 @@ fn now_unix_secs() -> i64 {
 
 fn pricing_refresh_interval_secs() -> i64 {
     for key in ["CCUSAGE_PRICING_REFRESH_INTERVAL", "CCUSAGE_PRICING_TTL"] {
-        if let Some(raw) = std::env::var_os(key) {
-            if let Some(s) = raw.to_str() {
-                if let Some(v) = parse_duration_secs(s) {
-                    if v > 0 {
-                        return v;
-                    }
-                }
-            }
+        if let Some(raw) = std::env::var_os(key)
+            && let Some(s) = raw.to_str()
+            && let Some(v) = parse_duration_secs(s)
+            && v > 0
+        {
+            return v;
         }
     }
     DEFAULT_PRICING_REFRESH_INTERVAL_SECS
 }
 
 fn pricing_retry_interval_secs() -> i64 {
-    if let Some(raw) = std::env::var_os("CCUSAGE_PRICING_RETRY_INTERVAL") {
-        if let Some(s) = raw.to_str() {
-            if let Some(v) = parse_duration_secs(s) {
-                if v > 0 {
-                    return v;
-                }
-            }
-        }
+    if let Some(raw) = std::env::var_os("CCUSAGE_PRICING_RETRY_INTERVAL")
+        && let Some(s) = raw.to_str()
+        && let Some(v) = parse_duration_secs(s)
+        && v > 0
+    {
+        return v;
     }
     DEFAULT_PRICING_RETRY_INTERVAL_SECS
 }
@@ -169,7 +165,9 @@ pub(crate) fn fetch_json(url: &str) -> std::io::Result<String> {
     // immediately and refresh in background. Latch as retry so concurrent
     // invocations don't spawn a herd.
     if let Some(c) = cached.as_ref() {
-        let is_stale = c.updated_at.is_none_or(|ts| !is_fresh_with_interval(ts, now, refresh));
+        let is_stale = c
+            .updated_at
+            .is_none_or(|ts| !is_fresh_with_interval(ts, now, refresh));
         if is_stale {
             if std::env::var_os("CCUSAGE_DISABLE_BACKGROUND_REFRESH").is_some() {
                 // Tests or explicit opt-out: do a blocking refresh so
@@ -636,10 +634,7 @@ mod tests {
         let _env = CacheEnv::new("configurable-ttl-alias");
         let _vars = ccusage_test_support::EnvVarsGuard::set_many([
             ("CCUSAGE_PRICING_REFRESH_INTERVAL", None),
-            (
-                "CCUSAGE_PRICING_TTL",
-                Some(std::ffi::OsString::from("10s")),
-            ),
+            ("CCUSAGE_PRICING_TTL", Some(std::ffi::OsString::from("10s"))),
             ("CCUSAGE_PRICING_RETRY_INTERVAL", None),
         ]);
         assert_eq!(super::pricing_refresh_interval_secs(), 10);

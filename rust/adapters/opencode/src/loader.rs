@@ -765,7 +765,10 @@ mod tests {
         assert_eq!(entries[0].model.as_deref(), Some("deepseek-v4-flash-free"));
         assert_eq!(entries[0].data.message.usage.input_tokens, 120);
         assert_eq!(entries[0].data.message.usage.output_tokens, 60);
-        assert_eq!(entries[0].data.message.usage.cache_creation_input_tokens, 24);
+        assert_eq!(
+            entries[0].data.message.usage.cache_creation_input_tokens,
+            24
+        );
         assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 12);
     }
 
@@ -922,7 +925,8 @@ mod tests {
 
     #[test]
     fn prefers_database_messages_over_duplicate_json_files() {
-        let _cache_env = CacheEnv::new("opencode-prefers-database-messages-over-duplicate-json-files");
+        let _cache_env =
+            CacheEnv::new("opencode-prefers-database-messages-over-duplicate-json-files");
         let fixture = fs_fixture!({
             "storage/message/message.json": r#"{"id":"msg-1","sessionID":"json-session-a","providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":999,"output":999},"cost":0.99}"#,
         });
@@ -1054,7 +1058,8 @@ mod tests {
 
     #[test]
     fn since_filter_drops_db_rows_older_than_lower_bound() {
-        let _cache_env = CacheEnv::new("opencode-since-filter-drops-db-rows-older-than-lower-bound");
+        let _cache_env =
+            CacheEnv::new("opencode-since-filter-drops-db-rows-older-than-lower-bound");
         let fixture = fs_fixture!({});
         // 2025-12-31 00:00 UTC
         create_db_message_with_time(
@@ -1087,7 +1092,8 @@ mod tests {
 
     #[test]
     fn until_filter_drops_db_rows_at_or_after_upper_bound() {
-        let _cache_env = CacheEnv::new("opencode-until-filter-drops-db-rows-at-or-after-upper-bound");
+        let _cache_env =
+            CacheEnv::new("opencode-until-filter-drops-db-rows-at-or-after-upper-bound");
         let fixture = fs_fixture!({});
         // 2026-01-02 00:00 UTC, in range for until=20260105
         create_db_message_with_time(
@@ -1120,7 +1126,9 @@ mod tests {
 
     #[test]
     fn legacy_schema_without_time_created_still_returns_in_range_rows() {
-        let _cache_env = CacheEnv::new("opencode-legacy-schema-without-time-created-still-returns-in-range-rows");
+        let _cache_env = CacheEnv::new(
+            "opencode-legacy-schema-without-time-created-still-returns-in-range-rows",
+        );
         let fixture = fs_fixture!({});
         create_db_message_legacy_schema(
             &fixture.path("opencode.db"),
@@ -1145,7 +1153,9 @@ mod tests {
 
     #[test]
     fn legacy_schema_without_time_created_still_drops_out_of_range_rows() {
-        let _cache_env = CacheEnv::new("opencode-legacy-schema-without-time-created-still-drops-out-of-range-rows");
+        let _cache_env = CacheEnv::new(
+            "opencode-legacy-schema-without-time-created-still-drops-out-of-range-rows",
+        );
         let fixture = fs_fixture!({});
         create_db_message_legacy_schema(
             &fixture.path("opencode.db"),
@@ -1296,7 +1306,8 @@ mod tests {
 
     #[test]
     fn extracts_timestamp_from_pretty_printed_file_when_out_of_range() {
-        let _cache_env = CacheEnv::new("opencode-extracts-timestamp-from-pretty-printed-file-when-out-of-range");
+        let _cache_env =
+            CacheEnv::new("opencode-extracts-timestamp-from-pretty-printed-file-when-out-of-range");
         let fixture = fs_fixture!({
             "storage/message/message.json": PRETTY_PRINTED_MESSAGE,
         });
@@ -1316,7 +1327,8 @@ mod tests {
 
     #[test]
     fn extracts_timestamp_from_pretty_printed_file_when_in_range() {
-        let _cache_env = CacheEnv::new("opencode-extracts-timestamp-from-pretty-printed-file-when-in-range");
+        let _cache_env =
+            CacheEnv::new("opencode-extracts-timestamp-from-pretty-printed-file-when-in-range");
         let fixture = fs_fixture!({
             "storage/message/message.json": PRETTY_PRINTED_MESSAGE,
         });
@@ -1342,7 +1354,8 @@ mod tests {
 
     #[test]
     fn since_bound_follows_local_midnight_in_the_reporting_timezone() {
-        let _cache_env = CacheEnv::new("opencode-since-bound-follows-local-midnight-in-the-reporting-timezone");
+        let _cache_env =
+            CacheEnv::new("opencode-since-bound-follows-local-midnight-in-the-reporting-timezone");
         let fixture = fs_fixture!({});
         create_db_message(
             &fixture.path("opencode.db"),
@@ -1370,7 +1383,8 @@ mod tests {
 
     #[test]
     fn until_bound_follows_local_midnight_in_the_reporting_timezone() {
-        let _cache_env = CacheEnv::new("opencode-until-bound-follows-local-midnight-in-the-reporting-timezone");
+        let _cache_env =
+            CacheEnv::new("opencode-until-bound-follows-local-midnight-in-the-reporting-timezone");
         let fixture = fs_fixture!({});
         create_db_message(
             &fixture.path("opencode.db"),
@@ -1397,7 +1411,9 @@ mod tests {
 
     #[test]
     fn pushdown_margin_keeps_rows_whose_column_drifts_from_the_payload() {
-        let _cache_env = CacheEnv::new("opencode-pushdown-margin-keeps-rows-whose-column-drifts-from-the-payload");
+        let _cache_env = CacheEnv::new(
+            "opencode-pushdown-margin-keeps-rows-whose-column-drifts-from-the-payload",
+        );
         let fixture = fs_fixture!({});
         // Payload lands on 2026-01-02, but the column sits 26 hours later, which
         // an exact SQL window would push past its upper bound.
@@ -1428,7 +1444,8 @@ mod tests {
 
     #[test]
     fn second_scale_time_created_disables_the_range_pushdown() {
-        let _cache_env = CacheEnv::new("opencode-second-scale-time-created-disables-the-range-pushdown");
+        let _cache_env =
+            CacheEnv::new("opencode-second-scale-time-created-disables-the-range-pushdown");
         let fixture = fs_fixture!({});
         // The payload is on 2026-01-02, but the column holds seconds. Comparing
         // it against millisecond bounds would exclude the row outright.
@@ -1459,7 +1476,8 @@ mod tests {
 
     #[test]
     fn non_ascii_date_bounds_leave_filtering_to_the_report() {
-        let _cache_env = CacheEnv::new("opencode-non-ascii-date-bounds-leave-filtering-to-the-report");
+        let _cache_env =
+            CacheEnv::new("opencode-non-ascii-date-bounds-leave-filtering-to-the-report");
         let fixture = fs_fixture!({});
         create_db_message(
             &fixture.path("opencode.db"),

@@ -50,7 +50,11 @@ pub struct OpenCodeMessage {
 struct OpenCodeModel {
     #[serde(default, deserialize_with = "jsonl::non_empty_string")]
     id: Option<String>,
-    #[serde(default, alias = "providerID", deserialize_with = "jsonl::non_empty_string")]
+    #[serde(
+        default,
+        alias = "providerID",
+        deserialize_with = "jsonl::non_empty_string"
+    )]
     provider_id: Option<String>,
 }
 
