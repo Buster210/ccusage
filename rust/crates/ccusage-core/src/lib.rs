@@ -26,9 +26,9 @@ pub mod cli {
 
 pub use agent_report::{agent_summary_json, first_column, summary_period};
 pub use cost::{
-    calculate_cost, cost_and_missing_for_output, calculate_cost_for_usage, calculate_cost_from_pricing,
-    missing_pricing_model_for_candidates, missing_pricing_model_for_token_total,
-    missing_pricing_model_for_usage,
+    calculate_cost, calculate_cost_for_usage, calculate_cost_from_pricing,
+    cost_and_missing_for_output, missing_pricing_model_for_candidates,
+    missing_pricing_model_for_token_total, missing_pricing_model_for_usage,
 };
 pub use date_utils::*;
 pub use last_window::{PeriodUnit, last_periods_since};
@@ -48,7 +48,8 @@ pub use summary::{
 };
 pub use types::*;
 pub use utils::{
-    apply_total_token_fallback, chunk_file_indexes_by_size, json_value_u64, non_empty_json_string, total_usage_tokens,
+    apply_total_token_fallback, chunk_file_indexes_by_size, json_value_u64, non_empty_json_string,
+    total_usage_tokens,
 };
 
 pub use ccusage_terminal::{Align, Color, SimpleTable, TerminalStyle, terminal_width};

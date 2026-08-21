@@ -5,9 +5,7 @@ pub fn open_readonly(path: &Path) -> sqlite::Result<sqlite::Connection> {
 }
 
 /// `None` on any column read failure, so callers `continue` past the row.
-pub fn read_id_session_data(
-    statement: &sqlite::Statement,
-) -> Option<(String, String, String)> {
+pub fn read_id_session_data(statement: &sqlite::Statement) -> Option<(String, String, String)> {
     let id = statement.read::<String, _>(0).ok()?;
     let session_id = statement.read::<String, _>(1).ok()?;
     let data = statement.read::<String, _>(2).ok()?;
