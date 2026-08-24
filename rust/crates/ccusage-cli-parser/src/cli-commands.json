@@ -71,7 +71,7 @@
 			},
 			{
 				"name": "pi",
-				"description": "Show pi-agent usage commands"
+				"description": "Show pi usage commands"
 			},
 			{
 				"name": "goose",
@@ -454,33 +454,33 @@
 			"commands": [
 				{
 					"name": "daily",
-					"description": "Show pi-agent usage grouped by date"
+					"description": "Show pi usage grouped by date"
 				},
 				{
 					"name": "monthly",
-					"description": "Show pi-agent usage grouped by month"
+					"description": "Show pi usage grouped by month"
 				},
 				{
 					"name": "session",
-					"description": "Show pi-agent usage grouped by session"
+					"description": "Show pi usage grouped by session"
 				}
 			]
 		},
 		{
 			"path": ["pi", "daily"],
-			"description": "Show pi-agent usage grouped by date",
+			"description": "Show pi usage grouped by date",
 			"usage": "ccusage pi daily <OPTIONS>",
 			"options": "pi_period_options"
 		},
 		{
 			"path": ["pi", "monthly"],
-			"description": "Show pi-agent usage grouped by month",
+			"description": "Show pi usage grouped by month",
 			"usage": "ccusage pi monthly <OPTIONS>",
 			"options": "pi_period_options"
 		},
 		{
 			"path": ["pi", "session"],
-			"description": "Show pi-agent usage grouped by session",
+			"description": "Show pi usage grouped by session",
 			"usage": "ccusage pi session <OPTIONS>",
 			"options": "pi_combined_options"
 		},

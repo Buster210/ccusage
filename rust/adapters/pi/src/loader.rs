@@ -12,11 +12,9 @@ pub fn load_entries(
     custom_path: Option<&str>,
     pricing: Option<&PricingMap>,
 ) -> Result<Vec<LoadedEntry>> {
-    crate::progress::track_usage_load(
-        crate::progress::UsageLoadAgent("pi-agent"),
-        shared.json,
-        || load_entries_inner(shared, custom_path, pricing),
-    )
+    crate::progress::track_usage_load(crate::progress::UsageLoadAgent("pi"), shared.json, || {
+        load_entries_inner(shared, custom_path, pricing)
+    })
 }
 
 fn load_entries_inner(
@@ -122,9 +120,8 @@ fn load_entries_from_paths(
                 None,
             )?
         }
-        // ponytail: named stores skip the on-disk cache — extract_project_for_store
-        // needs each file's store root, which load_with_cache's flat Fn(&Path) closure
-        // can't thread. Named stores are a rare, newly-added path; parse directly.
+        // ponytail: named stores skip cache — load_with_cache's Fn(&Path) can't thread store root
+        // for extract_project_for_store; rare path, parse directly.
         PiLoadScope::Named { store_name } => {
             let mut result = Vec::new();
             for path in &paths {
@@ -132,12 +129,7 @@ fn load_entries_from_paths(
                 collect_files_with_extension(path, "jsonl", &mut files);
                 let loaded = read_files_parallel(&files, shared.single_thread, |file| {
                     parser::read_session_file_for_store(
-                        file,
-                        path,
-                        tz.as_ref(),
-                        shared.mode,
-                        pricing,
-                        store_name,
+                        file, path, tz.as_ref(), shared.mode, pricing,
                     )
                     .unwrap_or_else(|error| {
                         debug_log(

@@ -38,7 +38,7 @@ pub fn run(args: AgentCommandArgs) -> Result<()> {
         );
     }
     print_usage_table(
-        "pi-agent Token Usage Report",
+        "pi Token Usage Report",
         ccusage_core::first_column(args.kind),
         &rows,
         &args.shared,

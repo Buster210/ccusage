@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn loads_pi_agent_jsonl_usage_entries() {
-        let _cache_env = CacheEnv::new("main-loads-pi-agent");
+        let _cache_env = CacheEnv::new("main-loads-pi");
         let fixture = fs_fixture!({
             "sessions/project-a/prefix_session-a.jsonl": [
                 r#"{"type":"message","timestamp":"2026-04-22T01:02:02.000Z","message":{"role":"user","usage":{"input":999,"output":999}}}"#,
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(entries[0].date, "2026-04-22");
         assert_eq!(entries[0].project.as_ref(), "project-a");
         assert_eq!(entries[0].session_id.as_ref(), "session-a");
-        assert_eq!(entries[0].model.as_deref(), Some("[pi] gpt-5.4"));
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.4"));
         assert_eq!(entries[0].data.message.usage.input_tokens, 100);
         assert_eq!(entries[0].data.message.usage.output_tokens, 50);
         assert_eq!(
@@ -914,7 +914,7 @@ mod tests {
                         speed: None,
                         cache_creation: None,
                     },
-                    model: Some("[pi] gpt-5.4".to_string()),
+                    model: Some("gpt-5.4".to_string()),
                     id: None,
 
                     provider: None,
@@ -933,7 +933,7 @@ mod tests {
             extra_total_tokens: 0,
             credits: None,
             message_count: None,
-            model: Some("[pi] gpt-5.4".to_string()),
+            model: Some("gpt-5.4".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
         };
@@ -948,11 +948,11 @@ mod tests {
         assert_eq!(report["daily"][0]["cacheReadTokens"], 10);
         assert_eq!(report["daily"][0]["totalTokens"], 180);
         assert_eq!(report["daily"][0]["totalCost"], json!(0.05));
-        assert_eq!(report["daily"][0]["modelsUsed"], json!(["[pi] gpt-5.4"]));
+        assert_eq!(report["daily"][0]["modelsUsed"], json!(["gpt-5.4"]));
         assert_eq!(
             report["daily"][0]["modelBreakdowns"],
             json!([{
-                "modelName": "[pi] gpt-5.4",
+                "modelName": "gpt-5.4",
                 "inputTokens": 100,
                 "outputTokens": 50,
                 "cacheCreationTokens": 20,

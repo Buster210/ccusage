@@ -1203,6 +1203,15 @@ impl PricingMap {
         self.entries.get(model).copied()
     }
 
+    /// Strips a legacy "[prefix] " adapter tag ("[pi] ", "[omp] ",
+    /// "[openclaw] ") from pre-5714f564 prefixed model ids.
+    /// Returns the raw model id behind the bracket prefix, if well-formed.
+    fn stripped_legacy_pricing_key(key: &str) -> Option<&str> {
+        let rest = key.strip_prefix('[')?.split_once("] ")?.1;
+        (!rest.is_empty()).then_some(rest)
+    }
+
+
     fn find_entry_or_alias(&self, model: &str, fuzzy: Fuzzy) -> Option<Pricing> {
         self.entries
             .get(model)
@@ -1349,10 +1358,15 @@ impl PricingMap {
     }
 
     fn apply_override(&mut self, model: &str, override_value: &PricingOverride) {
+        // Legacy bracket keys predate 5714f564 raw-model keys; honor as stripped id.
+        let key = Self::stripped_legacy_pricing_key(model).unwrap_or(model);
+        self.user_overrides
+            .insert(key.to_string(), override_value.clone());
         let base = self
             .entries
-            .get(model)
+            .get(key)
             .copied()
+            .or_else(|| self.entries.get(model).copied())
             .or_else(|| pricing_alias(model).and_then(|alias| self.entries.get(alias).copied()))
             .unwrap_or_else(Pricing::empty);
 
@@ -1434,9 +1448,9 @@ impl PricingMap {
                 .unwrap_or(base.fast_multiplier),
         };
 
-        self.entries.insert(model.to_string(), pricing);
+        self.entries.insert(key.to_string(), pricing);
         if let Some(limit) = override_value.max_input_tokens {
-            self.context_limits.insert(model.to_string(), limit);
+            self.context_limits.insert(key.to_string(), limit);
         }
     }
 
@@ -4310,6 +4324,22 @@ mod tests {
             assert_eq!(entry.long_context_threshold, sol.long_context_threshold);
             assert_eq!(entry.fast_multiplier, sol.fast_multiplier);
             assert_eq!(pricing.context_limit("gpt-5.6"), Some(654_321));
+        }
+
+        #[test]
+        fn legacy_bracket_override_applies_to_raw_model_id() {
+            // Pre-5714f564 configs key pi/omp/openclaw overrides as
+            // "[pi] <model>"; they must keep working after the rename
+            // switched entries to raw model ids.
+            let mut pricing = PricingMap::load_embedded();
+            let overrides = build_overrides("[pi] gpt-5.6", |o| {
+                o.input_cost_per_token = Some(42e-6);
+            });
+
+            pricing.apply_overrides(overrides.iter());
+
+            let entry = pricing.find("gpt-5.6").unwrap();
+            assert_eq!(entry.input, 42e-6);
         }
 
         #[test]

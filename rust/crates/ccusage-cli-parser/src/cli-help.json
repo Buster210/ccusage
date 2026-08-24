@@ -262,7 +262,7 @@
 	"pi_options": [
 		{
 			"flags": "--pi-path <pi-path>",
-			"description": "Path or comma-separated paths to pi-agent sessions directories"
+			"description": "Path or comma-separated paths to pi sessions directories"
 		}
 	],
 	"openclaw_options": [

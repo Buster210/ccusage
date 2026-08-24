@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].date, "2026-01-30");
         assert_eq!(entries[0].session_id.as_ref(), "abc");
-        assert_eq!(entries[0].model.as_deref(), Some("[openclaw] gpt-5.2"));
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.2"));
         assert_eq!(entries[0].data.version.as_deref(), Some("openai-codex"));
         assert_eq!(entries[0].data.message.usage.input_tokens, 1660);
         assert_eq!(entries[0].data.message.usage.output_tokens, 55);
@@ -125,7 +125,7 @@ mod tests {
             ..SharedArgs::default()
         };
         shared.pricing_overrides.insert(
-            "[openclaw] gpt-5.2".to_string(),
+            "gpt-5.2".to_string(),
             ccusage_cli::PricingOverride {
                 input_cost_per_token: Some(1e-6),
                 output_cost_per_token: Some(2e-6),

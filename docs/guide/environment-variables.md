@@ -15,7 +15,7 @@ ccusage detects supported data source files from conventional locations by defau
 | `DROID_SESSIONS_DIR`              | Droid          | `~/.factory/sessions`              |
 | `CODEBUFF_DATA_DIR`               | Codebuff       | `~/.config/manicode`               |
 | `HERMES_HOME`                     | Hermes Agent   | `~/.hermes`                        |
-| `PI_AGENT_DIR`                    | pi-agent       | `~/.pi/agent/sessions`             |
+| `PI_AGENT_DIR`                    | pi       | `~/.pi/agent/sessions`             |
 | `GOOSE_PATH_ROOT`                 | Goose          | Standard Goose data roots          |
 | `OPENCLAW_DIR`                    | OpenClaw       | `~/.openclaw`                      |
 | `KILO_DATA_DIR`                   | Kilo           | `~/.local/share/kilo`              |

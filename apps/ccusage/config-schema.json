@@ -11227,8 +11227,8 @@
 				},
 				"pi": {
 					"additionalProperties": false,
-					"description": "pi-agent configuration.",
-					"markdownDescription": "pi-agent configuration.",
+					"description": "pi configuration.",
+					"markdownDescription": "pi configuration.",
 					"properties": {
 						"commands": {
 							"additionalProperties": false,
@@ -11311,8 +11311,8 @@
 											"type": "string"
 										},
 										"piPath": {
-											"description": "Path or comma-separated paths to pi-agent sessions directories.",
-											"markdownDescription": "Path or comma-separated paths to pi-agent sessions directories.",
+											"description": "Path or comma-separated paths to pi sessions directories.",
+											"markdownDescription": "Path or comma-separated paths to pi sessions directories.",
 											"type": "string"
 										},
 										"pricingOverrides": {
@@ -11468,8 +11468,8 @@
 											"type": "string"
 										},
 										"piPath": {
-											"description": "Path or comma-separated paths to pi-agent sessions directories.",
-											"markdownDescription": "Path or comma-separated paths to pi-agent sessions directories.",
+											"description": "Path or comma-separated paths to pi sessions directories.",
+											"markdownDescription": "Path or comma-separated paths to pi sessions directories.",
 											"type": "string"
 										},
 										"pricingOverrides": {
@@ -11625,8 +11625,8 @@
 											"type": "string"
 										},
 										"piPath": {
-											"description": "Path or comma-separated paths to pi-agent sessions directories.",
-											"markdownDescription": "Path or comma-separated paths to pi-agent sessions directories.",
+											"description": "Path or comma-separated paths to pi sessions directories.",
+											"markdownDescription": "Path or comma-separated paths to pi sessions directories.",
 											"type": "string"
 										},
 										"pricingOverrides": {
@@ -11785,8 +11785,8 @@
 									"type": "string"
 								},
 								"piPath": {
-									"description": "Path or comma-separated paths to pi-agent sessions directories.",
-									"markdownDescription": "Path or comma-separated paths to pi-agent sessions directories.",
+									"description": "Path or comma-separated paths to pi sessions directories.",
+									"markdownDescription": "Path or comma-separated paths to pi sessions directories.",
 									"type": "string"
 								},
 								"pricingOverrides": {
@@ -12596,7 +12596,7 @@
 			"defaults": {
 				"json": false,
 				"pricingOverrides": {
-					"[pi] gpt-5.4": {
+					"gpt-5.4": {
 						"cacheReadInputTokenCost": 2.5e-7,
 						"inputCostPerToken": 2.5e-6,
 						"outputCostPerToken": 0.000015

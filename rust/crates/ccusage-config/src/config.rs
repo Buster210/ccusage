@@ -1022,7 +1022,7 @@ mod tests {
 
         let mut current = BTreeMap::new();
         current.insert(
-            "[pi] gpt-5.4".to_string(),
+            "gpt-5.4".to_string(),
             PricingOverride {
                 input_cost_per_token: Some(2.5e-6),
                 output_cost_per_token: Some(1.5e-5),
@@ -1033,7 +1033,7 @@ mod tests {
         // Child config only sets max_input_tokens for the same model
         let mut incoming = BTreeMap::new();
         incoming.insert(
-            "[pi] gpt-5.4".to_string(),
+            "gpt-5.4".to_string(),
             ConfigPricingOverride {
                 max_input_tokens: Some(1_000_000),
                 ..Default::default()
@@ -1042,7 +1042,7 @@ mod tests {
 
         merge_pricing_overrides(&mut current, incoming);
 
-        let result = &current["[pi] gpt-5.4"];
+        let result = &current["gpt-5.4"];
         // Parent fields preserved
         assert_eq!(result.input_cost_per_token, Some(2.5e-6));
         assert_eq!(result.output_cost_per_token, Some(1.5e-5));

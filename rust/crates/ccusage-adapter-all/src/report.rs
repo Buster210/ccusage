@@ -581,7 +581,7 @@ fn agent_label(agent: &str) -> &str {
         "droid" => "Droid",
         "codebuff" => "Codebuff",
         "hermes" => "Hermes",
-        "pi" => "pi-agent",
+        "pi" => "pi",
         "goose" => "Goose",
         "openclaw" => "OpenClaw",
         "kilo" => "Kilo",

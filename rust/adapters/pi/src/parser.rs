@@ -80,34 +80,26 @@ pub(super) fn read_session_file_for_store(
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
-    store_name: &str,
 ) -> Result<Vec<LoadedEntry>> {
     read_session_file_with_context(
         path,
         tz,
         mode,
         pricing,
-        PiStoreContext::Named {
-            root: store_root,
-            name: store_name,
-        },
+        PiStoreContext::Named { root: store_root },
     )
 }
 
 #[derive(Clone, Copy)]
 enum PiStoreContext<'a> {
     Default,
-    Named { root: &'a Path, name: &'a str },
+    /// Named only for project derivation/store-root dedupe; pricing uses raw model.
+    Named {
+        root: &'a Path,
+    },
 }
 
 impl<'a> PiStoreContext<'a> {
-    fn store_name(self) -> &'a str {
-        match self {
-            Self::Default => "pi",
-            Self::Named { name, .. } => name,
-        }
-    }
-
     fn project(self, path: &Path) -> String {
         match self {
             Self::Default => extract_project(path),
@@ -207,13 +199,10 @@ fn read_session_file_with_context(
         if crate::total_usage_tokens(usage) + extra_total_tokens == 0 {
             continue;
         }
-        let raw_model = message.model.clone();
-        let model = raw_model
-            .as_ref()
-            .map(|model| format!("[{}] {model}", context.store_name()));
+        let model = message.model.clone();
         let display_cost = usage_value.cost.as_ref().and_then(|cost| cost.total);
         let cost = context.cost(
-            raw_model.as_deref(),
+            model.as_deref(),
             model.as_deref(),
             usage,
             display_cost,
@@ -221,7 +210,7 @@ fn read_session_file_with_context(
             pricing,
         );
         let missing_pricing_model = context.missing_pricing_model(
-            raw_model.as_deref(),
+            model.as_deref(),
             model.as_deref(),
             usage,
             display_cost,
@@ -430,7 +419,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].missing_pricing_model.as_deref(),
-            Some("[pi] unknown-model-xyz")
+            Some("unknown-model-xyz")
         );
     }
 
@@ -456,7 +445,6 @@ mod tests {
             None,
             CostMode::Calculate,
             Some(&pricing),
-            "o3",
         )
         .unwrap();
 
@@ -494,7 +482,6 @@ mod tests {
             None,
             CostMode::Calculate,
             Some(&pricing),
-            "deepseek-chat",
         )
         .unwrap();
 
@@ -504,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn named_store_prefixed_pricing_override_wins_before_unprefixed_lookup() {
+    fn named_store_uses_raw_pricing() {
         let fixture = fs_fixture!({
             "sessions/project-a/agent_session-a.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5.4","usage":{"input":1000,"output":2000}}}"#,
         });
@@ -515,10 +502,6 @@ mod tests {
                 "gpt-5.4": {
                     "input_cost_per_token": 0.001,
                     "output_cost_per_token": 0.001
-                },
-                "[omp] gpt-5.4": {
-                    "input_cost_per_token": 0.000002,
-                    "output_cost_per_token": 0.000008
                 }
             }"#,
         );
@@ -529,12 +512,11 @@ mod tests {
             None,
             CostMode::Calculate,
             Some(&pricing),
-            "omp",
         )
         .unwrap();
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].cost, 0.018000000000000002);
+        assert_eq!(entries[0].cost, 3.0);
         assert_eq!(entries[0].missing_pricing_model, None);
     }
 
@@ -584,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_named_store_models_with_store_name() {
+    fn named_store_models_are_raw() {
         let fixture = fs_fixture!({
             "sessions/project-a/agent_session-a.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":100,"output":200}}}"#,
         });
@@ -596,16 +578,12 @@ mod tests {
             None,
             CostMode::Display,
             None,
-            "omp",
         )
         .unwrap();
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model.as_deref(), Some("[omp] gpt-5"));
-        assert_eq!(
-            entries[0].data.message.model.as_deref(),
-            Some("[omp] gpt-5")
-        );
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5"));
+        assert_eq!(entries[0].data.message.model.as_deref(), Some("gpt-5"));
     }
 
     #[test]
@@ -625,7 +603,6 @@ mod tests {
             None,
             CostMode::Display,
             None,
-            "omp",
         )
         .unwrap()
         .pop()
