@@ -17,17 +17,15 @@ pub fn collect_usage_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 pub fn collect_files_with_extension(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
-    for entry in jwalk::WalkDir::new(dir)
-        .sort(true)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
+    let start = files.len();
+    for entry in jwalk::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
         if entry.file_type().is_file()
             && entry.path().extension().is_some_and(|ext| ext == extension)
         {
             files.push(entry.path());
         }
     }
+    files[start..].sort();
 }
 
 pub fn filter_loaded_entries_by_date(entries: &mut Vec<LoadedEntry>, shared: &SharedArgs) {

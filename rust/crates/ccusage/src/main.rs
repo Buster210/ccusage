@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_pi_agent_jsonl_usage_entries() {
+    fn loads_pi_jsonl_usage_entries() {
         let _cache_env = CacheEnv::new("main-loads-pi");
         let fixture = fs_fixture!({
             "sessions/project-a/prefix_session-a.jsonl": [
