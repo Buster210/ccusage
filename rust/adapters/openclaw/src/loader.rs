@@ -33,7 +33,7 @@ fn load_entries_inner(
         files.extend(collect_session_files(&root)?);
     }
     let parsed = crate::cache::load_with_cache(
-        "openclaw",
+        "openclaw-v2",
         &files,
         crate::cache::CacheOpts {
             single_thread: shared.single_thread,

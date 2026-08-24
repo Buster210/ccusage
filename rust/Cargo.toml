@@ -69,14 +69,10 @@ terminal_size = "=0.4.4"
 unicode-width = "=0.2.2"
 ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
 
-# ponytail: speed over size per user — opt-level 3 for faster runs
+# ponytail: speed over size per user — opt-level 3 (+~11% binary 4.4→4.9M) faster runs, keep lto+strip
 [profile.release]
 codegen-units = 1
 lto = "fat"
 opt-level = 3
 panic = "abort"
 strip = "symbols"
-
-[profile.release.package."*"]
-# ponytail: same speed tradeoff for deps — see above
-opt-level = 3

@@ -24,7 +24,7 @@ The CLI reads usage data from pi:
 
 | Source   | Default path            | Override                      |
 | -------- | ----------------------- | ----------------------------- |
-| pi | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
+| pi       | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
 
 Both `PI_AGENT_DIR` and `--pi-path` can be one sessions directory or a comma-separated list of sessions directories.
 

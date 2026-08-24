@@ -30,6 +30,7 @@
 //! without the cache.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs,
     hash::{Hash, Hasher},
@@ -161,7 +162,7 @@ impl From<CachedEntry> for LoadedEntry {
                 version: c.version,
                 message: UsageMessage {
                     usage: c.usage,
-                    model: c.message_model,
+                    model: c.message_model.map(|m| strip_model_prefix(&m).to_string()),
                     id: c.message_id,
                     provider: c.message_provider,
                 },
@@ -179,7 +180,7 @@ impl From<CachedEntry> for LoadedEntry {
             extra_total_tokens: c.extra_total_tokens,
             credits: c.credits,
             message_count: c.message_count,
-            model: c.model,
+            model: c.model.map(|m| strip_model_prefix(&m).to_string()),
             usage_limit_reset_time: c.usage_limit_reset_time,
             missing_pricing_model: None,
         }
@@ -404,18 +405,65 @@ pub fn clear_cache() {
 /// cacheable, so callers can report a no-op for agents with no on-disk cache.
 /// Non-fatal: all IO/SQL errors are ignored.
 pub fn clear_cache_namespaces(agent: &str) -> bool {
-    let namespaces = agent_namespaces(agent);
-    let cacheable = !namespaces.is_empty();
+    let mut cacheable = !agent_namespaces(agent).is_empty();
     let Some(conn) = open_db() else {
-        return cacheable;
+        // report cacheable even if DB unavailable
+        return cacheable
+            || agent == "pi"
+            || agent.contains(':')
+            || (!agent.is_empty() && agent != "all" && agent_namespaces(agent).is_empty());
     };
-    for ns in namespaces {
+    for ns in agent_namespaces(agent) {
+        cacheable = true;
         if let Ok(mut st) = conn.prepare("DELETE FROM files WHERE namespace = ?") {
             let _ = st.bind((1, *ns));
             let _ = st.next();
         }
         if let Ok(mut st) = conn.prepare("DELETE FROM ledger WHERE namespace = ?") {
             let _ = st.bind((1, *ns));
+            let _ = st.next();
+        }
+    }
+    // pi named stores use `pi:<name>` (e.g. `pi:omp`); clear them when
+    // the store name or its parent `pi` is requested.
+    if agent == "pi" {
+        cacheable = true;
+        let _ = conn.execute("DELETE FROM files WHERE namespace LIKE 'pi:%'");
+        let _ = conn.execute("DELETE FROM ledger WHERE namespace LIKE 'pi:%'");
+    } else if agent.contains(':') {
+        cacheable = true;
+        if let Ok(mut st) = conn.prepare("DELETE FROM files WHERE namespace = ?") {
+            let _ = st.bind((1, agent));
+            let _ = st.next();
+        }
+        if let Ok(mut st) = conn.prepare("DELETE FROM ledger WHERE namespace = ?") {
+            let _ = st.bind((1, agent));
+            let _ = st.next();
+        }
+    } else if !agent.is_empty() && agent != "all" && agent_namespaces(agent).is_empty() {
+        // unknown agent likely a pi named store (e.g. `omp` -> `pi:omp` and `pi:omp:<path>`)
+        let mut escaped = String::with_capacity(agent.len());
+        for c in agent.chars() {
+            if matches!(c, '\\' | '%' | '_') {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        let ns = format!("pi:{agent}");
+        let ns_prefix = format!("pi:{escaped}:%");
+        cacheable = true;
+        if let Ok(mut st) =
+            conn.prepare("DELETE FROM files WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'")
+        {
+            let _ = st.bind((1, ns.as_str()));
+            let _ = st.bind((2, ns_prefix.as_str()));
+            let _ = st.next();
+        }
+        if let Ok(mut st) =
+            conn.prepare("DELETE FROM ledger WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'")
+        {
+            let _ = st.bind((1, ns.as_str()));
+            let _ = st.bind((2, ns_prefix.as_str()));
             let _ = st.next();
         }
     }
@@ -1218,12 +1266,19 @@ fn entry_ledger_key(e: &LoadedEntry) -> String {
     // project/session value can't shift field boundaries and collide two distinct
     // keys. NUL ('\0') is unusable — it truncates SQLite TEXT keys. 0x1F never
     // appears in these values (project names, UUID session ids, model ids, integers).
+    // Strip legacy `[pi] ` / `[openclaw] ` prefix so old ledger keys (prefixed) and
+    // new raw keys deduplicate — preserves deleted-file spend without double-count.
+    let model = e
+        .model
+        .as_deref()
+        .map(strip_model_prefix)
+        .unwrap_or_default();
     format!(
         "synth\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         e.timestamp.as_millis(),
         e.project.as_ref(),
         e.session_id.as_ref(),
-        e.model.as_deref().unwrap_or_default(),
+        model,
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_creation_input_tokens,
@@ -1232,15 +1287,30 @@ fn entry_ledger_key(e: &LoadedEntry) -> String {
     )
 }
 
-/// Merge the ledger with this run's live entries for `namespace`.
-///
-/// INVARIANT: callers pass the *full* on-disk source set for the namespace, so a
-/// ledger entry whose key is absent from the live set is treated as deleted and
-/// re-emitted. (A strict subset would wrongly re-emit out-of-scope entries; no
-/// caller does that.)
-///
-/// Re-emits ledger entries whose source is gone this run; keys present in `live`
-/// are emitted once from `live` (the re-priced copy wins). Live entries are
+fn strip_model_prefix(model: &str) -> &str {
+    if let Some(rest) = model.strip_prefix('[')
+        && let Some(idx) = rest.find(']')
+    {
+        let after = &rest[idx + 1..];
+        return after.strip_prefix(' ').unwrap_or(after);
+    }
+    model
+}
+
+fn normalize_ledger_key(key: &str) -> Cow<'_, str> {
+    if !key.starts_with("synth\u{1f}") {
+        return Cow::Borrowed(key);
+    }
+    let mut parts: Vec<&str> = key.split('\u{1f}').collect();
+    if parts.len() >= 5 {
+        let orig = parts[4];
+        parts[4] = strip_model_prefix(orig);
+        if parts[4].len() != orig.len() {
+            return Cow::Owned(parts.join("\u{1f}"));
+        }
+    }
+    Cow::Borrowed(key)
+}
 /// recorded at write-back time, not here.
 ///
 /// `live_only` skips the re-emission, so deleted sources contribute nothing to
@@ -1290,21 +1360,30 @@ fn merge_ledger(
         // Rust-side date check via the blob so legacy rows don't leak outside the window.
         let deleted_keys: Vec<String> = load_ledger_keys(conn, namespace, date_filter)
             .into_iter()
-            .filter(|k| !seen.contains(k))
+            .filter(|k| !seen.contains(normalize_ledger_key(k).as_ref()))
             .collect();
         for key in deleted_keys {
             if let Some(blob) = load_ledger_blob(conn, namespace, &key)
                 && let Ok(entry) = postcard::from_bytes::<LedgerEntry>(&blob)
             {
-                // Windowed post-filter for NULL-date legacy rows and for safety.
                 if let Some((since, until)) = date_filter {
                     let d = entry.base.date.as_str();
                     if d < since || d > until {
                         continue;
                     }
                 }
-                seen.insert(key.clone());
-                out.push(entry.into_loaded(key));
+                let mut loaded = entry.into_loaded(key.clone());
+                if let Some(m) = loaded.model.as_deref() {
+                    let stripped = strip_model_prefix(m).to_string();
+                    if stripped != m {
+                        loaded.model = Some(stripped);
+                        if let Some(dm) = loaded.data.message.model.as_mut() {
+                            *dm = strip_model_prefix(dm).to_string();
+                        }
+                    }
+                }
+                seen.insert(normalize_ledger_key(&key).into_owned());
+                out.push(loaded);
             }
         }
     }

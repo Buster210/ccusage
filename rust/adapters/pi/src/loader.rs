@@ -1,8 +1,8 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, thread};
 
 use crate::{
     LoadedEntry, PricingMap, Result, cli::SharedArgs, collect_files_with_extension,
-    cost_and_missing_for_output, debug_log, parse_tz, read_files_parallel,
+    cost_and_missing_for_output, debug_log, parse_tz,
 };
 
 use super::{parser, paths};
@@ -120,33 +120,125 @@ fn load_entries_from_paths(
                 None,
             )?
         }
-        // ponytail: named stores skip cache — load_with_cache's Fn(&Path) can't thread store root
-        // for extract_project_for_store; rare path, parse directly.
         PiLoadScope::Named { store_name } => {
-            let mut result = Vec::new();
+            // Collect files per path first; then load each path's cache in parallel.
+            // Per-path namespace `pi:<name>:<path>` keeps distinct store roots (e.g.
+            // test fixtures with same store name but different temp dirs) from
+            // polluting each other's ledger — coalescing into one namespace would be
+            // lossy. Parallelism here is lossless: N paths → N independent
+            // `load_with_cache` tx, only wall time changes.
+            let mut per_path: Vec<(PathBuf, Vec<PathBuf>, String)> =
+                Vec::with_capacity(paths.len());
             for path in &paths {
-                let mut files = Vec::new();
+                let mut files = Vec::with_capacity(64);
                 collect_files_with_extension(path, "jsonl", &mut files);
-                let loaded = read_files_parallel(&files, shared.single_thread, |file| {
-                    parser::read_session_file_for_store(
-                        file, path, tz.as_ref(), shared.mode, pricing,
-                    )
-                    .unwrap_or_else(|error| {
-                        debug_log(
-                            shared,
-                            format!(
-                                "Failed to read pi-format store '{store_name}' session file {}: {error}",
-                                file.display()
-                            ),
-                        );
-                        Vec::new()
-                    })
-                });
-                for file_entries in loaded {
-                    result.extend(file_entries);
+                if files.is_empty() {
+                    continue;
                 }
+                let namespace = format!("pi:{}:{}", store_name, path.display());
+                per_path.push((path.clone(), files, namespace));
             }
-            result
+            if per_path.is_empty() {
+                Vec::new()
+            } else if shared.single_thread || per_path.len() == 1 {
+                let mut all_entries =
+                    Vec::with_capacity(per_path.iter().map(|(_, f, _)| f.len()).sum::<usize>());
+                for (path, files, namespace) in &per_path {
+                    let entries = crate::cache::load_with_cache(
+                        namespace,
+                        files,
+                        crate::cache::CacheOpts {
+                            single_thread: shared.single_thread,
+                            live_only: shared.live_only,
+                        },
+                        crate::cache::Freshness::FileStat,
+                        |file| {
+                            Ok(parser::read_session_file_for_store(
+                                file, path, tz.as_ref(), shared.mode, pricing,
+                            )
+                            .unwrap_or_else(|error| {
+                                debug_log(
+                                    shared,
+                                    format!(
+                                        "Failed to read pi-format store '{store_name}' session file {}: {error}",
+                                        file.display()
+                                    ),
+                                );
+                                Vec::new()
+                            }))
+                        },
+                        |e| {
+                            let (cost, missing_pricing_model) =
+                                cost_and_missing_for_output(&e.data, shared.mode, pricing);
+                            e.cost = cost;
+                            e.missing_pricing_model = missing_pricing_model;
+                        },
+                        None,
+                    )?;
+                    all_entries.extend(entries);
+                }
+                all_entries
+            } else {
+                let mut all_entries =
+                    Vec::with_capacity(per_path.iter().map(|(_, f, _)| f.len()).sum::<usize>());
+                let mut first_err: Option<crate::CliError> = None;
+                thread::scope(|scope| {
+                    let mut handles = Vec::with_capacity(per_path.len());
+                    for (path, files, namespace) in &per_path {
+                        let path = path.clone();
+                        let files = files.clone();
+                        let namespace = namespace.clone();
+                        let tz = tz.clone();
+                        handles.push(scope.spawn(move || {
+                            crate::cache::load_with_cache(
+                                &namespace,
+                                &files,
+                                crate::cache::CacheOpts {
+                                    single_thread: shared.single_thread,
+                                    live_only: shared.live_only,
+                                },
+                                crate::cache::Freshness::FileStat,
+                                |file| {
+                                    Ok(parser::read_session_file_for_store(
+                                        file, &path, tz.as_ref(), shared.mode, pricing,
+                                    )
+                                    .unwrap_or_else(|error| {
+                                        debug_log(
+                                            shared,
+                                            format!(
+                                                "Failed to read pi-format store '{store_name}' session file {}: {error}",
+                                                file.display()
+                                            ),
+                                        );
+                                        Vec::new()
+                                    }))
+                                },
+                                |e| {
+                                    let (cost, missing_pricing_model) =
+                                        cost_and_missing_for_output(&e.data, shared.mode, pricing);
+                                    e.cost = cost;
+                                    e.missing_pricing_model = missing_pricing_model;
+                                },
+                                None,
+                            )
+                        }));
+                    }
+                    for handle in handles {
+                        match handle.join().expect("pi named store worker panicked") {
+                            Ok(entries) => all_entries.extend(entries),
+                            Err(err) => {
+                                if first_err.is_none() {
+                                    first_err = Some(err);
+                                }
+                            }
+                        }
+                    }
+                });
+                if let Some(err) = first_err {
+                    return Err(err);
+                }
+                all_entries
+            }
         }
     };
 
