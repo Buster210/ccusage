@@ -59,6 +59,6 @@ expression: cases
       "pi",
       "weekly"
     ],
-    "error": "The \"weekly\" report is not available for pi-agent usage.\nUse \"ccusage pi daily\" for pi-agent usage reports."
+    "error": "The \"weekly\" report is not available for pi usage.\nUse \"ccusage pi daily\" for pi usage reports."
   }
 ]

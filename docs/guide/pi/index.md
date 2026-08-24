@@ -1,10 +1,10 @@
-# pi-agent Data Source (Beta)
+# pi Data Source (Beta)
 
-ccusage can read [pi-agent](https://github.com/badlogic/pi-mono) usage data as one of its supported local data sources. pi-agent is an alternative Claude coding (agent) CLI from [shittycodingagent.ai](https://shittycodingagent.ai).
+ccusage can read [pi](https://github.com/badlogic/pi-mono) usage data as one of its supported local data sources. pi is an alternative Claude coding (agent) CLI from [shittycodingagent.ai](https://shittycodingagent.ai).
 
-## What is Pi-Agent?
+## What is Pi?
 
-Pi-agent is a third-party Claude coding (agent) CLI that stores usage data in JSONL format. ccusage analyzes this data alongside its other supported sources.
+Pi is a third-party Claude coding (agent) CLI that stores usage data in JSONL format. ccusage analyzes this data alongside its other supported sources.
 
 ## Focused Views
 
@@ -20,11 +20,11 @@ pnpx ccusage pi --help
 
 ## Data Source
 
-The CLI reads usage data from pi-agent:
+The CLI reads usage data from pi:
 
 | Source   | Default path            | Override                      |
 | -------- | ----------------------- | ----------------------------- |
-| pi-agent | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
+| pi | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
 
 Both `PI_AGENT_DIR` and `--pi-path` can be one sessions directory or a comma-separated list of sessions directories.
 
@@ -44,27 +44,27 @@ Tools built on the pi session format can also be declared as named stores in the
 }
 ```
 
-Named stores are loaded in addition to the default `pi` agent when running `ccusage daily`, `ccusage monthly`, `ccusage weekly`, or `ccusage session`. The example above appears as agent `omp` in unified report metadata and prefixes model labels with `[omp]` followed by a space. A named store path can also be a comma-separated list of sessions directories; missing paths are treated as empty, while paths that overlap the default `pi` store or another named store — including one path nested inside another — are rejected to avoid double-counting. It does not add a `ccusage omp` command; use `ccusage pi ...` for the default pi-agent store.
+Named stores are loaded in addition to the default `pi` agent when running `ccusage daily`, `ccusage monthly`, `ccusage weekly`, or `ccusage session`. The example above appears as agent `omp` in unified report metadata and uses raw model names (no per-store prefix). A named store path can also be a comma-separated list of sessions directories; missing paths are treated as empty, while paths that overlap the default `pi` store or another named store — including one path nested inside another — are rejected to avoid double-counting. It does not add a `ccusage omp` command; use `ccusage pi ...` for the default pi store.
 
 ## Report Views
 
 ```bash
-# Show daily pi-agent usage
+# Show daily pi usage
 ccusage pi daily
 
-# Show monthly pi-agent usage
+# Show monthly pi usage
 ccusage pi monthly
 
-# Show session-based pi-agent usage
+# Show session-based pi usage
 ccusage pi session
 
 # JSON output for automation
 ccusage pi daily --json
 
-# Custom pi-agent path
+# Custom pi path
 ccusage pi daily --pi-path /path/to/sessions
 
-# Multiple pi-agent paths
+# Multiple pi paths
 ccusage pi daily --pi-path /path/to/sessions,/archive/pi/sessions
 
 # Filter by date range
@@ -78,12 +78,12 @@ ccusage pi daily --breakdown
 
 | Variable       | Description                                                             |
 | -------------- | ----------------------------------------------------------------------- |
-| `PI_AGENT_DIR` | Custom path, or comma-separated paths, to pi-agent sessions directories |
+| `PI_AGENT_DIR` | Custom path, or comma-separated paths, to pi sessions directories |
 | `LOG_LEVEL`    | Adjust logging verbosity (0 silent … 5 trace)                           |
 
 ## Daily View
 
-This view shows daily usage from pi-agent.
+This view shows daily usage from pi.
 
 ```bash
 # Recommended (fastest)
@@ -102,7 +102,7 @@ npx ccusage@latest pi daily
 | `--timezone`  | `-z`  | Override timezone for date grouping                                     |
 | `--json`      |       | Emit structured JSON instead of a table                                 |
 | `--breakdown` | `-b`  | Show per-model token breakdown                                          |
-| `--pi-path`   |       | Custom path, or comma-separated paths, to pi-agent sessions directories |
+| `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
 | `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
 
 ### Example Output
@@ -134,7 +134,7 @@ Returns structured data:
   "daily": [
     {
       "date": "2026-05-16",
-      "source": "pi-agent",
+      "source": "pi",
       "inputTokens": 567890,
       "outputTokens": 123456,
       "cacheCreationTokens": 5678,
@@ -168,7 +168,7 @@ ccusage pi daily --since 2026-05-16 --until 2026-05-16
 
 ## Monthly View
 
-This view shows monthly usage from pi-agent.
+This view shows monthly usage from pi.
 
 ```bash
 # Recommended (fastest)
@@ -187,7 +187,7 @@ npx ccusage@latest pi monthly
 | `--timezone`  | `-z`  | Override timezone for date grouping                                     |
 | `--json`      |       | Emit structured JSON instead of a table                                 |
 | `--breakdown` | `-b`  | Show per-model token breakdown                                          |
-| `--pi-path`   |       | Custom path, or comma-separated paths, to pi-agent sessions directories |
+| `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
 | `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
 
 ### Example Output
@@ -219,7 +219,7 @@ Returns structured data:
   "monthly": [
     {
       "month": "2026-05",
-      "source": "pi-agent",
+      "source": "pi",
       "inputTokens": 12345678,
       "outputTokens": 2345678,
       "cacheCreationTokens": 123456,
@@ -253,7 +253,7 @@ ccusage pi monthly --since 2026-01-01 --until 2026-03-31
 
 ## Session View
 
-This view shows usage grouped by individual pi-agent sessions.
+This view shows usage grouped by individual pi sessions.
 
 ```bash
 # Recommended (fastest)
@@ -272,7 +272,7 @@ npx ccusage@latest pi session
 | `--timezone`  | `-z`  | Override timezone for date grouping                                     |
 | `--json`      |       | Emit structured JSON instead of a table                                 |
 | `--breakdown` | `-b`  | Show per-model token breakdown                                          |
-| `--pi-path`   |       | Custom path, or comma-separated paths, to pi-agent sessions directories |
+| `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
 | `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
 
 ### Example Output
@@ -314,7 +314,7 @@ Returns structured data including full paths:
     {
       "sessionId": "abc123-def456",
       "projectPath": "my-project",
-      "source": "pi-agent",
+      "source": "pi",
       "inputTokens": 123456,
       "outputTokens": 23456,
       "cacheCreationTokens": 1234,
@@ -351,4 +351,4 @@ ccusage pi session --since 2026-05-09
 ## Related
 
 - [ccusage](https://github.com/ccusage/ccusage) - Main usage analysis tool for coding (agent) CLIs
-- [pi-agent](https://github.com/badlogic/pi-mono) - Alternative Claude coding (agent) CLI
+- [pi](https://github.com/badlogic/pi-mono) - Alternative Claude coding (agent) CLI

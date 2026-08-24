@@ -269,7 +269,7 @@ fn parse_message_entry(
         timestamp,
         timestamp_text: crate::format_rfc3339_millis(timestamp),
         session_id: session_id.to_string(),
-        model: format!("[openclaw] {model}"),
+        model,
         provider,
         input_tokens: raw_usage.input_tokens,
         output_tokens: raw_usage.output_tokens,
@@ -410,7 +410,7 @@ mod tests {
         let entries = parse_session_file(&file, None, CostMode::Auto, None).unwrap();
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model.as_deref(), Some("[openclaw] gpt-5.2"));
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.2"));
         assert_eq!(entries[0].data.version.as_deref(), Some("openai"));
         assert_eq!(entries[0].data.message.usage.input_tokens, 10);
     }

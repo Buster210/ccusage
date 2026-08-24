@@ -34,7 +34,7 @@ pub struct CcusageConfig {
     pub codebuff: Option<CodebuffConfig>,
     /// Hermes Agent configuration.
     pub hermes: Option<HermesConfig>,
-    /// pi-agent configuration.
+    /// pi configuration.
     pub pi: Option<PiConfig>,
     /// Goose configuration.
     pub goose: Option<GooseConfig>,
@@ -487,7 +487,7 @@ pub struct CodexOptions {
 pub struct PiOptions {
     #[serde(flatten)]
     pub shared: SharedOptions,
-    /// Path or comma-separated paths to pi-agent sessions directories.
+    /// Path or comma-separated paths to pi sessions directories.
     pub pi_path: Option<String>,
 }
 
@@ -740,7 +740,7 @@ pub fn generate_config_schema_json() -> String {
                         "json": false,
                         "timezone": "Asia/Tokyo",
                         "pricingOverrides": {
-                            "[pi] gpt-5.4": {
+                            "gpt-5.4": {
                                 "inputCostPerToken": 0.0000025,
                                 "outputCostPerToken": 0.000015,
                                 "cacheReadInputTokenCost": 0.00000025

@@ -399,14 +399,14 @@ ccusage blocks --config /path/to/team-config.json
 
 ## Pricing Overrides
 
-ccusage looks up token costs from a LiteLLM pricing snapshot embedded in the binary, optionally refreshed at runtime (or skipped with `--offline`). When a model is missing from LiteLLM (private deployments, internal wrappers like Pi's `[pi] gpt-5.4`, custom proxies), or when the snapshot price differs from your contract, set `pricingOverrides` under `defaults` to supply per-model values.
+ccusage looks up token costs from a LiteLLM pricing snapshot embedded in the binary, optionally refreshed at runtime (or skipped with `--offline`). When a model is missing from LiteLLM (private deployments, custom proxies), or when the snapshot price differs from your contract, set `pricingOverrides` under `defaults` to supply per-model values.
 
 ```json
 {
 	"$schema": "https://ccusage.com/config-schema.json",
 	"defaults": {
 		"pricingOverrides": {
-			"[pi] gpt-5.4": {
+			"gpt-5.4": {
 				"inputCostPerToken": 0.0000025,
 				"outputCostPerToken": 0.000015,
 				"cacheReadInputTokenCost": 0.00000025
@@ -427,8 +427,8 @@ Keys in `pricingOverrides` must match the **raw model name** as recorded in the 
 
 | Adapter                                | Prefix    | Example key                    |
 | -------------------------------------- | --------- | ------------------------------ |
-| Pi                                     | `[pi] `   | `[pi] gpt-5.4`                 |
-| Named Pi store                         | `[name] ` | `[omp] gpt-5.4`                |
+| Pi                                     | none      | `gpt-5.4`                      |
+| Named Pi store                         | none      | `gpt-5.4`                      |
 | Others (Claude, Codex, OpenCode, etc.) | none      | `claude-sonnet-4-5`, `gpt-5.5` |
 
 To find the exact name, run `ccusage <agent> daily --json` and look at the `model` field in the per-row breakdown.

@@ -984,7 +984,7 @@ fn agent_display_name(agent: &str) -> &'static str {
         "droid" => "Droid",
         "codebuff" => "Codebuff",
         "hermes" => "Hermes",
-        "pi" => "pi-agent",
+        "pi" => "pi",
         "goose" => "Goose",
         "kilo" => "Kilo",
         "copilot" => "GitHub Copilot CLI",

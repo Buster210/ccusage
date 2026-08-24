@@ -741,11 +741,11 @@ mod tests {
         ]);
         // No origin - SWR should return stale without hitting network and latch as retry.
         let url = "http://example.com/pricing-swr.json";
-        ccusage_core::cache::store_pricing(&url, "STALE_BODY", Some("\"v1\""), None, STALE_TS);
+        ccusage_core::cache::store_pricing(url, "STALE_BODY", Some("\"v1\""), None, STALE_TS);
         let before = super::now_unix_secs();
-        let body = super::fetch_json(&url).unwrap();
+        let body = super::fetch_json(url).unwrap();
         assert_eq!(body, "STALE_BODY", "SWR must serve stale immediately");
-        let cached = ccusage_core::cache::load_pricing(&url).unwrap();
+        let cached = ccusage_core::cache::load_pricing(url).unwrap();
         assert_eq!(cached.body, "STALE_BODY");
         // Latch should have updated updated_at to now - (refresh - retry) ~ now - 8
         let age = before.saturating_sub(cached.updated_at.unwrap_or(before));
@@ -755,7 +755,7 @@ mod tests {
             "latched stale should be fresh for retry window"
         );
         // Second immediate fetch should still be fresh (no extra spawn herd)
-        let body2 = super::fetch_json(&url).unwrap();
+        let body2 = super::fetch_json(url).unwrap();
         assert_eq!(body2, "STALE_BODY");
         let _ = age; // suppress unused
     }
@@ -773,9 +773,9 @@ mod tests {
             ("CCUSAGE_OFFLINE", Some(std::ffi::OsString::from("1"))),
         ]);
         let url = "http://example.com/offline.json";
-        ccusage_core::cache::store_pricing(&url, "OFFLINE_BODY", Some("\"v1\""), None, STALE_TS);
+        ccusage_core::cache::store_pricing(url, "OFFLINE_BODY", Some("\"v1\""), None, STALE_TS);
         // Should still serve stale, but not attempt to spawn background (offline)
-        let body = super::fetch_json(&url).unwrap();
+        let body = super::fetch_json(url).unwrap();
         assert_eq!(body, "OFFLINE_BODY");
         // No panic, and background not spawned (verified by offline check)
     }

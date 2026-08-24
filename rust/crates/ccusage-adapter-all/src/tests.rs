@@ -890,7 +890,7 @@ fn report_title_uses_detected_agents_even_when_filtered_rows_are_sparse() {
 
     assert_eq!(
         title,
-        "Coding (Agent) CLI Usage Report - Daily\nDetected: Amp, Claude, Codex, OpenCode, pi-agent"
+        "Coding (Agent) CLI Usage Report - Daily\nDetected: Amp, Claude, Codex, OpenCode, pi"
     );
 }
 

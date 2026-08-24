@@ -213,7 +213,7 @@ fn load_base_rows(
         AgentLoadSpec {
             index: 7,
             agent: BUILT_IN_AGENT_NAMES[7],
-            progress_agent: crate::progress::UsageLoadAgent("pi-agent"),
+            progress_agent: crate::progress::UsageLoadAgent("pi"),
             load: Box::new(|| {
                 load_pi_format_agent_rows("pi", None, load_kind, &loader_shared, pricing)
             }),
@@ -1186,7 +1186,7 @@ mod tests {
         assert!(rows.detected);
         assert_eq!(rows.rows.len(), 1);
         assert_eq!(rows.rows[0].agent, "omp");
-        assert_eq!(rows.rows[0].models_used, vec!["[omp] gpt-5"]);
+        assert_eq!(rows.rows[0].models_used, vec!["gpt-5"]);
         assert_eq!(
             rows.rows[0].metadata.as_ref().unwrap()["projectPath"],
             json!("project-a")
@@ -1418,7 +1418,7 @@ mod tests {
         assert!(result.detected_agents.contains(&"omp"));
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].metadata_agents, Some(vec!["omp"]));
-        assert_eq!(result.rows[0].models_used, vec!["[omp] gpt-5"]);
+        assert_eq!(result.rows[0].models_used, vec!["gpt-5"]);
         assert_eq!(result.rows[0].input_tokens, 30);
         assert_eq!(result.rows[0].output_tokens, 40);
     }
@@ -1466,8 +1466,8 @@ mod tests {
                 .map(|row| (row.agent, row.models_used.as_slice()))
                 .collect::<Vec<_>>(),
             vec![
-                ("omp", ["[omp] gpt-5".to_string()].as_slice()),
-                ("pi", ["[pi] gpt-5".to_string()].as_slice()),
+                ("omp", ["gpt-5".to_string()].as_slice()),
+                ("pi", ["gpt-5".to_string()].as_slice()),
             ]
         );
     }

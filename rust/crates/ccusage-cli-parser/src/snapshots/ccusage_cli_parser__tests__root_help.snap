@@ -20,7 +20,7 @@ COMMANDS:
   droid                      Show Droid usage commands
   codebuff                   Show Codebuff usage commands
   hermes                     Show Hermes usage commands
-  pi                         Show pi-agent usage commands
+  pi                         Show pi usage commands
   goose                      Show Goose usage commands
   kilo                       Show Kilo usage commands
   copilot                    Show GitHub Copilot CLI usage commands
