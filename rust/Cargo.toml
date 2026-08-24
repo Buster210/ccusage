@@ -51,6 +51,7 @@ jiff = { version = "=0.2.35", default-features = false, features = [
 	"tzdb-zoneinfo",
 	"tzdb-bundle-platform",
 ] }
+jwalk = "=0.8.1"
 memchr = "=2.8.3"
 mimalloc = "=0.1.52"
 # Inflate-only consumer of the deflated pricing snapshots build.rs embeds; the
