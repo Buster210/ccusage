@@ -60,6 +60,7 @@ fn load_entries_inner(
             e.missing_pricing_model =
                 missing_pricing_model_for_usage(model, cost_usage, None, mode, Some(pricing));
         },
+        None,
     )?;
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)

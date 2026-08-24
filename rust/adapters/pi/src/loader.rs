@@ -119,6 +119,7 @@ fn load_entries_from_paths(
                     e.cost = cost;
                     e.missing_pricing_model = missing_pricing_model;
                 },
+                None,
             )?
         }
         // ponytail: named stores skip the on-disk cache — extract_project_for_store

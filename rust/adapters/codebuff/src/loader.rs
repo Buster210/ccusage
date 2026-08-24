@@ -43,6 +43,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
             }))
         },
         |e| reprice(e, pricing),
+        None,
     )?;
     // (cached first, then fresh), so the last entry per key is the canonical one.
     let mut deduped = HashMap::<String, LoadedEntry>::new();

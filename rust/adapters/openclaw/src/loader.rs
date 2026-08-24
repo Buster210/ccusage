@@ -51,6 +51,7 @@ fn load_entries_inner(
             e.cost = cost;
             e.missing_pricing_model = missing_pricing_model;
         },
+        None,
     )?;
     let mut seen = HashSet::new();
     let mut entries = Vec::with_capacity(parsed.len());

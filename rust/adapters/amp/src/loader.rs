@@ -55,6 +55,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
                 Some(pricing),
             );
         },
+        None,
     )?;
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)

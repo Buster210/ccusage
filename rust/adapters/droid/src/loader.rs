@@ -49,6 +49,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
             Ok(vec![to_loaded_entry(entry, tz.as_ref(), pricing)])
         },
         |e| reprice(e, pricing),
+        None,
     )?;
     // Keep only the latest snapshot per session (multiple settings files can share a session_id).
     all.sort_by_key(|e| e.timestamp);
