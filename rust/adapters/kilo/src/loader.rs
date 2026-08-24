@@ -49,6 +49,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
             )
         },
         |e| reprice(e, shared.mode, pricing),
+        None,
     )?;
     // Deduplicate message ids across databases (same id can appear in multiple synced dbs).
     let mut seen: HashSet<String> = HashSet::new();

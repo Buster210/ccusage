@@ -88,7 +88,7 @@ macro_rules! timed {
     }};
 }
 
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashSet, FxHasher};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -313,7 +313,9 @@ const DB_FILE: &str = "cache.db";
 const FILES_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the `ledger` table, tracked in `schema_meta`. Bump on
 /// every `LedgerEntry` layout change so the mismatch warning below fires.
-const LEDGER_SCHEMA_VERSION: i64 = 1;
+/// v2 adds `date TEXT` column (denormalized from `LedgerEntry.base.date`) and
+/// index `ledger(namespace,date)` for windowed queries.
+const LEDGER_SCHEMA_VERSION: i64 = 2;
 /// Schema version for the `opencode` table, tracked in `schema_meta`.
 const OPENCODE_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the `pricing` table, tracked in `schema_meta`.
@@ -461,6 +463,7 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
          CREATE TABLE IF NOT EXISTS ledger (\
              namespace TEXT NOT NULL,\
              dedup_key TEXT NOT NULL,\
+             date TEXT,\
              entry BLOB NOT NULL,\
              PRIMARY KEY (namespace, dedup_key)\
          );\
@@ -528,6 +531,13 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         let _ = st.bind((1, PRICING_SCHEMA_VERSION));
         let _ = st.next();
     }
+    // ledger v2: `date` denormalized from `LedgerEntry.base.date` for windowed queries.
+    // Legacy DBs add column+index; existing NULL rows stay NULL until re-appended.
+    if conn.prepare("SELECT date FROM ledger LIMIT 1").is_err() {
+        let _ = conn.execute("ALTER TABLE ledger ADD COLUMN date TEXT");
+    }
+    let _ =
+        conn.execute("CREATE INDEX IF NOT EXISTS ledger_namespace_date ON ledger(namespace, date)");
     if let Some(stored) = read_schema_version(conn, "ledger")
         && stored != LEDGER_SCHEMA_VERSION
     {
@@ -626,49 +636,137 @@ fn partition_files(
     files: &[PathBuf],
     stored: &HashMap<String, StoredFile>,
     freshness: &Freshness,
+    single_thread: bool,
 ) -> FilePartition {
-    let mut cached = Vec::new();
-    let mut fresh = Vec::new();
+    let worker_count = if single_thread {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(files.len())
+    };
+    if worker_count <= 1 {
+        let mut cached = Vec::new();
+        let mut fresh = Vec::new();
 
-    for path in files {
-        let Some(current) = file_metadata(path) else {
+        for path in files {
+            let Some(current) = file_metadata(path) else {
+                fresh.push(FreshFile {
+                    path: path.clone(),
+                    metadata: None,
+                });
+                continue;
+            };
+
+            let mut current = current;
+            let fingerprint_value = match freshness {
+                Freshness::FileStat => 0,
+                Freshness::Fingerprint(f) => f(path).unwrap_or(u64::MAX),
+            };
+            current.fingerprint = fingerprint_value;
+
+            let path_str = path.to_string_lossy().to_string();
+            if let Some(entry) = stored.get(&path_str) {
+                let unchanged = match freshness {
+                    Freshness::FileStat => {
+                        entry.mtime == current.mtime_epoch_millis && entry.size == current.size
+                    }
+                    Freshness::Fingerprint(_) => {
+                        entry.fingerprint == current.fingerprint && current.fingerprint != u64::MAX
+                    }
+                };
+                if unchanged && let Some(entries) = decode_entries(&entry.entries) {
+                    cached.push(CachedEntries { entries });
+                    continue;
+                }
+            }
+
             fresh.push(FreshFile {
                 path: path.clone(),
-                metadata: None,
+                metadata: Some(current),
             });
-            continue;
-        };
-
-        let mut current = current;
-        let fingerprint_value = match freshness {
-            Freshness::FileStat => 0,
-            Freshness::Fingerprint(f) => f(path).unwrap_or(u64::MAX),
-        };
-        current.fingerprint = fingerprint_value;
-
-        let path_str = path.to_string_lossy().to_string();
-        if let Some(entry) = stored.get(&path_str) {
-            let unchanged = match freshness {
-                Freshness::FileStat => {
-                    entry.mtime == current.mtime_epoch_millis && entry.size == current.size
-                }
-                Freshness::Fingerprint(_) => {
-                    entry.fingerprint == current.fingerprint && current.fingerprint != u64::MAX
-                }
-            };
-            if unchanged && let Some(entries) = decode_entries(&entry.entries) {
-                cached.push(CachedEntries { entries });
-                continue;
-            }
         }
 
-        fresh.push(FreshFile {
-            path: path.clone(),
-            metadata: Some(current),
-        });
+        return FilePartition { cached, fresh };
     }
 
-    FilePartition { cached, fresh }
+    // Round-robin avoids double `stat` via `chunk_file_indexes_by_size` (which re-stats for size-balance).
+    // Partition `stat` is uniform, so even distribution is enough; `parse_fresh_files` keeps size-balance.
+    let mut chunks: Vec<Vec<usize>> = (0..worker_count).map(|_| Vec::new()).collect();
+    for (idx, _) in files.iter().enumerate() {
+        chunks[idx % worker_count].push(idx);
+    }
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            handles.push(scope.spawn(move || {
+                let mut cached: Vec<(usize, CachedEntries)> = Vec::new();
+                let mut fresh: Vec<(usize, FreshFile)> = Vec::new();
+                for index in chunk {
+                    let path = &files[index];
+                    let Some(mut current) = file_metadata(path) else {
+                        fresh.push((
+                            index,
+                            FreshFile {
+                                path: path.clone(),
+                                metadata: None,
+                            },
+                        ));
+                        continue;
+                    };
+
+                    let fingerprint_value = match freshness {
+                        Freshness::FileStat => 0,
+                        Freshness::Fingerprint(f) => f(path).unwrap_or(u64::MAX),
+                    };
+                    current.fingerprint = fingerprint_value;
+
+                    let path_str = path.to_string_lossy().to_string();
+                    if let Some(entry) = stored.get(&path_str) {
+                        let unchanged = match freshness {
+                            Freshness::FileStat => {
+                                entry.mtime == current.mtime_epoch_millis
+                                    && entry.size == current.size
+                            }
+                            Freshness::Fingerprint(_) => {
+                                entry.fingerprint == current.fingerprint
+                                    && current.fingerprint != u64::MAX
+                            }
+                        };
+                        if unchanged && let Some(entries) = decode_entries(&entry.entries) {
+                            cached.push((index, CachedEntries { entries }));
+                            continue;
+                        }
+                    }
+
+                    fresh.push((
+                        index,
+                        FreshFile {
+                            path: path.clone(),
+                            metadata: Some(current),
+                        },
+                    ));
+                }
+                (cached, fresh)
+            }));
+        }
+        let mut all_cached: Vec<(usize, CachedEntries)> = Vec::new();
+        let mut all_fresh: Vec<(usize, FreshFile)> = Vec::new();
+        for handle in handles {
+            // Fail open like load_namespace_shard: a panicked worker
+            // contributes nothing instead of aborting the whole load.
+            let (cached, fresh) = handle.join().unwrap_or_default();
+            all_cached.extend(cached);
+            all_fresh.extend(fresh);
+        }
+        all_cached.sort_by_key(|(index, _)| *index);
+        all_fresh.sort_by_key(|(index, _)| *index);
+        FilePartition {
+            cached: all_cached.into_iter().map(|(_, v)| v).collect(),
+            fresh: all_fresh.into_iter().map(|(_, v)| v).collect(),
+        }
+    })
 }
 
 /// Options for [`load_with_cache`], grouped so the two flags can't be
@@ -698,6 +796,7 @@ pub fn load_with_cache<F, R>(
     freshness: Freshness,
     parse_file: F,
     reprice: R,
+    date_filter: Option<(&str, &str)>,
 ) -> crate::Result<Vec<LoadedEntry>>
 where
     F: Fn(&Path) -> crate::Result<Vec<LoadedEntry>> + Sync,
@@ -762,7 +861,7 @@ where
         let res = Ok(match conn {
             Some(conn) => {
                 if has_ledger {
-                    merge_ledger(&conn, namespace, Vec::new(), opts.live_only)
+                    merge_ledger(&conn, namespace, Vec::new(), opts.live_only, date_filter)
                 } else {
                     Vec::new()
                 }
@@ -806,7 +905,7 @@ where
         );
     }
     let __part_start = timing_enabled().then(Instant::now);
-    let partition = partition_files(files, &stored, &freshness);
+    let partition = partition_files(files, &stored, &freshness, opts.single_thread);
     if let Some(s) = __part_start {
         eprintln!(
             "[timing] load_with_cache:{namespace}: partition_files {:?} cached={} fresh={}",
@@ -866,7 +965,7 @@ where
     // merge, so the live entries pass through unchanged.
     let __merge_start = timing_enabled().then(Instant::now);
     let res = Ok(match conn {
-        Some(conn) => merge_ledger(&conn, namespace, live, opts.live_only),
+        Some(conn) => merge_ledger(&conn, namespace, live, opts.live_only, date_filter),
         None => live,
     });
     if let Some(s) = __merge_start {
@@ -1151,15 +1250,45 @@ fn merge_ledger(
     namespace: &str,
     live: Vec<LoadedEntry>,
     live_only: bool,
+    date_filter: Option<(&str, &str)>,
 ) -> Vec<LoadedEntry> {
-    let mut seen: HashSet<String> = live.iter().map(entry_ledger_key).collect();
+    let mut seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
+    seen.extend(live.iter().map(entry_ledger_key));
     let mut out = live;
 
     if !live_only {
+        // Fast-exit: skip full ledger scan when namespace has no retained rows.
+        // This is the common case for empty adapters (amp, goose etc) and costs ~µs
+        // vs scanning 0 rows via full index walk. Lossless: SELECT 1 LIMIT 1 is exact.
+        // When a window is set, check only that window (including NULL legacy rows).
+        let has_rows = if let Some((since, until)) = date_filter {
+            conn.prepare(
+                "SELECT 1 FROM ledger WHERE namespace = ? AND (date BETWEEN ? AND ? OR date IS NULL) LIMIT 1",
+            )
+            .ok()
+            .and_then(|mut st| {
+                st.bind((1, namespace)).ok()?;
+                st.bind((2, since)).ok()?;
+                st.bind((3, until)).ok()?;
+                Some(matches!(st.next(), Ok(sqlite::State::Row)))
+            })
+            .unwrap_or(true)
+        } else if let Ok(mut st) = conn.prepare("SELECT 1 FROM ledger WHERE namespace = ? LIMIT 1")
+        {
+            let _ = st.bind((1, namespace));
+            matches!(st.next(), Ok(sqlite::State::Row))
+        } else {
+            true
+        };
+        if !has_rows {
+            return out;
+        }
         // Read keys before blobs: a key missing from the live set marks a deleted
         // source whose blob must be decoded, while a key already covered by `out`
         // is skipped — so a warm run with no deletions decodes no ledger blobs.
-        let deleted_keys: Vec<String> = load_ledger_keys(conn, namespace)
+        // Windowed: SQL already filtered by date (plus NULL), but NULL rows need
+        // Rust-side date check via the blob so legacy rows don't leak outside the window.
+        let deleted_keys: Vec<String> = load_ledger_keys(conn, namespace, date_filter)
             .into_iter()
             .filter(|k| !seen.contains(k))
             .collect();
@@ -1167,6 +1296,13 @@ fn merge_ledger(
             if let Some(blob) = load_ledger_blob(conn, namespace, &key)
                 && let Ok(entry) = postcard::from_bytes::<LedgerEntry>(&blob)
             {
+                // Windowed post-filter for NULL-date legacy rows and for safety.
+                if let Some((since, until)) = date_filter {
+                    let d = entry.base.date.as_str();
+                    if d < since || d > until {
+                        continue;
+                    }
+                }
                 seen.insert(key.clone());
                 out.push(entry.into_loaded(key));
             }
@@ -1184,8 +1320,8 @@ fn append_entries_to_ledger(
 ) -> Option<()> {
     let mut st = conn
         .prepare(
-            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, entry) \
-             VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) \
+             VALUES (?, ?, ?, ?)",
         )
         .ok()?;
     for e in entries {
@@ -1196,19 +1332,38 @@ fn append_entries_to_ledger(
         st.reset().ok()?;
         st.bind((1, namespace)).ok()?;
         st.bind((2, key.as_str())).ok()?;
-        st.bind((3, &blob[..])).ok()?;
+        st.bind((3, e.date.as_str())).ok()?;
+        st.bind((4, &blob[..])).ok()?;
         st.next().ok()?;
     }
     Some(())
 }
 
 /// Load every ledger dedup key for `namespace` without decoding the entry blobs.
-fn load_ledger_keys(conn: &sqlite::Connection, namespace: &str) -> Vec<String> {
+/// When `date_filter` is `Some((since, until))`, only keys with `date` in that
+/// inclusive range are returned; `NULL` dates (legacy rows) are included and
+/// filtered in Rust via the blob's `LedgerEntry.base.date` so windowed queries
+/// don't miss pre-migration rows. `None` is the full-scan path for `daily` etc.
+fn load_ledger_keys(
+    conn: &sqlite::Connection,
+    namespace: &str,
+    date_filter: Option<(&str, &str)>,
+) -> Vec<String> {
     let mut out = Vec::new();
-    let Ok(mut st) = conn.prepare("SELECT dedup_key FROM ledger WHERE namespace = ?") else {
+    let sql = if date_filter.is_some() {
+        "SELECT dedup_key, date FROM ledger WHERE namespace = ? AND (date BETWEEN ? AND ? OR date IS NULL)"
+    } else {
+        "SELECT dedup_key FROM ledger WHERE namespace = ?"
+    };
+    let Ok(mut st) = conn.prepare(sql) else {
         return out;
     };
     if st.bind((1, namespace)).is_err() {
+        return out;
+    }
+    if let Some((since, until)) = date_filter
+        && (st.bind((2, since)).is_err() || st.bind((3, until)).is_err())
+    {
         return out;
     }
     while let Ok(sqlite::State::Row) = st.next() {
@@ -1250,6 +1405,7 @@ pub fn retain_via_ledger(
     namespace: &str,
     live: Vec<LoadedEntry>,
     live_only: bool,
+    date_filter: Option<(&str, &str)>,
 ) -> Vec<LoadedEntry> {
     match open_db() {
         Some(conn) => {
@@ -1258,7 +1414,7 @@ pub fn retain_via_ledger(
                 let ok = append_entries_to_ledger(&conn, namespace, &live).is_some();
                 let _ = conn.execute(if ok { "COMMIT" } else { "ROLLBACK" });
             }
-            merge_ledger(&conn, namespace, live, live_only)
+            merge_ledger(&conn, namespace, live, live_only, date_filter)
         }
         None => live,
     }
@@ -1303,7 +1459,9 @@ where
         // original file order regardless of which worker finished first.
         let mut results: Vec<(usize, crate::Result<Vec<LoadedEntry>>)> = handles
             .into_iter()
-            .flat_map(|handle| handle.join().expect("cache parse worker panicked"))
+            // Fail open like load_namespace_shard: a panicked worker's
+            // chunk reads as missing instead of aborting the whole load.
+            .flat_map(|handle| handle.join().unwrap_or_default())
             .collect();
         results.sort_by_key(|(index, _)| *index);
         results
@@ -1411,16 +1569,66 @@ pub(crate) mod tests {
     fn insert_ledger_row(namespace: &str, key: &str, entry: &LoadedEntry) {
         let conn = open_db().unwrap();
         let blob = postcard::to_allocvec(&LedgerEntry::from(entry)).unwrap();
-        let mut st = conn
-            .prepare(
-                "INSERT OR IGNORE INTO ledger(namespace, dedup_key, entry) \
-                 VALUES (?, ?, ?)",
+        // Try with date column (v2 schema); fallback to legacy schema without date.
+        if let Ok(mut st) = conn.prepare(
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) VALUES (?, ?, ?, ?)",
+        ) {
+            st.bind((1, namespace)).unwrap();
+            st.bind((2, key)).unwrap();
+            st.bind((3, entry.date.as_str())).unwrap();
+            st.bind((4, &blob[..])).unwrap();
+            st.next().unwrap();
+        } else if let Ok(mut st) = conn
+            .prepare("INSERT OR IGNORE INTO ledger(namespace, dedup_key, entry) VALUES (?, ?, ?)")
+        {
+            st.bind((1, namespace)).unwrap();
+            st.bind((2, key)).unwrap();
+            st.bind((3, &blob[..])).unwrap();
+            st.next().unwrap();
+        }
+    }
+
+    /// A v1 ledger (no `date` column) is migrated in place: the column
+    /// appears and the index is created, while pre-existing rows keep NULL date.
+    #[test]
+    fn migrate_adds_date_to_legacy_ledger_table() {
+        let _env = CacheEnv::new("ledger-migrate-legacy");
+        let dir = cache_dir().expect("cache dir");
+        std::fs::create_dir_all(&dir).expect("create cache dir");
+        let legacy = sqlite::open(dir.join(DB_FILE)).expect("open legacy db");
+        legacy
+            .execute(
+                "CREATE TABLE files (                     path TEXT PRIMARY KEY,                     namespace TEXT NOT NULL,                     mtime INTEGER NOT NULL,                     size INTEGER NOT NULL,                     cost_fingerprint INTEGER NOT NULL,                     entries BLOB NOT NULL                 );                 CREATE TABLE ledger (                     namespace TEXT NOT NULL,                     dedup_key TEXT NOT NULL,                     entry BLOB NOT NULL,                     PRIMARY KEY (namespace, dedup_key)                 );                 CREATE TABLE opencode (                     db_key TEXT PRIMARY KEY,                     cost_fingerprint INTEGER NOT NULL,                     rows BLOB NOT NULL                 );                 CREATE TABLE pricing (                     url TEXT PRIMARY KEY,                     etag TEXT,                     last_modified TEXT,                     body TEXT NOT NULL,                     updated_at INTEGER                 );                 CREATE TABLE schema_meta (                     name TEXT PRIMARY KEY,                     version INTEGER NOT NULL                 );                 INSERT INTO schema_meta(name, version) VALUES ('files', 1), ('ledger', 1), ('opencode', 1), ('pricing', 2);                 INSERT INTO ledger(namespace, dedup_key, entry)                      VALUES ('claude', 'k1', randomblob(16));",
             )
+            .expect("seed legacy ledger");
+        drop(legacy);
+
+        let conn = open_db().expect("open_db should migrate the legacy ledger");
+        // Column must exist now.
+        conn.prepare("SELECT date FROM ledger LIMIT 1")
+            .expect("date column must exist after migration");
+        // Index must exist.
+        let mut st = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='ledger_namespace_date'")
             .unwrap();
-        st.bind((1, namespace)).unwrap();
-        st.bind((2, key)).unwrap();
-        st.bind((3, &blob[..])).unwrap();
+        assert_eq!(
+            st.next().unwrap(),
+            sqlite::State::Row,
+            "ledger_namespace_date index must exist"
+        );
+        // Existing row preserved with NULL date.
+        let mut st = conn
+            .prepare("SELECT date FROM ledger WHERE namespace='claude'")
+            .unwrap();
         st.next().unwrap();
+        assert!(
+            st.read::<Option<String>, _>(0).unwrap().is_none(),
+            "legacy row date stays NULL"
+        );
+        assert_eq!(
+            read_schema_version(&conn, "ledger"),
+            Some(LEDGER_SCHEMA_VERSION),
+        );
     }
 
     #[test]
@@ -1430,7 +1638,12 @@ pub(crate) mod tests {
         let meta = file_metadata(&src).expect("metadata");
         let stored = stored_snapshot(&src, &meta, &[sample_entry()]);
 
-        let part = partition_files(std::slice::from_ref(&src), &stored, &Freshness::FileStat);
+        let part = partition_files(
+            std::slice::from_ref(&src),
+            &stored,
+            &Freshness::FileStat,
+            false,
+        );
         assert_eq!(part.cached.len(), 1);
         assert!(part.fresh.is_empty());
         assert_eq!(part.cached[0].entries[0].session_id.as_ref(), "session-a");
@@ -1447,7 +1660,12 @@ pub(crate) mod tests {
         // Mutate the source so its size no longer matches the fingerprint.
         fs::write(&src, "line\nlonger\n").unwrap();
 
-        let part = partition_files(std::slice::from_ref(&src), &stored, &Freshness::FileStat);
+        let part = partition_files(
+            std::slice::from_ref(&src),
+            &stored,
+            &Freshness::FileStat,
+            false,
+        );
         assert!(part.cached.is_empty());
         assert_eq!(part.fresh.len(), 1);
         assert_eq!(part.fresh[0].path, src);
@@ -1473,6 +1691,7 @@ pub(crate) mod tests {
                 Ok(vec![sample_entry()])
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -1490,6 +1709,7 @@ pub(crate) mod tests {
                 panic!("parse_file should not run for a cached file");
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(warm.len(), 1);
@@ -1516,6 +1736,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |path| Err(crate::cli_error(format!("boom: {}", path.display()))),
             |_| {},
+            None,
         );
         assert!(errored.is_err());
 
@@ -1535,6 +1756,7 @@ pub(crate) mod tests {
                 Ok(vec![sample_entry()])
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1557,6 +1779,7 @@ pub(crate) mod tests {
             &[cached_src.clone(), fresh_src.clone()],
             &stored,
             &Freshness::FileStat,
+            false,
         );
 
         assert_eq!(part.cached.len(), 1);
@@ -1589,6 +1812,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -1606,6 +1830,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -1642,6 +1867,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -1659,6 +1885,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -1730,6 +1957,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![a.clone(), b.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 2);
@@ -1746,6 +1974,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -1789,6 +2018,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![a.clone(), b.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 2);
@@ -1804,6 +2034,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -1886,6 +2117,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         );
 
         // Delete: spend is retained in the ledger.
@@ -1900,6 +2132,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         );
 
         fs::write(&src, "new content\n").unwrap();
@@ -1917,6 +2150,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![new_entry.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(live.len(), 1, "must not double-count live + ledger");
@@ -1962,6 +2196,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
             |_| {},
+            None,
         );
         fs::remove_file(&src).unwrap();
 
@@ -1975,6 +2210,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -2022,6 +2258,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry_a.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -2038,6 +2275,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2063,6 +2301,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry_a.clone(), entry_b.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2097,6 +2336,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         );
 
         // Delete the "a" file so its spend lives only in the ledger under "ns-a".
@@ -2111,6 +2351,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         );
 
         // Now run namespace "b" with no files — must NOT emit "a"'s ledger entries.
@@ -2124,6 +2365,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(result_b.len(), 0, "ns-b must not see ns-a's ledger entries");
@@ -2141,6 +2383,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         )
         .unwrap();
         // ns-b gets its own live entry, still not the ns-a ledger entry.
@@ -2168,6 +2411,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         );
 
         // Attempt to insert the same key again, simulating a concurrent append.
@@ -2186,6 +2430,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2214,6 +2459,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_path| Ok(vec![sample_entry()]),
             |_| {}, // no repricing on cold run
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -2233,6 +2479,7 @@ pub(crate) mod tests {
             |e| {
                 e.cost = 1.23; // simulates new pricing
             },
+            None,
         )
         .unwrap();
         assert_eq!(warm.len(), 1);
@@ -2264,6 +2511,7 @@ pub(crate) mod tests {
             |e| {
                 e.cost = 0.5;
             },
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -2284,6 +2532,7 @@ pub(crate) mod tests {
             |e| {
                 e.cost = 0.0;
             }, // display mode: no cost_usd → 0
+            None,
         )
         .unwrap();
         assert_eq!(warm.len(), 1);
@@ -2315,6 +2564,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
             |_| {},
+            None,
         );
 
         // Delete source — spend retained in ledger.
@@ -2334,6 +2584,7 @@ pub(crate) mod tests {
             |e| {
                 e.cost = 9.99;
             },
+            None,
         )
         .unwrap();
 
@@ -2388,6 +2639,7 @@ pub(crate) mod tests {
                             Freshness::FileStat,
                             |_| Ok(vec![sample_entry()]),
                             |_| {},
+                            None,
                         );
                     });
                 }
@@ -2423,6 +2675,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -2440,6 +2693,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2459,6 +2713,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2485,6 +2740,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
             |_| {},
+            None,
         )
         .unwrap();
 
@@ -2500,6 +2756,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(Vec::new()),
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2604,8 +2861,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// `migrate()` must create `schema_meta` with exactly four rows, each
-    /// stamped with its table's current schema version constant.
     #[test]
     fn migrate_populates_schema_meta_with_four_rows_at_v1() {
         let _env = CacheEnv::new("schema-meta");
@@ -2705,6 +2960,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         );
         let _ = load_with_cache(
             "opencode",
@@ -2716,6 +2972,7 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
             |_| {},
+            None,
         );
 
         clear_cache_namespaces("claude");
@@ -2756,6 +3013,7 @@ pub(crate) mod tests {
             std::slice::from_ref(&src),
             &stored,
             &Freshness::Fingerprint(fp_fn),
+            false,
         );
         assert_eq!(part.cached.len(), 1, "matching fingerprint must hit cache");
         assert!(part.fresh.is_empty());
@@ -2776,6 +3034,7 @@ pub(crate) mod tests {
             std::slice::from_ref(&src),
             &stored,
             &Freshness::Fingerprint(fp_fn),
+            false,
         );
         assert!(part.cached.is_empty(), "different fingerprint must miss");
         assert_eq!(part.fresh.len(), 1);
@@ -2796,6 +3055,7 @@ pub(crate) mod tests {
             std::slice::from_ref(&src),
             &stored,
             &Freshness::Fingerprint(fp_fn),
+            false,
         );
         assert!(
             part.cached.is_empty(),
@@ -2821,6 +3081,7 @@ pub(crate) mod tests {
             std::slice::from_ref(&src),
             &stored,
             &Freshness::Fingerprint(fp_fn),
+            false,
         );
         assert_eq!(
             part.cached.len(),
@@ -2858,6 +3119,7 @@ pub(crate) mod tests {
                 Ok(vec![sample_entry()])
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(cold.len(), 1);
@@ -2875,6 +3137,7 @@ pub(crate) mod tests {
                 panic!("parse_file must not run for a fingerprint cache hit");
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(warm.len(), 1);
@@ -2895,6 +3158,7 @@ pub(crate) mod tests {
                 Ok(vec![sample_entry()])
             },
             |_| {},
+            None,
         )
         .unwrap();
         assert_eq!(reparsed.len(), 1);

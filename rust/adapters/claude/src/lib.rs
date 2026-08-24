@@ -120,6 +120,7 @@ fn load_entries_inner(
             e.cost = cost;
             e.missing_pricing_model = missing_pricing_model;
         },
+        None,
     )?;
     debug_log(
         shared,

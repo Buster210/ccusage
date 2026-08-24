@@ -38,6 +38,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
                 .collect())
         },
         |e| reprice(e, shared.mode, pricing),
+        None,
     )?;
     let mut seen_sessions = HashSet::new();
     let mut entries: Vec<LoadedEntry> = all

@@ -57,6 +57,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
                 .collect())
         },
         |e| super::parser::reprice(e, pricing),
+        None,
     )?;
     let mut entries = all;
     entries.sort_by_key(|entry| entry.timestamp);

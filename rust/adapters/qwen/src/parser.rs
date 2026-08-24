@@ -87,6 +87,7 @@ pub(super) fn load_entries(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
                 }))
         },
         |e| reprice(e, shared.mode, pricing.as_ref()),
+        None,
     )?;
     let mut seen = HashSet::new();
     let mut entries = Vec::with_capacity(parsed.len());

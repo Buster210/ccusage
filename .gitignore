@@ -48,3 +48,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # generated local agent skills
 .claude/skills
+
+# agentic setup audit (generated, not repo content)
+agentic-setup-audit.md

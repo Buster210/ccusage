@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     thread,
 };
@@ -18,19 +17,15 @@ pub fn collect_usage_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 pub fn collect_files_with_extension(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.filter_map(std::result::Result::ok) {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if file_type.is_file() && path.extension().is_some_and(|ext| ext == extension) {
-            files.push(path);
-        } else if file_type.is_dir() {
-            collect_files_with_extension(&path, extension, files);
+    for entry in jwalk::WalkDir::new(dir)
+        .sort(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file()
+            && entry.path().extension().is_some_and(|ext| ext == extension)
+        {
+            files.push(entry.path());
         }
     }
 }

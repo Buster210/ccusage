@@ -82,7 +82,7 @@ pub fn load_entries_from_directory(
             )
         })
         .unwrap_or_default();
-    for entry in cache::retain_via_ledger("opencode-db", db_entries, shared.live_only) {
+    for entry in cache::retain_via_ledger("opencode-db", db_entries, shared.live_only, None) {
         if !window.is_unbounded() && !window.contains(entry.timestamp.as_millis()) {
             continue;
         }
@@ -112,6 +112,7 @@ pub fn load_entries_from_directory(
         cache::Freshness::FileStat,
         |path| read_message_file(path, tz.as_ref(), shared.mode, pricing.as_ref(), shared),
         |e| reprice(e, shared.mode, pricing.as_ref()),
+        None,
     )?;
     // The window is applied here rather than before the parse: caching a
     // window-filtered result would poison the cache for the next run's window.
