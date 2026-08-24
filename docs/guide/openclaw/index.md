@@ -61,7 +61,7 @@ OpenClaw session messages embed a `cost.total` value per assistant message. ccus
 
 ## Model Attribution
 
-OpenClaw sessions emit `model_change` and `custom`/`model-snapshot` events that set the active provider and model for subsequent assistant messages. ccusage tracks this state per file and tags every model name with an `[openclaw]` prefix in the `modelsUsed` column to keep it distinguishable in the unified `ccusage daily` view.
+OpenClaw sessions emit `model_change` and `custom`/`model-snapshot` events that set the active provider and model for subsequent assistant messages. ccusage tracks this state per file and uses raw model names as recorded in logs (no per-store prefix; the Agent column distinguishes sources in the unified `ccusage daily` view).
 
 ## Environment Variables
 
@@ -99,7 +99,7 @@ npx ccusage@latest openclaw daily
 ┌────────────┬──────────────────────┬───────────┬───────────┬──────────────┬────────────┬──────────────┬──────────────┐
 │ Date       │ Models               │     Input │    Output │ Cache Create │ Cache Read │ Total Tokens │   Cost (USD) │
 ├────────────┼──────────────────────┼───────────┼───────────┼──────────────┼────────────┼──────────────┼──────────────┤
-│ 2026-05-16 │ - [openclaw] gpt-5.2 │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
+│ 2026-05-16 │ gpt-5.2              │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
 ├────────────┼──────────────────────┼───────────┼───────────┼──────────────┼────────────┼──────────────┼──────────────┤
 │ Total      │                      │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
 └────────────┴──────────────────────┴───────────┴───────────┴──────────────┴────────────┴──────────────┴──────────────┘
@@ -128,7 +128,7 @@ Returns structured data:
 			"cacheReadTokens": 109928,
 			"totalTokens": 112383,
 			"totalCost": 0.03,
-			"modelsUsed": ["[openclaw] gpt-5.2"]
+			"modelsUsed": ["gpt-5.2"]
 		}
 	],
 	"totals": {
@@ -168,7 +168,7 @@ ccusage openclaw session --since 2026-05-09
 ┌────────────┬──────────────────────┬───────────┬───────────┬──────────────┬────────────┬──────────────┬──────────────┐
 │ Session    │ Models               │     Input │    Output │ Cache Create │ Cache Read │ Total Tokens │   Cost (USD) │
 ├────────────┼──────────────────────┼───────────┼───────────┼──────────────┼────────────┼──────────────┼──────────────┤
-│ abc        │ - [openclaw] gpt-5.2 │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
+│ abc        │ gpt-5.2              │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
 ├────────────┼──────────────────────┼───────────┼───────────┼──────────────┼────────────┼──────────────┼──────────────┤
 │ Total      │                      │     1,860 │        95 │          500 │    109,928 │      112,383 │        $0.03 │
 └────────────┴──────────────────────┴───────────┴───────────┴──────────────┴────────────┴──────────────┴──────────────┘
