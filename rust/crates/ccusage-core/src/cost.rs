@@ -51,6 +51,11 @@ pub fn calculate_cost_for_usage(
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> f64 {
+    if let Some(model) = model
+        && model.to_ascii_lowercase().ends_with("free")
+    {
+        return 0.0;
+    }
     match mode {
         CostMode::Display => cost_usd.unwrap_or(0.0),
         CostMode::Auto => {
@@ -67,6 +72,11 @@ pub fn missing_pricing_model_for_usage(
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
+    if let Some(model) = model
+        && model.to_ascii_lowercase().ends_with("free")
+    {
+        return None;
+    }
     if mode == CostMode::Display || (mode == CostMode::Auto && cost_usd.is_some()) {
         return None;
     }
@@ -78,6 +88,11 @@ pub fn missing_pricing_model_for_token_total(
     total_tokens: u64,
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
+    if let Some(model) = model
+        && model.to_ascii_lowercase().ends_with("free")
+    {
+        return None;
+    }
     if total_tokens == 0 {
         return None;
     }
@@ -95,6 +110,9 @@ pub fn missing_pricing_model_for_candidates(
     total_tokens: u64,
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
+    if model.to_ascii_lowercase().ends_with("free") {
+        return None;
+    }
     if total_tokens == 0 {
         return None;
     }
@@ -113,6 +131,9 @@ fn calculate_cost_from_tokens(
     let Some(model) = model else {
         return 0.0;
     };
+    if model.to_ascii_lowercase().ends_with("free") {
+        return 0.0;
+    }
     let Some(pricing) = pricing.and_then(|pricing| pricing.find(model)) else {
         return 0.0;
     };
