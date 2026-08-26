@@ -244,6 +244,16 @@ fn calculate_open_code_cost(
     _mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> f64 {
+    // Free-tier models must never be billed: they are published with
+    // per-token rates of 0 in models.dev, but the generic `> 0.0` skip
+    // would discard that 0 and fuzzy-match a paid sibling (e.g.
+    // `mimo-v2.5-free` -> `mimo-v2.5`). Short-circuit on the model id
+    // itself so the exact 0 is honoured and no sibling is consulted.
+    // `free` is always a suffix (`-free` or `:free`) — verified 358/358
+    // in opencode DB and 96/96 in pricing all end with `free`.
+    if model.to_ascii_lowercase().ends_with("free") {
+        return 0.0;
+    }
     for candidate in open_code_model_candidates(model, provider) {
         let cost =
             calculate_cost_for_usage(Some(&candidate), usage, None, CostMode::Calculate, pricing);
@@ -261,6 +271,9 @@ fn missing_open_code_pricing(
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
+    if model.to_ascii_lowercase().ends_with("free") {
+        return None;
+    }
     if mode == CostMode::Display {
         return None;
     }
