@@ -628,7 +628,94 @@ struct StoredFile {
 
 /// Load every `files` row for `namespace`, keyed by source path. The entries
 /// blob is decoded lazily by [`partition_files`] only on a confirmed cache hit.
+/// Blob transfer dominates warm runs, so large namespaces shard the scan across
+/// workers (connections are not shareable); failed shards read as fresh, never loss.
 fn load_namespace_files(conn: &sqlite::Connection, namespace: &str) -> HashMap<String, StoredFile> {
+    if row_count(conn, namespace) >= 128 {
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(2, 8);
+        let mut map = HashMap::new();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for shard in 0..workers {
+                handles.push(scope.spawn(move || load_namespace_shard(namespace, workers, shard)));
+            }
+            for handle in handles {
+                map.extend(handle.join().unwrap_or_default());
+            }
+        });
+        if !map.is_empty() {
+            return map;
+        }
+        // Sharded load came back empty (connections refused?); fall through
+        // to the single-connection scan rather than dropping the cache.
+    }
+    load_namespace_files_single(conn, namespace)
+}
+
+fn row_count(conn: &sqlite::Connection, namespace: &str) -> usize {
+    let Ok(mut st) = conn.prepare("SELECT COUNT(*) FROM files WHERE namespace = ?") else {
+        return 0;
+    };
+    if st.bind((1, namespace)).is_err() {
+        return 0;
+    }
+    match st.next() {
+        Ok(sqlite::State::Row) => st.read::<i64, _>(0).unwrap_or(0).max(0) as usize,
+        _ => 0,
+    }
+}
+
+fn load_namespace_shard(
+    namespace: &str,
+    workers: usize,
+    shard: usize,
+) -> HashMap<String, StoredFile> {
+    let mut map = HashMap::new();
+    let Some(conn) = open_db() else {
+        return map;
+    };
+    let Ok(mut st) = conn.prepare(
+        "SELECT path, mtime, size, cost_fingerprint, entries FROM files \
+         WHERE namespace = ? AND (rowid % ?2) = ?3",
+    ) else {
+        return map;
+    };
+    if st.bind((1, namespace)).is_err()
+        || st.bind((2, workers as i64)).is_err()
+        || st.bind((3, shard as i64)).is_err()
+    {
+        return map;
+    }
+    while let Ok(sqlite::State::Row) = st.next() {
+        let (Ok(path), Ok(mtime), Ok(size), Ok(cost), Ok(entries)) = (
+            st.read::<String, _>(0),
+            st.read::<i64, _>(1),
+            st.read::<i64, _>(2),
+            st.read::<i64, _>(3),
+            st.read::<Vec<u8>, _>(4),
+        ) else {
+            continue;
+        };
+        map.insert(
+            path,
+            StoredFile {
+                mtime: mtime as u64,
+                size: size as u64,
+                fingerprint: cost as u64,
+                entries,
+            },
+        );
+    }
+    map
+}
+
+fn load_namespace_files_single(
+    conn: &sqlite::Connection,
+    namespace: &str,
+) -> HashMap<String, StoredFile> {
     let mut map = HashMap::new();
     let Ok(mut st) = conn.prepare(
         "SELECT path, mtime, size, cost_fingerprint, entries FROM files WHERE namespace = ?",
@@ -675,8 +762,8 @@ struct FreshFile {
 
 /// The split of an input file list into cache hits and files needing parsing.
 struct FilePartition {
-    cached: Vec<CachedEntries>,
-    fresh: Vec<FreshFile>,
+    cached: Vec<(usize, CachedEntries)>,
+    fresh: Vec<(usize, FreshFile)>,
 }
 
 /// Partition source files into cached (still valid) and fresh (must re-parse).
@@ -695,15 +782,18 @@ fn partition_files(
             .min(files.len())
     };
     if worker_count <= 1 {
-        let mut cached = Vec::new();
-        let mut fresh = Vec::new();
+        let mut cached: Vec<(usize, CachedEntries)> = Vec::new();
+        let mut fresh: Vec<(usize, FreshFile)> = Vec::new();
 
-        for path in files {
+        for (index, path) in files.iter().enumerate() {
             let Some(current) = file_metadata(path) else {
-                fresh.push(FreshFile {
-                    path: path.clone(),
-                    metadata: None,
-                });
+                fresh.push((
+                    index,
+                    FreshFile {
+                        path: path.clone(),
+                        metadata: None,
+                    },
+                ));
                 continue;
             };
 
@@ -725,15 +815,18 @@ fn partition_files(
                     }
                 };
                 if unchanged && let Some(entries) = decode_entries(&entry.entries) {
-                    cached.push(CachedEntries { entries });
+                    cached.push((index, CachedEntries { entries }));
                     continue;
                 }
             }
 
-            fresh.push(FreshFile {
-                path: path.clone(),
-                metadata: Some(current),
-            });
+            fresh.push((
+                index,
+                FreshFile {
+                    path: path.clone(),
+                    metadata: Some(current),
+                },
+            ));
         }
 
         return FilePartition { cached, fresh };
@@ -811,8 +904,8 @@ fn partition_files(
         all_cached.sort_by_key(|(index, _)| *index);
         all_fresh.sort_by_key(|(index, _)| *index);
         FilePartition {
-            cached: all_cached.into_iter().map(|(_, v)| v).collect(),
-            fresh: all_fresh.into_iter().map(|(_, v)| v).collect(),
+            cached: all_cached,
+            fresh: all_fresh,
         }
     })
 }
