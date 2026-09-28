@@ -104,7 +104,7 @@ pub fn missing_pricing_model_for_usage(
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
     if let Some(model) = model
-        && model.to_ascii_lowercase().ends_with("free")
+        && is_free_tier(model)
     {
         return None;
     }
@@ -120,7 +120,7 @@ pub fn missing_pricing_model_for_token_total(
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
     if let Some(model) = model
-        && model.to_ascii_lowercase().ends_with("free")
+        && is_free_tier(model)
     {
         return None;
     }
@@ -141,7 +141,7 @@ pub fn missing_pricing_model_for_candidates(
     total_tokens: u64,
     pricing: Option<&PricingMap>,
 ) -> Option<String> {
-    if model.to_ascii_lowercase().ends_with("free") {
+    if is_free_tier(model) {
         return None;
     }
     if total_tokens == 0 {
