@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::{
     LoadedEntry, PricingMap, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost_for_usage, cli::CostMode, format_date_tz,
+    apply_total_token_fallback, calculate_cost_for_usage_at, cli::CostMode, format_date_tz,
     missing_pricing_model_for_candidates,
 };
 use ccusage_adapter_common::jsonl;
@@ -150,6 +150,7 @@ pub(super) fn message_value_to_entry(
         data.message.model.as_deref(),
         provider.as_deref(),
         cost_usage,
+        crate::parse_ts_timestamp(&data.timestamp),
         data.cost_usd,
         mode,
         pricing,
@@ -205,6 +206,7 @@ pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: &Pricing
         model,
         provider.as_deref(),
         cost_usage,
+        crate::parse_ts_timestamp(&entry.data.timestamp),
         entry.data.cost_usd,
         mode,
         pricing,
@@ -225,6 +227,7 @@ fn kilo_cost_and_missing(
     model: Option<&str>,
     provider: Option<&str>,
     usage: TokenUsageRaw,
+    timestamp: Option<TimestampMs>,
     cost_usd: Option<f64>,
     mode: CostMode,
     pricing: &PricingMap,
@@ -232,7 +235,7 @@ fn kilo_cost_and_missing(
     if mode == CostMode::Display {
         return (cost_usd.unwrap_or(0.0), None);
     }
-    let computed = calculate_kilo_cost_from_tokens(model, provider, usage, pricing);
+    let computed = calculate_kilo_cost_from_tokens(model, provider, usage, timestamp, pricing);
     if mode == CostMode::Auto
         && computed == 0.0
         && let Some(cost) = cost_usd.filter(|c| *c > 0.0)
@@ -241,7 +244,7 @@ fn kilo_cost_and_missing(
     }
     (
         computed,
-        missing_kilo_pricing(model, provider, usage, mode, pricing),
+        missing_kilo_pricing(model, provider, usage, cost_usd, mode, pricing),
     )
 }
 
@@ -249,17 +252,19 @@ fn calculate_kilo_cost_from_tokens(
     model: Option<&str>,
     provider: Option<&str>,
     usage: TokenUsageRaw,
+    timestamp: Option<TimestampMs>,
     pricing: &PricingMap,
 ) -> f64 {
     let Some(model) = model else {
         return 0.0;
     };
-    for candidate in model_candidates(model, provider) {
+    for candidate in model_candidates(model, provider, pricing) {
         if pricing.find(&candidate).is_some() {
-            return calculate_cost_for_usage(
+            return calculate_cost_for_usage_at(
                 Some(&candidate),
                 usage,
                 None,
+                timestamp,
                 CostMode::Calculate,
                 Some(pricing),
             );
@@ -272,28 +277,32 @@ fn missing_kilo_pricing(
     model: Option<&str>,
     provider: Option<&str>,
     usage: TokenUsageRaw,
+    cost_usd: Option<f64>,
     mode: CostMode,
     pricing: &PricingMap,
 ) -> Option<String> {
-    if mode == CostMode::Display {
+    if mode == CostMode::Display || cost_usd.is_some_and(|cost| cost > 0.0) {
         return None;
     }
     let model = model?;
     missing_pricing_model_for_candidates(
         model,
-        model_candidates(model, provider),
+        model_candidates(model, provider, pricing),
         crate::total_usage_tokens(usage),
         Some(pricing),
     )
 }
 
-fn model_candidates(model: &str, provider: Option<&str>) -> Vec<String> {
+fn model_candidates(model: &str, provider: Option<&str>, pricing: &PricingMap) -> Vec<String> {
     let mut candidates = Vec::with_capacity(2);
     if let Some(provider) = provider
         .map(normalize_provider)
         .filter(|provider| provider != "unknown" && provider != "kilo")
     {
-        candidates.push(format!("{provider}/{model}"));
+        let qualified = format!("{provider}/{model}");
+        if pricing.find_exact(&qualified).is_some() {
+            candidates.push(qualified);
+        }
     }
     candidates.push(model.to_string());
     let mut seen = std::collections::HashSet::new();
@@ -363,5 +372,98 @@ mod tests {
 
         assert_eq!(entry.data.message.usage.output_tokens, 234);
         assert_eq!(entry.extra_total_tokens, 0);
+    }
+
+    fn deepseek_pricing() -> PricingMap {
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "deepseek-v4-flash": {
+                    "input_cost_per_token": 0.00000014,
+                    "output_cost_per_token": 0.00000028
+                }
+            }"#,
+        );
+        pricing
+    }
+
+    fn usage_entry(timestamp: &str) -> UsageEntry {
+        UsageEntry {
+            session_id: Some("session-a".to_string()),
+            timestamp: timestamp.to_string(),
+            version: None,
+            message: UsageMessage {
+                usage: TokenUsageRaw {
+                    input_tokens: 1_000_000,
+                    ..TokenUsageRaw::default()
+                },
+                model: Some("deepseek-v4-flash".to_string()),
+                id: Some("message-a".to_string()),
+                provider: None,
+            },
+            cost_usd: None,
+            request_id: None,
+            is_api_error_message: None,
+            is_sidechain: None,
+        }
+    }
+
+    #[test]
+    fn uses_raw_model_for_timestamped_pricing_when_provider_match_is_not_exact() {
+        let pricing = deepseek_pricing();
+        let data = usage_entry("2026-08-17T01:00:00Z");
+
+        assert!(
+            (calculate_kilo_cost_from_tokens(
+                data.message.model.as_deref(),
+                Some("deepseek"),
+                data.message.usage,
+                crate::parse_ts_timestamp(&data.timestamp),
+                &pricing
+            ) - 0.44)
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn falls_back_to_static_pricing_when_kilo_timestamp_is_invalid() {
+        let pricing = deepseek_pricing();
+        let data = usage_entry("not-a-timestamp");
+
+        assert_eq!(
+            calculate_kilo_cost_from_tokens(
+                data.message.model.as_deref(),
+                None,
+                data.message.usage,
+                crate::parse_ts_timestamp(&data.timestamp),
+                &pricing
+            ),
+            0.14
+        );
+    }
+
+    #[test]
+    fn uses_exact_provider_qualified_pricing_when_available() {
+        let mut pricing = deepseek_pricing();
+        pricing.load_json(
+            r#"{
+                "deepseek/deepseek-v4-flash": {
+                    "input_cost_per_token": 0.000009,
+                    "output_cost_per_token": 0.000010
+                }
+            }"#,
+        );
+        let data = usage_entry("2026-08-17T01:00:00Z");
+
+        assert_eq!(
+            calculate_kilo_cost_from_tokens(
+                data.message.model.as_deref(),
+                Some("deepseek"),
+                data.message.usage,
+                crate::parse_ts_timestamp(&data.timestamp),
+                &pricing
+            ),
+            9.0
+        );
     }
 }

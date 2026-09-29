@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -8,7 +7,10 @@ use std::{
 use jiff::tz::TimeZone as JiffTimeZone;
 
 use super::{
-    parser::{OpenCodeMessage, message_to_entry, reprice},
+    parser::{
+        OpenCodeMessage, OpenCodeSessionAggregate, message_to_entry,
+        reprice, session_value_to_entry,
+    },
     paths::paths,
 };
 use ccusage_core::{
@@ -18,23 +20,34 @@ use ccusage_core::{
 
 use crate::{
     LoadedEntry, PricingMap, Result,
-    cli::{CostMode, SharedArgs},
-    collect_files_with_extension, date_range_bounds_ms, debug_log, parse_tz,
+    cli::{AgentReportKind, CostMode, SharedArgs},
+    collect_files_with_extension, date_range_bounds_ms, debug_log,
+    fast::{FxHashMap, FxHashSet},
+    parse_tz,
 };
 
-pub fn load_entries(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
+pub fn load_entries(shared: &SharedArgs, report_kind: AgentReportKind) -> Result<Vec<LoadedEntry>> {
+    let allow_aggregate_fallback = report_kind == AgentReportKind::Session;
     crate::progress::track_usage_load(
         crate::progress::UsageLoadAgent("OpenCode"),
         shared.json,
-        || load_entries_inner(shared),
+        || load_entries_inner(shared, allow_aggregate_fallback),
     )
 }
 
-fn load_entries_inner(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
+fn load_entries_inner(
+    shared: &SharedArgs,
+    allow_aggregate_fallback: bool,
+) -> Result<Vec<LoadedEntry>> {
     let mut entries = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
+    let mut message_sessions = FxHashSet::default();
+    let mut aggregate_entries = Vec::new();
     for path in paths()? {
-        for entry in load_entries_from_directory(&path, shared)? {
+        let directory_entries =
+            load_entries_from_directory_parts(&path, shared, allow_aggregate_fallback)?;
+        for entry in directory_entries.message_entries {
+            message_sessions.insert(entry.session_id.to_string());
             if let Some(id) = entry_id(&entry)
                 && !seen.insert(id.to_string())
             {
@@ -42,15 +55,66 @@ fn load_entries_inner(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
             }
             entries.push(entry);
         }
+        aggregate_entries.extend(directory_entries.aggregate_entries);
     }
+    append_aggregate_entries(
+        &mut entries,
+        &mut seen,
+        &message_sessions,
+        aggregate_entries,
+    );
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)
 }
 
-pub fn load_entries_from_directory(
+#[cfg(test)]
+fn load_entries_from_directory(
     opencode_dir: &Path,
     shared: &SharedArgs,
 ) -> Result<Vec<LoadedEntry>> {
+    let directory_entries = load_entries_from_directory_parts(opencode_dir, shared, false)?;
+    let message_sessions = message_session_ids(&directory_entries.message_entries);
+    let mut seen = entry_ids(&directory_entries.message_entries);
+    let mut entries = directory_entries.message_entries;
+    append_aggregate_entries(
+        &mut entries,
+        &mut seen,
+        &message_sessions,
+        directory_entries.aggregate_entries,
+    );
+    entries.sort_by_key(|entry| entry.timestamp);
+    Ok(entries)
+}
+
+#[cfg(test)]
+fn load_entries_from_directory_for_report(
+    opencode_dir: &Path,
+    shared: &SharedArgs,
+    report_kind: AgentReportKind,
+) -> Result<Vec<LoadedEntry>> {
+    let directory_entries = load_entries_from_directory_parts(
+        opencode_dir,
+        shared,
+        report_kind == AgentReportKind::Session,
+    )?;
+    let message_sessions = message_session_ids(&directory_entries.message_entries);
+    let mut seen = entry_ids(&directory_entries.message_entries);
+    let mut entries = directory_entries.message_entries;
+    append_aggregate_entries(
+        &mut entries,
+        &mut seen,
+        &message_sessions,
+        directory_entries.aggregate_entries,
+    );
+    entries.sort_by_key(|entry| entry.timestamp);
+    Ok(entries)
+}
+
+fn load_entries_from_directory_parts(
+    opencode_dir: &Path,
+    shared: &SharedArgs,
+    allow_aggregate_fallback: bool,
+) -> Result<DirectoryLoadResult> {
     let pricing = if shared.mode == CostMode::Display {
         None
     } else {
@@ -62,14 +126,15 @@ pub fn load_entries_from_directory(
     };
     let tz = parse_tz(shared.timezone.as_deref());
     let window = DateWindow::from_shared(shared, tz.as_ref());
-    let mut entries = Vec::new();
-    let mut seen = HashSet::new();
-
+    let mut message_entries = Vec::new();
+    let mut seen = FxHashSet::default();
     // Always pass database rows through the ledger under a dedicated namespace
     // so spend is retained even after the whole `opencode.db` is deleted.
     // Skipping the merge on a gone/corrupt db would drop all previously-ledgered
     // spend. `merge_ledger` only re-emits keys absent from the live set, so a
     // present source is never double-counted; `live_only` suppresses the re-emit.
+    // Session aggregates bypass the ledger: they are a live-computed fallback,
+    // suppressed whenever message-level usage exists for the session.
     let db_entries = db_path(opencode_dir)
         .and_then(|db_path| {
             load_entries_from_database(
@@ -79,10 +144,17 @@ pub fn load_entries_from_directory(
                 pricing.as_ref(),
                 shared,
                 window,
+                allow_aggregate_fallback,
             )
         })
         .unwrap_or_default();
-    for entry in cache::retain_via_ledger("opencode-db", db_entries, shared.live_only, None) {
+    let aggregate_entries = db_entries.aggregate_entries;
+    for entry in cache::retain_via_ledger(
+        "opencode-db",
+        db_entries.message_entries,
+        shared.live_only,
+        None,
+    ) {
         if !window.is_unbounded() && !window.contains(entry.timestamp.as_millis()) {
             continue;
         }
@@ -91,7 +163,7 @@ pub fn load_entries_from_directory(
         {
             continue;
         }
-        entries.push(entry);
+        message_entries.push(entry);
     }
 
     let messages_dir = opencode_dir.join("storage").join("message");
@@ -125,10 +197,13 @@ pub fn load_entries_from_directory(
         {
             continue;
         }
-        entries.push(entry);
+        message_entries.push(entry);
     }
-    entries.sort_by_key(|entry| entry.timestamp);
-    Ok(entries)
+
+    Ok(DirectoryLoadResult {
+        message_entries,
+        aggregate_entries,
+    })
 }
 
 /// Reports whether `opencode_dir` holds any usage source at all: the SQLite
@@ -196,11 +271,32 @@ fn is_channel_db_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+struct DatabaseLoadContext<'a> {
+    tz: Option<&'a JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&'a PricingMap>,
+    window: DateWindow,
+    shared: &'a SharedArgs,
+    db_path: &'a Path,
+}
+
+#[derive(Default)]
+struct DatabaseLoadResult {
+    message_entries: Vec<LoadedEntry>,
+    aggregate_entries: Vec<LoadedEntry>,
+}
+
+#[derive(Default)]
+struct DirectoryLoadResult {
+    message_entries: Vec<LoadedEntry>,
+    aggregate_entries: Vec<LoadedEntry>,
+}
+
 fn fallback_from_cache(
-    cached: HashMap<String, OpenCodeRow>,
+    cached: FxHashMap<String, OpenCodeRow>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
-) -> Option<Vec<LoadedEntry>> {
+) -> Option<DatabaseLoadResult> {
     if cached.is_empty() {
         return None;
     }
@@ -211,7 +307,12 @@ fn fallback_from_cache(
     for entry in &mut entries {
         reprice(entry, mode, pricing);
     }
-    Some(entries)
+    // Aggregates never come from the row cache: they are a live-computed
+    // session-report fallback, suppressed whenever message-level usage exists.
+    Some(DatabaseLoadResult {
+        message_entries: entries,
+        aggregate_entries: Vec::new(),
+    })
 }
 
 /// Load OpenCode message-database rows, reusing the per-database row cache so
@@ -227,10 +328,11 @@ fn load_entries_from_database(
     pricing: Option<&PricingMap>,
     shared: &SharedArgs,
     window: DateWindow,
-) -> Option<Vec<LoadedEntry>> {
+    allow_aggregate_fallback: bool,
+) -> Option<DatabaseLoadResult> {
     // Load the row cache first: it survives opencode.db corruption.
     let cache_key = cache::cache_key(db_path);
-    let cached: HashMap<String, OpenCodeRow> = cache::load_opencode_row_cache(&cache_key)
+    let cached: FxHashMap<String, OpenCodeRow> = cache::load_opencode_row_cache(&cache_key)
         .into_iter()
         .flatten()
         .map(|row| (row.id.clone(), row))
@@ -257,6 +359,15 @@ fn load_entries_from_database(
         );
         return fallback_from_cache(cached, mode, pricing);
     };
+    let mut entries = Vec::new();
+    let mut fresh_rows = Vec::new();
+    let mut all_completed = true;
+    let mut dirty = false;
+    // Fork-copied history exclusions, borrowed from upstream (2b1ee578):
+    // computed once per database; the message scan consults the map only
+    // for `session_message` rows.
+    // No message tables is not a failure: session aggregates below may still
+    // apply. Fall through with empty entries so the aggregate fallback runs.
     if tables.is_empty() {
         debug_log(
             shared,
@@ -265,14 +376,10 @@ fn load_entries_from_database(
                 db_path.display()
             ),
         );
-        return fallback_from_cache(cached, mode, pricing);
     }
-
-    let mut entries = Vec::new();
-    let mut fresh_rows = Vec::new();
-    let mut all_completed = true;
+    let fork_copies = fork_copy_cutoffs(&connection);
     for table in &tables {
-        let (table_entries, table_fresh, completed) = scan_message_table(
+        let (table_entries, table_fresh, completed, table_dirty) = scan_message_table(
             &connection,
             table,
             db_path,
@@ -282,10 +389,12 @@ fn load_entries_from_database(
             pricing,
             shared,
             window,
+            &fork_copies,
         );
         if !completed {
             all_completed = false;
         }
+        dirty = dirty || table_dirty;
         entries.extend(table_entries);
         fresh_rows.extend(table_fresh);
     }
@@ -298,14 +407,24 @@ fn load_entries_from_database(
     // this run saw and rows deleted from the database drop out. A windowed scan
     // only saw part of the table, so the rows it did see are merged over the
     // existing cache instead of replacing it.
+    //
+    // Skip the rewrite when nothing changed: no fresh parses plus identical
+    // row counts means the live set equals the cached set, so saving would
+    // persist byte-equivalent content (deleted rows also surface as a count
+    // mismatch). This matters because the save rewrites every row's blob.
+    let cached_len = cached.len();
     if window.is_unbounded() {
-        cache::save_opencode_row_cache(&cache_key, &fresh_rows);
+        if dirty || fresh_rows.len() != cached_len {
+            cache::save_opencode_row_cache(&cache_key, &fresh_rows);
+        }
     } else {
         let mut merged = cached;
         for row in fresh_rows {
             merged.insert(row.id.clone(), row);
         }
-        cache::save_opencode_row_cache(&cache_key, &merged.into_values().collect::<Vec<_>>());
+        if dirty || merged.len() != cached_len {
+            cache::save_opencode_row_cache(&cache_key, &merged.into_values().collect::<Vec<_>>());
+        }
     }
 
     // Reprice every entry (cache hits carry cost 0 from `CachedEntry`; fresh
@@ -315,7 +434,49 @@ fn load_entries_from_database(
         reprice(entry, mode, pricing);
     }
 
-    Some(entries)
+    // Session aggregates (upstream): cumulative per-session rows used only as a
+    // session-report fallback when no message-level usage exists for the
+    // session. Aggregates are cumulative and cannot be sliced, so bounded
+    // reports never use them. They bypass the row cache and the ledger: the
+    // suppression below depends on the live message set.
+    let mut aggregate_entries = Vec::new();
+    if allow_aggregate_fallback && !has_temporal_filter(shared) {
+        let mut aggregate_tables = Vec::new();
+        if table_exists(&connection, "session_v2") {
+            aggregate_tables.push("session_v2");
+        }
+        if tables.iter().any(|table| table == "session_message")
+            && table_exists(&connection, "session")
+        {
+            aggregate_tables.push("session");
+        }
+        let message_sessions: FxHashSet<String> = entries
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        let mut seen_message_ids = entry_ids(&entries);
+        let aggregate_context = DatabaseLoadContext {
+            tz,
+            mode,
+            pricing,
+            window,
+            shared,
+            db_path,
+        };
+        for table in aggregate_tables {
+            for entry in load_session_aggregate_entries(&connection, table, &aggregate_context) {
+                if message_sessions.contains(entry.session_id.as_ref()) {
+                    continue;
+                }
+                push_unique_entry(&mut aggregate_entries, &mut seen_message_ids, entry);
+            }
+        }
+    }
+
+    Some(DatabaseLoadResult {
+        message_entries: entries,
+        aggregate_entries,
+    })
 }
 
 /// Which message tables a database actually has, `message` (V1) before
@@ -343,13 +504,14 @@ fn scan_message_table(
     connection: &sqlite::Connection,
     table: &str,
     db_path: &Path,
-    cached: &HashMap<String, OpenCodeRow>,
+    cached: &FxHashMap<String, OpenCodeRow>,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
     shared: &SharedArgs,
     window: DateWindow,
-) -> (Vec<LoadedEntry>, Vec<OpenCodeRow>, bool) {
+    fork_copies: &FxHashMap<String, i64>,
+) -> (Vec<LoadedEntry>, Vec<OpenCodeRow>, bool, bool) {
     // Push the window into SQL only while a sample of `time_created` still looks
     // millisecond-scaled. The sample cannot prove the whole column is, which is
     // why the payload check in the loop stays authoritative either way.
@@ -382,17 +544,28 @@ fn scan_message_table(
             shared,
             format!("Failed to read OpenCode database: {}", db_path.display()),
         );
-        return (Vec::new(), Vec::new(), false);
+        return (Vec::new(), Vec::new(), false, false);
     };
     let mut completed = false;
     let mut entries = Vec::new();
     let mut fresh_rows = Vec::new();
+    let mut dirty = false;
     loop {
         match statement.next() {
             Ok(sqlite::State::Row) => {
                 let Some((id, session_id, data)) = read_id_session_data(&statement) else {
-                    continue;
+                        continue;
                 };
+                // Fork-copied history rows are inherited, not generated:
+                // drop them before the window check and the row cache so
+                // they neither count nor get served back from the cache.
+                // `seq` is selected only for `session_message`; without a
+                // readable `seq` the row cannot be classified, so it stays.
+                if table == "session_message"
+                    && is_fork_copy(fork_copies, &session_id, statement.read::<i64, _>(3).ok())
+                {
+                    continue;
+                }
                 if !window.is_unbounded()
                     && let Some(millis) = extract_message_timestamp(&data)
                     && !window.contains(millis)
@@ -429,6 +602,7 @@ fn scan_message_table(
                 if let Some(entry) =
                     message_to_entry(&msg, Some(id.clone()), Some(session_id), tz, mode, pricing)
                 {
+                    dirty = true;
                     fresh_rows.push(OpenCodeRow {
                         id,
                         content_hash,
@@ -451,7 +625,7 @@ fn scan_message_table(
         }
     }
 
-    (entries, fresh_rows, completed)
+    (entries, fresh_rows, completed, dirty)
 }
 
 fn read_message_file(
@@ -480,6 +654,440 @@ fn read_message_file(
     Ok(message_to_entry(&msg, None, None, tz, mode, pricing)
         .into_iter()
         .collect())
+}
+
+fn push_unique_entry(
+    entries: &mut Vec<LoadedEntry>,
+    seen_message_ids: &mut FxHashSet<String>,
+    entry: LoadedEntry,
+) -> bool {
+    if let Some(id) = entry_id(&entry)
+        && !seen_message_ids.insert(id.to_string())
+    {
+        return false;
+    }
+    entries.push(entry);
+    true
+}
+
+fn entry_ids(entries: &[LoadedEntry]) -> FxHashSet<String> {
+    entries
+        .iter()
+        .filter_map(entry_id)
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+fn message_session_ids(entries: &[LoadedEntry]) -> FxHashSet<String> {
+    entries
+        .iter()
+        .map(|entry| entry.session_id.to_string())
+        .collect()
+}
+
+fn append_aggregate_entries(
+    entries: &mut Vec<LoadedEntry>,
+    seen: &mut FxHashSet<String>,
+    message_sessions: &FxHashSet<String>,
+    aggregate_entries: Vec<LoadedEntry>,
+) {
+    for entry in aggregate_entries {
+        if message_sessions.contains(entry.session_id.as_ref()) {
+            continue;
+        }
+        if let Some(id) = entry_id(&entry)
+            && !seen.insert(id.to_string())
+        {
+            continue;
+        }
+        entries.push(entry);
+    }
+}
+
+fn table_exists(connection: &sqlite::Connection, table: &str) -> bool {
+    let Ok(mut statement) = connection
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")
+    else {
+        return false;
+    };
+    if statement.bind((1, table)).is_err() {
+        return false;
+    }
+    matches!(statement.next(), Ok(sqlite::State::Row))
+}
+
+fn table_columns(connection: &sqlite::Connection, table: &str) -> FxHashSet<String> {
+    let sql = match table {
+        "message" => "SELECT * FROM message LIMIT 0",
+        "session" => "SELECT * FROM session LIMIT 0",
+        "session_v2" => "SELECT * FROM session_v2 LIMIT 0",
+        "session_message" => "SELECT * FROM session_message LIMIT 0",
+        _ => return FxHashSet::default(),
+    };
+    let Ok(statement) = connection.prepare(sql) else {
+        return FxHashSet::default();
+    };
+    let mut columns = FxHashSet::default();
+    for index in 0..statement.column_count() {
+        if let Ok(name) = statement.column_name(index) {
+            columns.insert(name.to_string());
+        }
+    }
+    columns
+}
+
+/// Fork sessions whose leading `seq` range is a copy of the parent history.
+///
+/// Borrowed from upstream (2b1ee578). Returns the largest `seq` that is
+/// still copied history for each fork session, so the message scan can drop
+/// inherited assistant usage while keeping what the fork generated itself.
+/// `session_v2` carries the fork link (`fork_session_id`) plus the boundary
+/// message; `session_message` carries the `seq` the fork kept when it copied
+/// the parent's rows.
+fn fork_copy_cutoffs(connection: &sqlite::Connection) -> FxHashMap<String, i64> {
+    let mut cutoffs = FxHashMap::default();
+    if !table_exists(connection, "session_v2") || !table_exists(connection, "session_message") {
+        return cutoffs;
+    }
+    let v2_columns = table_columns(connection, "session_v2");
+    if !["id", "fork_session_id", "fork_boundary"]
+        .into_iter()
+        .all(|column| v2_columns.contains(column))
+    {
+        return cutoffs;
+    }
+    let message_columns = table_columns(connection, "session_message");
+    if !["id", "session_id", "seq"]
+        .into_iter()
+        .all(|column| message_columns.contains(column))
+    {
+        return cutoffs;
+    }
+    let Ok(mut forks) = connection.prepare(
+        "SELECT id, fork_session_id, fork_boundary FROM session_v2 \
+         WHERE fork_session_id IS NOT NULL AND fork_boundary IS NOT NULL",
+    ) else {
+        return cutoffs;
+    };
+    while matches!(forks.next(), Ok(sqlite::State::Row)) {
+        let Ok(fork_id) = forks.read::<String, _>(0) else {
+            continue;
+        };
+        let Ok(parent_id) = forks.read::<String, _>(1) else {
+            continue;
+        };
+        let Ok(boundary) = forks.read::<String, _>(2) else {
+            continue;
+        };
+        if fork_id.is_empty() || parent_id.is_empty() {
+            continue;
+        }
+        if let Some(cutoff) = fork_copy_cutoff(connection, &parent_id, &boundary) {
+            cutoffs.insert(fork_id, cutoff);
+        }
+    }
+    cutoffs
+}
+
+/// Largest copied `seq` for one fork: the parent's boundary `seq` for a
+/// `through` fork, or the parent's last `seq` below the boundary for a
+/// `before` fork.
+///
+/// Returns `None` when the boundary cannot be resolved — a missing parent
+/// row, a missing boundary row, or an unparsable boundary payload — so the
+/// fork keeps all of its rows instead of being dropped on a guess.
+fn fork_copy_cutoff(
+    connection: &sqlite::Connection,
+    parent_id: &str,
+    boundary: &str,
+) -> Option<i64> {
+    let boundary: serde_json::Value = serde_json::from_str(boundary).ok()?;
+    let boundary_type = boundary.get("type")?.as_str()?;
+    // The boundary names the parent's message id, which the fork copy does
+    // not reuse (every copy gets a new id), so the lookup has to run against
+    // the parent session's rows and then compare by the preserved `seq`.
+    let parent_message_id = boundary.get("messageID")?.as_str()?;
+    let Ok(mut statement) = connection
+        .prepare("SELECT seq FROM session_message WHERE session_id = ?1 AND id = ?2 LIMIT 1")
+    else {
+        return None;
+    };
+    statement.bind((1, parent_id)).ok()?;
+    statement.bind((2, parent_message_id)).ok()?;
+    let boundary_seq = match statement.next() {
+        Ok(sqlite::State::Row) => statement.read::<i64, _>(0).ok()?,
+        _ => return None,
+    };
+    match boundary_type {
+        "through" => Some(boundary_seq),
+        // `seq` is sparse and the fork's own rows continue right after the
+        // last copied row, so `boundary_seq - 1` could swallow them.
+        "before" => last_parent_seq_before(connection, parent_id, boundary_seq),
+        _ => None,
+    }
+}
+
+fn last_parent_seq_before(
+    connection: &sqlite::Connection,
+    parent_id: &str,
+    boundary_seq: i64,
+) -> Option<i64> {
+    let Ok(mut statement) = connection
+        .prepare("SELECT MAX(seq) FROM session_message WHERE session_id = ?1 AND seq < ?2")
+    else {
+        return None;
+    };
+    statement.bind((1, parent_id)).ok()?;
+    statement.bind((2, boundary_seq)).ok()?;
+    match statement.next() {
+        // `MAX` over no rows is NULL: nothing was copied, so nothing is skipped.
+        Ok(sqlite::State::Row) => statement.read::<Option<i64>, _>(0).ok()?,
+        _ => None,
+    }
+}
+
+/// Whether a `session_message` row is inherited fork history.
+///
+/// Same rule as upstream's `is_fork_copy` (2b1ee578); only the `seq` source
+/// differs: this scan selects `seq` at index 3 and only for
+/// `session_message`, so the caller passes the already-read value instead
+/// of the statement.
+fn is_fork_copy(
+    fork_copies: &FxHashMap<String, i64>,
+    session_id: &str,
+    seq: Option<i64>,
+) -> bool {
+    let Some(cutoff) = fork_copies.get(session_id) else {
+        return false;
+    };
+    // Without a readable `seq` the row cannot be classified, so it stays.
+    seq.is_some_and(|seq| seq <= *cutoff)
+}
+
+fn prepare_session_message_query(
+    connection: &sqlite::Connection,
+    window: DateWindow,
+) -> Option<sqlite::Statement<'_>> {
+    let columns = table_columns(connection, "session_message");
+    if !["id", "session_id", "type", "data"]
+        .into_iter()
+        .all(|column| columns.contains(column))
+    {
+        return None;
+    }
+    let has_time_created = columns.contains("time_created");
+    let time_created = if has_time_created {
+        "time_created"
+    } else {
+        "NULL"
+    };
+    let sql = if has_time_created {
+        match (window.start, window.end) {
+            (Some(_), Some(_)) => format!(
+                "SELECT id, session_id, type, data, {time_created} FROM session_message \
+                 WHERE time_created >= ?1 AND time_created < ?2"
+            ),
+            (Some(_), None) => format!(
+                "SELECT id, session_id, type, data, {time_created} FROM session_message \
+                 WHERE time_created >= ?1"
+            ),
+            (None, Some(_)) => format!(
+                "SELECT id, session_id, type, data, {time_created} FROM session_message \
+                 WHERE time_created < ?1"
+            ),
+            (None, None) => {
+                format!("SELECT id, session_id, type, data, {time_created} FROM session_message")
+            }
+        }
+    } else {
+        "SELECT id, session_id, type, data, NULL FROM session_message".to_string()
+    };
+    let mut statement = connection.prepare(&sql).ok()?;
+    if has_time_created {
+        for (index, bound) in [window.start, window.end].into_iter().flatten().enumerate() {
+            statement.bind((index + 1, bound)).ok()?;
+        }
+    }
+    Some(statement)
+}
+
+fn prepare_session_aggregate_query<'a>(
+    connection: &'a sqlite::Connection,
+    table: &str,
+) -> Option<sqlite::Statement<'a>> {
+    let table = match table {
+        "session" => "session",
+        "session_v2" => "session_v2",
+        _ => return None,
+    };
+    let columns = table_columns(connection, table);
+    if ![
+        "id",
+        "time_created",
+        "cost",
+        "tokens_input",
+        "tokens_output",
+        "tokens_cache_read",
+        "tokens_cache_write",
+    ]
+    .into_iter()
+    .all(|column| columns.contains(column))
+    {
+        return None;
+    }
+    let reasoning = if columns.contains("tokens_reasoning") {
+        "tokens_reasoning"
+    } else {
+        "0"
+    };
+    let model = if columns.contains("model") {
+        "model"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "SELECT id, time_created, cost, tokens_input, tokens_output, \
+         tokens_cache_read, tokens_cache_write, {reasoning}, {model} FROM {table}"
+    );
+    connection.prepare(&sql).ok()
+}
+
+fn load_session_aggregate_entries(
+    connection: &sqlite::Connection,
+    table: &str,
+    context: &DatabaseLoadContext<'_>,
+) -> Vec<LoadedEntry> {
+    let Some(mut statement) = prepare_session_aggregate_query(connection, table) else {
+        debug_log(
+            context.shared,
+            format!(
+                "Failed to read OpenCode {table} table: {}",
+                context.db_path.display()
+            ),
+        );
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    loop {
+        match statement.next() {
+            Ok(sqlite::State::Row) => {
+                let Ok(session_id) = statement.read::<String, _>(0) else {
+                    continue;
+                };
+                let Some(created) = read_f64(&statement, 1)
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.trunc() as i64)
+                else {
+                    continue;
+                };
+                if !context.window.is_unbounded() && !context.window.contains(created) {
+                    continue;
+                }
+                let cost = read_f64(&statement, 2);
+                let input_tokens = read_u64(&statement, 3);
+                let output_tokens = read_u64(&statement, 4);
+                let cache_read_tokens = read_u64(&statement, 5);
+                let cache_write_tokens = read_u64(&statement, 6);
+                let reasoning_tokens = read_u64(&statement, 7);
+                let model = statement.read::<String, _>(8).ok();
+                let (model, provider) = parse_session_model(model.as_deref())
+                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+                if let Some(entry) = session_value_to_entry(
+                    OpenCodeSessionAggregate {
+                        session_id,
+                        created,
+                        model,
+                        provider,
+                        input_tokens,
+                        output_tokens,
+                        reasoning_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                        cost,
+                    },
+                    context.tz,
+                    context.mode,
+                    context.pricing,
+                ) {
+                    entries.push(entry);
+                }
+            }
+            Ok(sqlite::State::Done) => break,
+            Err(_) => {
+                debug_log(
+                    context.shared,
+                    format!(
+                        "Failed to query OpenCode {table} table: {}",
+                        context.db_path.display()
+                    ),
+                );
+                break;
+            }
+        }
+    }
+    entries
+}
+
+fn parse_session_model(value: Option<&str>) -> Option<(String, String)> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+        if let Some(model) = json
+            .as_str()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            return Some((model.to_string(), "unknown".to_string()));
+        }
+        if let Some(object) = json.as_object() {
+            let model = object
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| object.get("modelID").and_then(serde_json::Value::as_str))
+                .map(str::trim)
+                .filter(|model| !model.is_empty())?;
+            let provider = object
+                .get("providerID")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| object.get("provider").and_then(serde_json::Value::as_str))
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .unwrap_or("unknown");
+            return Some((model.to_string(), provider.to_string()));
+        }
+    }
+    Some((value.to_string(), "unknown".to_string()))
+}
+
+fn read_u64(statement: &sqlite::Statement<'_>, index: usize) -> u64 {
+    statement
+        .read::<i64, _>(index)
+        .ok()
+        .and_then(|value| u64::try_from(value.max(0)).ok())
+        .or_else(|| {
+            statement
+                .read::<f64, _>(index)
+                .ok()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|value| value.trunc() as u64)
+        })
+        .unwrap_or(0)
+}
+
+fn read_f64(statement: &sqlite::Statement<'_>, index: usize) -> Option<f64> {
+    statement
+        .read::<f64, _>(index)
+        .ok()
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            statement
+                .read::<i64, _>(index)
+                .ok()
+                .map(|value| value as f64)
+        })
 }
 
 fn entry_id(entry: &LoadedEntry) -> Option<&str> {
@@ -521,6 +1129,10 @@ fn extract_message_timestamp(data: &str) -> Option<i64> {
 struct DateWindow {
     start: Option<i64>,
     end: Option<i64>,
+}
+
+fn has_temporal_filter(shared: &SharedArgs) -> bool {
+    shared.since.is_some() || shared.until.is_some() || shared.last.is_some()
 }
 
 impl DateWindow {
@@ -577,20 +1189,30 @@ fn prepare_message_query<'c>(
     table: &str,
     window: DateWindow,
 ) -> Option<sqlite::Statement<'c>> {
+    // Fork-copy exclusion needs each `session_message` row's `seq` at
+    // select index 3. Older schemas lack the column, in which case every
+    // row is kept; the legacy `message` table never has it.
+    let seq_column = if table == "session_message"
+        && table_columns(connection, "session_message").contains("seq")
+    {
+        ", seq"
+    } else {
+        ""
+    };
     let sql = match (window.start, window.end) {
         (Some(_), Some(_)) => format!(
-            "SELECT id, session_id, data FROM {table} WHERE id IN \
+            "SELECT id, session_id, data{seq_column} FROM {table} WHERE id IN \
              (SELECT id FROM {table} WHERE time_created >= ?1 AND time_created < ?2)"
         ),
         (Some(_), None) => format!(
-            "SELECT id, session_id, data FROM {table} WHERE id IN \
+            "SELECT id, session_id, data{seq_column} FROM {table} WHERE id IN \
              (SELECT id FROM {table} WHERE time_created >= ?1)"
         ),
         (None, Some(_)) => format!(
-            "SELECT id, session_id, data FROM {table} WHERE id IN \
+            "SELECT id, session_id, data{seq_column} FROM {table} WHERE id IN \
              (SELECT id FROM {table} WHERE time_created < ?1)"
         ),
-        (None, None) => format!("SELECT id, session_id, data FROM {table}"),
+        (None, None) => format!("SELECT id, session_id, data{seq_column} FROM {table}"),
     };
     let mut statement = connection.prepare(sql).ok()?;
     for (index, bound) in [window.start, window.end].into_iter().flatten().enumerate() {
@@ -613,9 +1235,17 @@ const MIN_MILLIS_SCALE: i64 = 100_000_000_000;
 /// millisecond bounds would otherwise exclude every row — those disable the
 /// push-down and leave the payload check to filter.
 fn time_created_looks_like_millis(connection: &sqlite::Connection, table: &str) -> bool {
-    let Ok(mut statement) = connection.prepare(format!(
-        "SELECT max(time_created) FROM (SELECT time_created FROM {table} LIMIT 8)"
-    )) else {
+    let sql = match table {
+        "message" => "SELECT max(time_created) FROM (SELECT time_created FROM message LIMIT 8)",
+        "session_message" => {
+            "SELECT max(time_created) FROM (SELECT time_created FROM session_message LIMIT 8)"
+        }
+        _ => return false,
+    };
+    if !table_columns(connection, table).contains("time_created") {
+        return false;
+    }
+    let Ok(mut statement) = connection.prepare(sql) else {
         return false;
     };
     match statement.next() {
@@ -628,11 +1258,13 @@ fn time_created_looks_like_millis(connection: &sqlite::Connection, table: &str) 
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{ffi::OsString, fs, path::Path};
 
-    use super::load_entries_from_directory;
-    use crate::cli::{CostMode, SharedArgs};
-    use ccusage_test_support::{CacheEnv, fs_fixture};
+    use super::{
+        load_entries, load_entries_from_directory, load_entries_from_directory_for_report,
+    };
+    use crate::cli::{AgentReportKind, CostMode, SharedArgs};
+    use ccusage_test_support::{CacheEnv, EnvVarsGuard, fs_fixture};
 
     // Unbounded window: the cache and ledger tests are about what survives a
     // reload, so a date filter would only mask which rows came back.
@@ -843,6 +1475,161 @@ mod tests {
         assert_eq!(v2_only.data.message.usage.input_tokens, 222);
     }
 
+    fn create_db_session_message_table(path: &Path, with_time_created: bool) {
+        let db = sqlite::open(path).unwrap();
+        let schema = if with_time_created {
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER NOT NULL DEFAULT 0, time_created INTEGER, data TEXT)"
+        } else {
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER NOT NULL DEFAULT 0, data TEXT)"
+        };
+        db.execute(schema).unwrap();
+    }
+
+    fn set_db_session_message_seq(path: &Path, id: &str, seq: i64) {
+        let db = sqlite::open(path).unwrap();
+        let mut statement = db
+            .prepare("UPDATE session_message SET seq = ?1 WHERE id = ?2")
+            .unwrap();
+        statement.bind((1, seq)).unwrap();
+        statement.bind((2, id)).unwrap();
+        statement.next().unwrap();
+    }
+
+    fn insert_db_session_message(
+        path: &Path,
+        id: &str,
+        session_id: &str,
+        message_type: &str,
+        time_created: i64,
+        data: &str,
+        with_time_created: bool,
+    ) {
+        let db = sqlite::open(path).unwrap();
+        if with_time_created {
+            let mut statement = db
+                .prepare(
+                    "INSERT INTO session_message (id, session_id, type, time_created, data) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .unwrap();
+            statement.bind((1, id)).unwrap();
+            statement.bind((2, session_id)).unwrap();
+            statement.bind((3, message_type)).unwrap();
+            statement.bind((4, time_created)).unwrap();
+            statement.bind((5, data)).unwrap();
+            statement.next().unwrap();
+        } else {
+            let mut statement = db
+                .prepare(
+                    "INSERT INTO session_message (id, session_id, type, data) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .unwrap();
+            statement.bind((1, id)).unwrap();
+            statement.bind((2, session_id)).unwrap();
+            statement.bind((3, message_type)).unwrap();
+            statement.bind((4, data)).unwrap();
+            statement.next().unwrap();
+        }
+    }
+
+    fn create_db_session_aggregate_table(path: &Path, table: &str) {
+        create_db_session_aggregate_table_with_fork_columns(path, table, false);
+    }
+
+    fn create_db_session_aggregate_table_with_fork_columns(
+        path: &Path,
+        table: &str,
+        with_fork_columns: bool,
+    ) {
+        let fork_columns = if with_fork_columns {
+            ", fork_session_id TEXT, fork_boundary TEXT"
+        } else {
+            ""
+        };
+        let schema = match table {
+            "session_v2" => {
+                format!(
+                    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_created INTEGER, cost REAL, tokens_input INTEGER, tokens_output INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER, tokens_reasoning INTEGER, model TEXT{fork_columns})"
+                )
+            }
+            "session" => {
+                format!(
+                    "CREATE TABLE session (id TEXT PRIMARY KEY, time_created INTEGER, cost REAL, tokens_input INTEGER, tokens_output INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER, tokens_reasoning INTEGER, model TEXT{fork_columns})"
+                )
+            }
+            _ => panic!("unsupported test session table: {table}"),
+        };
+        sqlite::open(path)
+            .unwrap()
+            .execute(schema.as_str())
+            .unwrap();
+    }
+
+    fn insert_db_session_fork(
+        path: &Path,
+        table: &str,
+        fork_id: &str,
+        parent_id: &str,
+        boundary: &str,
+    ) {
+        let sql = match table {
+            "session_v2" => {
+                "INSERT INTO session_v2 (id, fork_session_id, fork_boundary) VALUES (?1, ?2, ?3)"
+            }
+            "session" => {
+                "INSERT INTO session (id, fork_session_id, fork_boundary) VALUES (?1, ?2, ?3)"
+            }
+            _ => panic!("unsupported test session table: {table}"),
+        };
+        let db = sqlite::open(path).unwrap();
+        let mut statement = db.prepare(sql).unwrap();
+        statement.bind((1, fork_id)).unwrap();
+        statement.bind((2, parent_id)).unwrap();
+        statement.bind((3, boundary)).unwrap();
+        statement.next().unwrap();
+    }
+
+    struct SessionAggregateFixture<'a> {
+        session_id: &'a str,
+        time_created: i64,
+        model: &'a str,
+        cost: f64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_write_tokens: i64,
+        reasoning_tokens: i64,
+    }
+
+    fn insert_db_session_aggregate(
+        path: &Path,
+        table: &str,
+        fixture: &SessionAggregateFixture<'_>,
+    ) {
+        let sql = match table {
+            "session_v2" => {
+                "INSERT INTO session_v2 (id, time_created, cost, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, tokens_reasoning, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            }
+            "session" => {
+                "INSERT INTO session (id, time_created, cost, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, tokens_reasoning, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            }
+            _ => panic!("unsupported test session table: {table}"),
+        };
+        let db = sqlite::open(path).unwrap();
+        let mut statement = db.prepare(sql).unwrap();
+        statement.bind((1, fixture.session_id)).unwrap();
+        statement.bind((2, fixture.time_created)).unwrap();
+        statement.bind((3, fixture.cost)).unwrap();
+        statement.bind((4, fixture.input_tokens)).unwrap();
+        statement.bind((5, fixture.output_tokens)).unwrap();
+        statement.bind((6, fixture.cache_read_tokens)).unwrap();
+        statement.bind((7, fixture.cache_write_tokens)).unwrap();
+        statement.bind((8, fixture.reasoning_tokens)).unwrap();
+        statement.bind((9, fixture.model)).unwrap();
+        statement.next().unwrap();
+    }
+
     #[test]
     fn loads_message_json_files() {
         let _cache_env = CacheEnv::new("opencode-loads-message-json-files");
@@ -904,6 +1691,873 @@ mod tests {
         );
         assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 12);
         assert_eq!(entries[0].cost, 0.03);
+    }
+
+    #[test]
+    fn loads_nested_v2_assistant_usage_and_ignores_session_aggregate() {
+        let _cache_env = CacheEnv::new("opencode-loads-nested-v2-assistant-usage-and-igno");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_db_session_message(
+            &db_path,
+            "msg-v2-user",
+            "v2-session",
+            "user",
+            1_767_312_000_000,
+            r#"{"text":"hello","time":{"created":1767312000000}}"#,
+            true,
+        );
+        insert_db_session_message(
+            &db_path,
+            "msg-v2-assistant",
+            "v2-session",
+            "assistant",
+            1_767_312_000_001,
+            r#"{"model":{"id":"gpt-test","providerID":"openai"},"time":{"created":1767312000000},"tokens":{"input":120,"output":60,"reasoning":10,"cache":{"read":12,"write":24}},"cost":0.03}"#,
+            true,
+        );
+        create_db_session_aggregate_table(&db_path, "session");
+        insert_db_session_aggregate(
+            &db_path,
+            "session",
+            &SessionAggregateFixture {
+                session_id: "v2-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &shared,
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("msg-v2-assistant")
+        );
+        assert_eq!(entries[0].session_id.as_ref(), "v2-session");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 120);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 60);
+        assert_eq!(
+            entries[0].data.message.usage.cache_creation_input_tokens,
+            24
+        );
+        assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 12);
+        assert_eq!(entries[0].extra_total_tokens, 10);
+        assert_eq!(entries[0].cost, 0.03);
+    }
+
+    #[test]
+    fn loads_v2_messages_without_a_time_created_column() {
+        let _cache_env = CacheEnv::new("opencode-loads-v2-messages-without-a-time-created");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, false);
+        insert_db_session_message(
+            &db_path,
+            "msg-v2-no-time-column",
+            "v2-session",
+            "assistant",
+            1_767_312_000_000,
+            r#"{"model":{"id":"gpt-test","providerID":"openai"},"time":{"created":1767312000000},"tokens":{"input":2,"output":3},"cost":0.01}"#,
+            false,
+        );
+
+        let entries = load_entries_from_directory(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].date, "2026-01-02");
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("msg-v2-no-time-column")
+        );
+    }
+
+    #[test]
+    fn deduplicates_legacy_and_v2_rows_by_message_id() {
+        let _cache_env = CacheEnv::new("opencode-deduplicates-legacy-and-v2-rows-by-messa");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_message(
+            &db_path,
+            "msg-shared",
+            "legacy-session",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":120,"output":60},"cost":0.03}"#,
+        );
+        create_db_session_message_table(&db_path, true);
+        insert_db_session_message(
+            &db_path,
+            "msg-shared",
+            "v2-session",
+            "assistant",
+            1_767_312_000_000,
+            r#"{"model":{"id":"gpt-test","providerID":"openai"},"time":{"created":1767312000000},"tokens":{"input":999,"output":999},"cost":9.99}"#,
+            true,
+        );
+
+        let entries = load_entries_from_directory(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_ref(), "legacy-session");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 120);
+        assert_eq!(entries[0].cost, 0.03);
+    }
+
+    fn assistant_payload(input: u64, output: u64, cost: f64) -> String {
+        format!(
+            r#"{{"model":{{"id":"gpt-test","providerID":"openai"}},"time":{{"created":1767312000000}},"tokens":{{"input":{input},"output":{output}}},"cost":{cost}}}"#,
+        )
+    }
+
+    fn insert_fork_history(
+        db_path: &Path,
+        parent_id: &str,
+        fork_id: &str,
+        boundary_type: &str,
+        boundary_message_id: &str,
+    ) {
+        // turn, then a later assistant turn the fork never copies.
+        for (id, seq, input) in [
+            ("parent-msg-1", 0, 100),
+            ("parent-msg-2", 1, 200),
+            (boundary_message_id, 2, 300),
+            ("parent-msg-4", 3, 400),
+        ] {
+            insert_db_session_message(
+                db_path,
+                id,
+                parent_id,
+                "assistant",
+                1_767_312_000_000 + seq,
+                assistant_payload(input, 10, 0.01).as_str(),
+                true,
+            );
+            set_db_session_message_seq(db_path, id, seq);
+        }
+        // The boundary copy keeps usage so `through` vs `before` is observable.
+        for (copy_id, seq, input) in [
+            ("fork-copy-1", 0, 100),
+            ("fork-copy-2", 1, 200),
+            ("fork-copy-boundary", 2, 300),
+        ] {
+            insert_db_session_message(
+                db_path,
+                copy_id,
+                fork_id,
+                "assistant",
+                1_767_312_000_000 + seq,
+                assistant_payload(input, 10, 0.01).as_str(),
+                true,
+            );
+            set_db_session_message_seq(db_path, copy_id, seq);
+        }
+        insert_db_session_message(
+            db_path,
+            "fork-own",
+            fork_id,
+            "assistant",
+            1_767_312_000_004,
+            assistant_payload(40, 4, 0.02).as_str(),
+            true,
+        );
+        set_db_session_message_seq(db_path, "fork-own", 4);
+        create_db_session_aggregate_table_with_fork_columns(db_path, "session_v2", true);
+        insert_db_session_fork(
+            db_path,
+            "session_v2",
+            fork_id,
+            parent_id,
+            format!(r#"{{"type":"{boundary_type}","messageID":"{boundary_message_id}"}}"#,)
+                .as_str(),
+        );
+    }
+
+    fn fork_entries(db_path: &Path) -> Vec<crate::LoadedEntry> {
+        load_entries_from_directory(
+            db_path.parent().expect("fixture db has a parent directory"),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn excludes_copied_history_through_the_fork_boundary() {
+        let _cache_env = CacheEnv::new("opencode-excludes-copied-history-through");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "through", "boundary-msg");
+
+        let entries = fork_entries(&db_path);
+
+        // Parent keeps its four turns; the fork keeps only its own turn.
+        // `through` drops the copied boundary turn (seq 2) with the rest.
+        assert_eq!(entries.len(), 5);
+        let parent_input: u64 = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "parent")
+            .map(|entry| entry.data.message.usage.input_tokens)
+            .sum();
+        assert_eq!(parent_input, 1000);
+        let fork_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "fork")
+            .collect();
+        assert_eq!(fork_entries.len(), 1);
+        assert_eq!(fork_entries[0].data.message.id.as_deref(), Some("fork-own"));
+        assert_eq!(fork_entries[0].data.message.usage.input_tokens, 40);
+    }
+
+    #[test]
+    fn excludes_copied_history_before_the_fork_boundary() {
+        let _cache_env = CacheEnv::new("opencode-excludes-copied-history-before");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "before", "boundary-msg");
+
+        let entries = fork_entries(&db_path);
+
+        // `before` keeps the copied boundary turn (seq 2) alongside the
+        // fork's own turn; everything at or below seq 1 is still dropped.
+        let mut fork_ids: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "fork")
+            .filter_map(|entry| entry.data.message.id.as_deref())
+            .collect();
+        fork_ids.sort_unstable();
+        assert_eq!(fork_ids, vec!["fork-copy-boundary", "fork-own"]);
+    }
+
+    #[test]
+    fn keeps_fork_rows_when_the_boundary_cannot_be_resolved() {
+        let _cache_env = CacheEnv::new("opencode-keeps-fork-rows-unresolvable");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "through", "boundary-msg");
+        let db = sqlite::open(&db_path).unwrap();
+        db.execute(
+            "UPDATE session_v2 SET fork_boundary = '{\"type\":\"through\",\"messageID\":\"missing\"}' \
+             WHERE id = 'fork'",
+        )
+        .unwrap();
+
+        let entries = fork_entries(&db_path);
+
+        assert_eq!(entries.len(), 8);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.session_id.as_ref() == "fork")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn keeps_fork_rows_without_fork_metadata() {
+        let _cache_env = CacheEnv::new("opencode-keeps-fork-rows-no-metadata");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "through", "boundary-msg");
+        let db = sqlite::open(&db_path).unwrap();
+        db.execute("DROP TABLE session_v2").unwrap();
+
+        let entries = fork_entries(&db_path);
+
+        assert_eq!(entries.len(), 8);
+    }
+
+    #[test]
+    fn keeps_fork_rows_when_session_messages_have_no_seq_column() {
+        let _cache_env = CacheEnv::new("opencode-keeps-fork-rows-no-seq");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        sqlite::open(&db_path)
+            .unwrap()
+            .execute(
+                "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, data TEXT)",
+            )
+            .unwrap();
+        for (id, session_id, input) in [
+            ("parent-msg", "parent", 100),
+            ("fork-copy", "fork", 100),
+            ("fork-own", "fork", 40),
+        ] {
+            insert_db_session_message(
+                &db_path,
+                id,
+                session_id,
+                "assistant",
+                1_767_312_000_000,
+                assistant_payload(input, 10, 0.01).as_str(),
+                true,
+            );
+        }
+        create_db_session_aggregate_table_with_fork_columns(&db_path, "session_v2", true);
+        insert_db_session_fork(
+            &db_path,
+            "session_v2",
+            "fork",
+            "parent",
+            r#"{"type":"through","messageID":"parent-msg"}"#,
+        );
+
+        let entries = fork_entries(&db_path);
+
+        // Pre-`seq` schemas cannot tell copies apart, so every row stays.
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn excludes_copied_history_from_a_fork_of_a_fork() {
+        let _cache_env = CacheEnv::new("opencode-excludes-fork-of-fork");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "through", "boundary-msg");
+        for (copy_id, seq) in [
+            ("grand-copy-1", 0),
+            ("grand-copy-2", 1),
+            ("grand-copy-boundary", 2),
+            ("grand-copy-fork-own", 4),
+        ] {
+            insert_db_session_message(
+                &db_path,
+                copy_id,
+                "grandchild",
+                "assistant",
+                1_767_312_000_000 + seq,
+                assistant_payload(100, 10, 0.01).as_str(),
+                true,
+            );
+            set_db_session_message_seq(&db_path, copy_id, seq);
+        }
+        insert_db_session_message(
+            &db_path,
+            "grand-own",
+            "grandchild",
+            "assistant",
+            1_767_312_000_005,
+            assistant_payload(7, 1, 0.01).as_str(),
+            true,
+        );
+        set_db_session_message_seq(&db_path, "grand-own", 5);
+        insert_db_session_fork(
+            &db_path,
+            "session_v2",
+            "grandchild",
+            "fork",
+            r#"{"type":"through","messageID":"fork-own"}"#,
+        );
+
+        let entries = fork_entries(&db_path);
+
+        let grandchild_ids: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "grandchild")
+            .filter_map(|entry| entry.data.message.id.as_deref())
+            .collect();
+        assert_eq!(grandchild_ids, vec!["grand-own"]);
+        // Parent (4) + fork's own turn (1) + grandchild's own turn (1).
+        assert_eq!(entries.len(), 6);
+    }
+
+    #[test]
+    fn falls_back_to_the_fork_local_aggregate_when_only_copies_remain() {
+        let _cache_env = CacheEnv::new("opencode-fork-local-aggregate-fallback");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        insert_fork_history(&db_path, "parent", "fork", "through", "boundary-msg");
+        sqlite::open(&db_path)
+            .unwrap()
+            .execute("DELETE FROM session_message WHERE id = 'fork-own'")
+            .unwrap();
+        // OpenCode v2 starts fork counters at zero, so the aggregate holds only
+        // the fork-local usage that survived the revert.
+        sqlite::open(&db_path)
+            .unwrap()
+            .execute(
+                "UPDATE session_v2 SET time_created = 1767312000000, cost = 0.02, \
+                 tokens_input = 40, tokens_output = 4, tokens_cache_read = 0, \
+                 tokens_cache_write = 0, tokens_reasoning = 0, \
+                 model = '{\"id\":\"gpt-test\",\"providerID\":\"openai\"}' WHERE id = 'fork'",
+            )
+            .unwrap();
+        let _guard = EnvVarsGuard::set_many([(
+            "OPENCODE_DATA_DIR",
+            Some(fixture.root().as_os_str().to_os_string()),
+        )]);
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+
+        let entries = load_entries(&shared, AgentReportKind::Session).unwrap();
+
+        let fork_input: Vec<u64> = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "fork")
+            .map(|entry| entry.data.message.usage.input_tokens)
+            .collect();
+        assert_eq!(fork_input, vec![40]);
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn keeps_fork_rows_after_the_last_copy_when_before_seqs_are_sparse() {
+        let _cache_env = CacheEnv::new("opencode-fork-sparse-before-seqs");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        create_db_session_aggregate_table_with_fork_columns(&db_path, "session_v2", true);
+        for (session_id, id, seq, input) in [
+            ("parent", "parent-a", 0, 100),
+            ("parent", "parent-b", 10, 200),
+            ("parent", "parent-boundary", 100, 300),
+            ("fork", "fork-copy-a", 0, 100),
+            ("fork", "fork-copy-b", 10, 200),
+            ("fork", "fork-own", 20, 40),
+        ] {
+            insert_db_session_message(
+                &db_path,
+                id,
+                session_id,
+                "assistant",
+                1_767_312_000_000 + seq,
+                assistant_payload(input, 10, 0.01).as_str(),
+                true,
+            );
+            set_db_session_message_seq(&db_path, id, seq);
+        }
+        insert_db_session_fork(
+            &db_path,
+            "session_v2",
+            "fork",
+            "parent",
+            r#"{"type":"before","messageID":"parent-boundary"}"#,
+        );
+
+        let entries = fork_entries(&db_path);
+
+        let fork_ids: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.session_id.as_ref() == "fork")
+            .filter_map(|entry| entry.data.message.id.as_deref())
+            .collect();
+        assert_eq!(fork_ids, vec!["fork-own"]);
+    }
+
+    #[test]
+    fn suppresses_session_aggregate_when_legacy_json_has_message() {
+        let _cache_env = CacheEnv::new("opencode-suppresses-session-aggregate-when-legacy");
+        let fixture = fs_fixture!({
+            "storage/message/legacy-json-session/legacy-json-message.json": r#"{"id":"legacy-json-message","sessionID":"legacy-json-session","providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":120,"output":60},"cost":0.03}"#,
+        });
+        let db_path = fixture.path("opencode.db");
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "legacy-json-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_ref(), "legacy-json-session");
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("legacy-json-message")
+        );
+        assert_eq!(entries[0].data.message.usage.input_tokens, 120);
+        assert_eq!(entries[0].cost, 0.03);
+    }
+
+    #[test]
+    fn uses_session_v2_aggregate_when_no_message_level_usage_exists() {
+        let _cache_env = CacheEnv::new("opencode-uses-session-v2-aggregate-when-no-messag");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "aggregate-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 0.25,
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 10,
+                cache_write_tokens: 20,
+                reasoning_tokens: 5,
+            },
+        );
+
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_ref(), "aggregate-session");
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("session:aggregate-session")
+        );
+        assert_eq!(entries[0].data.message.usage.input_tokens, 100);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(entries[0].extra_total_tokens, 5);
+        assert_eq!(entries[0].cost, 0.25);
+    }
+
+    #[test]
+    fn excludes_cumulative_session_aggregate_from_bounded_window() {
+        let _cache_env = CacheEnv::new("opencode-excludes-cumulative-session-aggregate-fr");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "spanning-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 0.25,
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 10,
+                cache_write_tokens: 20,
+                reasoning_tokens: 5,
+            },
+        );
+
+        // The cumulative aggregate includes usage outside this window, so it
+        // cannot be attributed safely to the requested date range.
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                since: Some("20260102".to_string()),
+                until: Some("20260103".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn keeps_message_rows_but_excludes_aggregate_for_partial_since_bound() {
+        let _cache_env = CacheEnv::new("opencode-keeps-message-rows-but-excludes-aggregat");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_message(
+            &db_path,
+            "partial-since-message",
+            "partial-since-message-session",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":1,"output":1},"cost":0.01}"#,
+        );
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "partial-since-aggregate-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                since: Some("2026".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("partial-since-message")
+        );
+    }
+
+    #[test]
+    fn keeps_message_rows_but_excludes_aggregate_for_partial_until_bound() {
+        let _cache_env = CacheEnv::new("opencode-keeps-message-rows-but-excludes-aggregat");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_message(
+            &db_path,
+            "partial-until-message",
+            "partial-until-message-session",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":1,"output":1},"cost":0.01}"#,
+        );
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "partial-until-aggregate-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                until: Some("2026-02".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("partial-until-message")
+        );
+    }
+
+    #[test]
+    fn suppresses_aggregate_when_message_usage_is_in_another_configured_directory() {
+        let _cache_env = CacheEnv::new("opencode-suppresses-aggregate-when-message-usage-");
+        let aggregate_fixture = fs_fixture!({});
+        let aggregate_db_path = aggregate_fixture.path("opencode.db");
+        create_db_session_aggregate_table(&aggregate_db_path, "session_v2");
+        insert_db_session_aggregate(
+            &aggregate_db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "cross-directory-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+        let message_fixture = fs_fixture!({
+            "storage/message/cross-directory-session/cross-directory-message.json": r#"{"id":"cross-directory-message","sessionID":"cross-directory-session","providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":12,"output":6},"cost":0.03}"#,
+        });
+        let _guard = EnvVarsGuard::set_many([(
+            "OPENCODE_DATA_DIR",
+            Some(OsString::from(format!(
+                "{},{}",
+                aggregate_fixture.root().display(),
+                message_fixture.root().display()
+            ))),
+        )]);
+
+        let entries = load_entries(
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].data.message.id.as_deref(),
+            Some("cross-directory-message")
+        );
+        assert_eq!(entries[0].cost, 0.03);
+    }
+
+    #[test]
+    fn only_session_reports_use_cumulative_session_aggregate_fallback() {
+        let _cache_env = CacheEnv::new("opencode-only-session-reports-use-cumulative-sess");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_message(
+            &db_path,
+            "period-message",
+            "period-message-session",
+            r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514","time":{"created":1767312000000},"tokens":{"input":1,"output":1},"cost":0.01}"#,
+        );
+        create_db_session_aggregate_table(&db_path, "session_v2");
+        insert_db_session_aggregate(
+            &db_path,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "period-aggregate-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 9.99,
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+        let _guard = EnvVarsGuard::set_many([(
+            "OPENCODE_DATA_DIR",
+            Some(fixture.root().as_os_str().to_os_string()),
+        )]);
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+
+        for report_kind in [
+            AgentReportKind::Daily,
+            AgentReportKind::Weekly,
+            AgentReportKind::Monthly,
+        ] {
+            let entries = load_entries(&shared, report_kind).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                entries[0].data.message.id.as_deref(),
+                Some("period-message")
+            );
+        }
+
+        let session_entries = load_entries(&shared, AgentReportKind::Session).unwrap();
+        assert_eq!(session_entries.len(), 2);
+        assert!(session_entries.iter().any(|entry| {
+            entry.data.message.id.as_deref() == Some("session:period-aggregate-session")
+        }));
+    }
+
+    #[test]
+    fn uses_current_session_table_as_v2_aggregate_fallback() {
+        let _cache_env = CacheEnv::new("opencode-uses-current-session-table-as-v2-aggrega");
+        let fixture = fs_fixture!({});
+        let db_path = fixture.path("opencode.db");
+        create_db_session_message_table(&db_path, true);
+        create_db_session_aggregate_table(&db_path, "session");
+        insert_db_session_aggregate(
+            &db_path,
+            "session",
+            &SessionAggregateFixture {
+                session_id: "current-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"gpt-test","providerID":"openai"}"#,
+                cost: 0.5,
+                input_tokens: 200,
+                output_tokens: 100,
+                cache_read_tokens: 20,
+                cache_write_tokens: 40,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let entries = load_entries_from_directory_for_report(
+            fixture.root(),
+            &SharedArgs {
+                mode: CostMode::Display,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+            AgentReportKind::Session,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_ref(), "current-session");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 200);
+        assert_eq!(entries[0].cost, 0.5);
     }
 
     #[test]
@@ -1547,6 +3201,7 @@ mod tests {
 
     #[test]
     fn extracts_timestamp_from_minified_and_pretty_printed_payloads() {
+        let _cache_env = CacheEnv::new("opencode-extracts-timestamp-from-minified-and-pre");
         assert_eq!(
             super::extract_message_timestamp(r#"{"time":{"created":1767312000000}}"#),
             Some(1_767_312_000_000)
@@ -1564,6 +3219,7 @@ mod tests {
 
     #[test]
     fn ignores_a_time_object_that_is_not_the_messages_own() {
+        let _cache_env = CacheEnv::new("opencode-ignores-a-time-object-that-is-not-the-me");
         // The scan must not reach past the first `time` object for a `created`
         // key: guessing wrong here would drop an in-range message, while giving
         // up only costs a full parse.
@@ -1583,6 +3239,7 @@ mod tests {
 
     #[test]
     fn declines_to_extract_timestamps_it_cannot_trust() {
+        let _cache_env = CacheEnv::new("opencode-declines-to-extract-timestamps-it-cannot");
         // Quoted numbers, negative values and missing keys all fail open so the
         // full parse decides.
         assert_eq!(
@@ -1602,6 +3259,7 @@ mod tests {
 
     #[test]
     fn serves_unchanged_row_from_cache_on_second_load() {
+        let _cache_env = CacheEnv::new("opencode-serves-unchanged-row-from-cache-on-secon");
         let env = CacheEnv::new("opencode-row-cache-hit");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1636,6 +3294,7 @@ mod tests {
 
     #[test]
     fn changed_row_content_invalidates_cache() {
+        let _cache_env = CacheEnv::new("opencode-changed-row-content-invalidates-cache");
         let _env = CacheEnv::new("opencode-row-content-change");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1667,6 +3326,7 @@ mod tests {
 
     #[test]
     fn deleted_database_retains_spend_via_ledger() {
+        let _cache_env = CacheEnv::new("opencode-deleted-database-retains-spend-via-ledge");
         let _env = CacheEnv::new("opencode-db-retain");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1697,6 +3357,7 @@ mod tests {
 
     #[test]
     fn deleted_row_spend_retained_via_ledger() {
+        let _cache_env = CacheEnv::new("opencode-deleted-row-spend-retained-via-ledger");
         let _env = CacheEnv::new("opencode-row-cache-delete");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1734,6 +3395,7 @@ mod tests {
 
     #[test]
     fn loads_distinct_rows_with_same_timestamp() {
+        let _cache_env = CacheEnv::new("opencode-loads-distinct-rows-with-same-timestamp");
         let _env = CacheEnv::new("opencode-row-same-tick");
         let cached_ids = |db: &Path| {
             let mut ids: Vec<_> =
@@ -1780,6 +3442,7 @@ mod tests {
     /// this pins the guarantee, not which of the two delivered it.
     #[test]
     fn garbage_db_neither_zeroes_nor_doubles_spend() {
+        let _cache_env = CacheEnv::new("opencode-garbage-db-neither-zeroes-nor-doubles-sp");
         let _env = CacheEnv::new("opencode-garbage-db");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1809,6 +3472,7 @@ mod tests {
     /// covered; this is the case that pins the fallback by itself.
     #[test]
     fn live_only_corrupt_db_preserves_spend_without_the_ledger() {
+        let _cache_env = CacheEnv::new("opencode-live-only-corrupt-db-preserves-spend-wit");
         let _env = CacheEnv::new("opencode-live-only-corrupt");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
@@ -1848,6 +3512,7 @@ mod tests {
     /// data pages) to actually reach the step error.
     #[test]
     fn mid_scan_error_neither_zeroes_nor_truncates_spend() {
+        let _cache_env = CacheEnv::new("opencode-mid-scan-error-neither-zeroes-nor-trunca");
         let _env = CacheEnv::new("opencode-mid-scan-error");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");

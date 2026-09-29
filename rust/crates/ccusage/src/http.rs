@@ -1,6 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ccusage_core::{cache, pricing::project_pricing_body};
+use ccusage_core::{
+    cache,
+    pricing::{PricingEndpoint, project_pricing_body},
+};
 
 const PRICING_FETCH_TIMEOUT_SECONDS: u64 = 10;
 const PRICING_FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -102,6 +105,17 @@ fn latch_retry(url: &str, cached: &cache::CachedPricing) {
     // holds for `retry` seconds, then the entry becomes stale and revalidates.
     let retry_updated_at = now.saturating_sub(refresh.saturating_sub(retry));
     cache::refresh_pricing_if_unchanged(url, cached, retry_updated_at);
+}
+
+/// Returns whether a stored body may be served after a 304 revalidation.
+/// A 304 confirms freshness, not validity: a poisoned copy stored earlier
+/// must be refetched, not served forever. Unknown URLs skip validation
+/// (fail-open) since only the pinned pricing endpoints have a loader gate.
+fn stored_body_usable_after_304(url: &str, body: &str) -> bool {
+    match PricingEndpoint::for_url(url) {
+        None => true,
+        Some(endpoint) => endpoint.validates(body),
+    }
 }
 
 fn spawn_background_refresh(url: &str) {
@@ -228,6 +242,9 @@ pub(crate) fn fetch_json_sync(url: &str) -> std::io::Result<String> {
     if status == 304 {
         return match cached {
             Some(c) => {
+                if !stored_body_usable_after_304(url, &c.body) {
+                    return fetch_uncached(&agent, url);
+                }
                 // 304 confirms the copy is current; re-stamp it as fresh.
                 latch_fresh(url, &c);
                 Ok(c.body)
@@ -245,6 +262,21 @@ pub(crate) fn fetch_json_sync(url: &str) -> std::io::Result<String> {
     let (etag, last_modified) = revalidation_headers(&response);
     let body = read_body(&mut response)?;
     let body = project_pricing_body(url, &body);
+    // Never bless an error page (or truncated garbage) as pricing: a 200
+    // whose shape the endpoint loader cannot use degrades to the cached copy
+    // instead of poisoning the store. Unknown URLs skip validation (fail-open).
+    if let Some(endpoint) = PricingEndpoint::for_url(url)
+        && !endpoint.validates_shape(&body)
+    {
+        if let Some(c) = cached {
+            latch_retry(url, &c);
+            return Ok(c.body);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pricing response failed shape validation for {url}"),
+        ));
+    }
     cache::store_pricing(
         url,
         &body,
@@ -267,6 +299,14 @@ fn fetch_uncached(agent: &ureq::Agent, url: &str) -> std::io::Result<String> {
     let (etag, last_modified) = revalidation_headers(&resp);
     let body = read_body(&mut resp)?;
     let body = project_pricing_body(url, &body);
+    if let Some(endpoint) = PricingEndpoint::for_url(url)
+        && !endpoint.validates_shape(&body)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pricing response failed shape validation for {url}"),
+        ));
+    }
     cache::store_pricing(
         url,
         &body,
@@ -559,6 +599,39 @@ mod tests {
                 .is_some(),
             "a 304 refresh stamps the freshness window"
         );
+    }
+
+    /// Borrowed B (#1672): a 304 must not serve a poisoned stored copy.
+    #[test]
+    fn poisoned_stored_body_fails_304_gate() {
+        const LITELLM_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+        const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+        const LITELLM_BODY: &str =
+            r#"{"gpt-test":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}"#;
+        const MODELS_DEV_BODY: &str =
+            r#"{"openai":{"models":{"gpt-test":{"cost":{"input":1.0,"output":2.0}}}}}"#;
+
+        assert!(super::stored_body_usable_after_304(
+            "https://example.com/pricing.json",
+            "not json"
+        ));
+        assert!(!super::stored_body_usable_after_304(LITELLM_URL, "{}"));
+        assert!(!super::stored_body_usable_after_304(
+            LITELLM_URL,
+            MODELS_DEV_BODY
+        ));
+        assert!(super::stored_body_usable_after_304(
+            LITELLM_URL,
+            LITELLM_BODY
+        ));
+        assert!(!super::stored_body_usable_after_304(
+            MODELS_DEV_URL,
+            LITELLM_BODY
+        ));
+        assert!(super::stored_body_usable_after_304(
+            MODELS_DEV_URL,
+            MODELS_DEV_BODY
+        ));
     }
 
     #[test]

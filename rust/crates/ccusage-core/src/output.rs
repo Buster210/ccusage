@@ -6,9 +6,9 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    Align, Color, Result, SimpleTable, USAGE_COMPACT_WIDTH_THRESHOLD, UsageSummary,
-    cli::SharedArgs, cli_error, color, format_project_name, parse_project_aliases, print_box_title,
-    short_model_name, terminal_width,
+    Align, Color, ModelBreakdown, Result, SimpleTable, USAGE_COMPACT_WIDTH_THRESHOLD, UsageSummary,
+    cli::SharedArgs, cli_error, color, format_breakdown_model_label, format_project_name,
+    parse_project_aliases, print_box_title, short_model_name, terminal_width,
 };
 
 pub fn wants_json(shared: &SharedArgs) -> bool {
@@ -77,27 +77,69 @@ pub fn session_summary_json(row: &UsageSummary) -> Value {
 }
 
 pub fn totals_json(rows: &[UsageSummary]) -> Value {
-    let input = rows.iter().map(|row| row.input_tokens).sum::<u64>();
-    let output = rows.iter().map(|row| row.output_tokens).sum::<u64>();
+    let input = rows
+        .iter()
+        .map(|row| row.input_tokens)
+        .fold(0, u64::saturating_add);
+    let output = rows
+        .iter()
+        .map(|row| row.output_tokens)
+        .fold(0, u64::saturating_add);
     let cache_create = rows
         .iter()
         .map(|row| row.cache_creation_tokens)
-        .sum::<u64>();
-    let cache_read = rows.iter().map(|row| row.cache_read_tokens).sum::<u64>();
-    let extra = rows.iter().map(|row| row.extra_total_tokens).sum::<u64>();
+        .fold(0, u64::saturating_add);
+    let cache_read = rows
+        .iter()
+        .map(|row| row.cache_read_tokens)
+        .fold(0, u64::saturating_add);
+    let extra = rows
+        .iter()
+        .map(|row| row.extra_total_tokens)
+        .fold(0, u64::saturating_add);
     let mut value = json!({
         "inputTokens": input,
         "outputTokens": output,
         "cacheCreationTokens": cache_create,
         "cacheReadTokens": cache_read,
-        "totalTokens": input + output + cache_create + cache_read + extra,
+        "totalTokens": input
+            .saturating_add(output)
+            .saturating_add(cache_create)
+            .saturating_add(cache_read)
+            .saturating_add(extra),
         "totalCost": rows.iter().map(|row| row.total_cost).sum::<f64>(),
     });
     let credits = rows.iter().filter_map(|row| row.credits).sum::<f64>();
     if credits > 0.0 {
         value["credits"] = json!(credits);
     }
+    attach_unpriced_models(
+        &mut value,
+        unpriced_models(rows.iter().flat_map(|row| &row.model_breakdowns)),
+    );
     value
+}
+
+/// Models with at least one unpriced entry; a listed model can still show
+/// positive cost from other entries. Sorted and deduplicated for JSON consumers.
+pub fn unpriced_models<'a>(
+    breakdowns: impl IntoIterator<Item = &'a ModelBreakdown>,
+) -> Vec<String> {
+    breakdowns
+        .into_iter()
+        .filter(|breakdown| breakdown.missing_pricing)
+        .map(|breakdown| breakdown.model_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Adds `unpricedModels` to a totals object when any model had no price; absent
+/// when pricing was complete, so existing consumers see no change.
+pub fn attach_unpriced_models(totals: &mut Value, models: Vec<String>) {
+    if !models.is_empty() {
+        totals["unpricedModels"] = json!(models);
+    }
 }
 
 pub fn group_project_output(rows: &[UsageSummary]) -> Value {
@@ -299,10 +341,12 @@ pub fn print_usage_table_with_options(
         .get("totalCost")
         .and_then(Value::as_f64)
         .unwrap_or_default();
-    let total_tokens = totals
-        .get("totalTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(input + output + cache_create + cache_read);
+    let total_tokens = totals.get("totalTokens").and_then(Value::as_u64).unwrap_or(
+        input
+            .saturating_add(output)
+            .saturating_add(cache_create)
+            .saturating_add(cache_read),
+    );
     table.separator();
     let mut total_row = vec![
         color(shared, "Total", Color::Yellow),
@@ -368,13 +412,8 @@ pub fn print_missing_pricing_warnings(rows: &[UsageSummary], offline: bool) {
 }
 
 fn missing_pricing_warnings(rows: &[UsageSummary], offline: bool) -> Vec<String> {
-    let models = rows
-        .iter()
-        .flat_map(|row| &row.model_breakdowns)
-        .filter(|breakdown| breakdown.missing_pricing)
-        .map(|breakdown| breakdown.model_name.as_str());
-
-    missing_pricing_warnings_for_models(models, offline)
+    let models = unpriced_models(rows.iter().flat_map(|row| &row.model_breakdowns));
+    missing_pricing_warnings_for_models(models.iter().map(String::as_str), offline)
 }
 
 pub fn print_missing_pricing_warnings_for_models<'a>(
@@ -437,14 +476,11 @@ fn push_breakdown_rows(
     shared: &SharedArgs,
 ) {
     for breakdown in &row.model_breakdowns {
-        let total = breakdown.input_tokens
-            + breakdown.output_tokens
-            + breakdown.cache_creation_tokens
-            + breakdown.cache_read_tokens;
+        let total = breakdown.total_tokens();
         let mut values = vec![
             color(
                 shared,
-                format!("  └─ {}", short_model_name(&breakdown.model_name)),
+                format_breakdown_model_label(&breakdown.model_name),
                 Color::Grey,
             ),
             String::new(),
@@ -509,6 +545,18 @@ pub fn format_number(value: u64) -> String {
 
 pub fn format_currency(value: f64) -> String {
     format!("${value:.2}")
+}
+
+pub fn sanitize_terminal_text(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            sanitized.extend(character.escape_default());
+        } else {
+            sanitized.push(character);
+        }
+    }
+    sanitized
 }
 
 pub fn strip_cost_json(value: &mut Value) {
@@ -621,6 +669,75 @@ mod tests {
         }]);
 
         assert_eq!(totals["totalTokens"], 172);
+        assert!(totals.get("unpricedModels").is_none());
+    }
+
+    fn summary_with_breakdowns(breakdowns: Vec<ModelBreakdown>) -> UsageSummary {
+        UsageSummary {
+            date: Some("2026-01-02".to_string()),
+            month: None,
+            week: None,
+            session_id: None,
+            project_path: None,
+            last_activity: None,
+            first_activity: None,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            extra_total_tokens: 0,
+            total_cost: 0.25,
+            credits: None,
+            message_count: None,
+            models_used: breakdowns
+                .iter()
+                .map(|breakdown| breakdown.model_name.clone())
+                .collect(),
+            model_breakdowns: breakdowns,
+            project: None,
+            versions: None,
+        }
+    }
+
+    fn breakdown(model: &str, missing_pricing: bool) -> ModelBreakdown {
+        ModelBreakdown {
+            model_name: model.to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            extra_total_tokens: 0,
+            cost: if missing_pricing { 0.0 } else { 0.25 },
+            missing_pricing,
+        }
+    }
+
+    #[test]
+    fn totals_json_lists_unpriced_models_sorted_and_deduplicated() {
+        let totals = totals_json(&[
+            summary_with_breakdowns(vec![
+                breakdown("zeta-new-model", true),
+                breakdown("gpt-5", false),
+            ]),
+            summary_with_breakdowns(vec![
+                breakdown("alpha-new-model", true),
+                breakdown("zeta-new-model", true),
+            ]),
+        ]);
+
+        assert_eq!(
+            totals["unpricedModels"],
+            json!(["alpha-new-model", "zeta-new-model"])
+        );
+    }
+
+    #[test]
+    fn model_breakdown_json_marks_missing_pricing_only_when_true() {
+        let priced = serde_json::to_value(breakdown("gpt-5", false)).unwrap();
+        let unpriced = serde_json::to_value(breakdown("new-model", true)).unwrap();
+
+        assert!(priced.get("missingPricing").is_none());
+        assert_eq!(unpriced["missingPricing"], true);
     }
 
     #[test]
@@ -635,7 +752,8 @@ mod tests {
                         {
                             "modelName": "gpt-5",
                             "costUSD": 0.1,
-                            "inputTokens": 100
+                            "inputTokens": 100,
+                            "missingPricing": true
                         }
                     ],
                 }
@@ -656,7 +774,8 @@ mod tests {
             ],
             "totals": {
                 "totalTokens": 172,
-                "totalCost": 0.25
+                "totalCost": 0.25,
+                "unpricedModels": ["gpt-5"]
             }
         });
 
@@ -672,7 +791,8 @@ mod tests {
                         "modelBreakdowns": [
                             {
                                 "modelName": "gpt-5",
-                                "inputTokens": 100
+                                "inputTokens": 100,
+                                "missingPricing": true
                             }
                         ],
                     }
@@ -689,7 +809,8 @@ mod tests {
                     }
                 ],
                 "totals": {
-                    "totalTokens": 172
+                    "totalTokens": 172,
+                    "unpricedModels": ["gpt-5"]
                 }
             })
         );
@@ -776,6 +897,30 @@ mod tests {
         ];
 
         insta::assert_snapshot!(format_models_multiline(&models));
+    }
+
+    #[test]
+    fn sanitizes_terminal_control_characters_as_visible_escapes() {
+        assert_eq!(
+            sanitize_terminal_text("future\nclient\t\u{1b}[31m"),
+            r#"future\nclient\t\u{1b}[31m"#
+        );
+    }
+
+    #[test]
+    fn model_breakdown_total_includes_extra_tokens() {
+        let breakdown = ModelBreakdown {
+            model_name: "model-a".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 10,
+            cache_read_tokens: 5,
+            extra_total_tokens: 7,
+            cost: 0.25,
+            missing_pricing: false,
+        };
+
+        assert_eq!(breakdown.total_tokens(), 172);
     }
 
     fn snapshot_summary(period: &str, project: Option<&str>, credits: Option<f64>) -> UsageSummary {

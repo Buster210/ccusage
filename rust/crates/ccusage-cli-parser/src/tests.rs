@@ -54,6 +54,7 @@ impl CliConfig for TestConfig {
         }
         if let Some(order) = self.shared_order {
             shared.order = order;
+            shared.order_explicit = true;
         }
         if let Some(since) = self.shared_since {
             shared.since = Some(since.to_string());
@@ -201,6 +202,7 @@ fn command_snapshot(command: Option<Command>) -> Value {
         Some(Command::Kilo(args)) => agent_command_snapshot("kilo", args),
         Some(Command::Copilot(args)) => agent_command_snapshot("copilot", args),
         Some(Command::Gemini(args)) => agent_command_snapshot("gemini", args),
+        Some(Command::Antigravity(args)) => agent_command_snapshot("antigravity", args),
         Some(Command::Kimi(args)) => agent_command_snapshot("kimi", args),
         Some(Command::Qwen(args)) => agent_command_snapshot("qwen", args),
         Some(Command::OpenClaw(args)) => agent_command_snapshot("openclaw", args),
@@ -209,6 +211,7 @@ fn command_snapshot(command: Option<Command>) -> Value {
             "type": "clear-cache",
             "agent": agent,
         }),
+        Some(Command::ZCode(args)) => agent_command_snapshot("zcode", args),
     }
 }
 
@@ -335,6 +338,162 @@ fn rejects_last_periods_on_reports_without_a_period() {
             "The --last option is only available for the daily, weekly, and monthly reports."
         );
     }
+}
+
+#[test]
+fn rejects_a_since_date_later_than_the_until_date() {
+    let cases: [&[&str]; 6] = [
+        &["ccusage", "--since", "2026-09-14", "--until", "2026-09-01"],
+        &[
+            "ccusage", "daily", "--since", "20260914", "--until", "20260901",
+        ],
+        &[
+            "ccusage",
+            "session",
+            "--since",
+            "2026-09-14",
+            "--until",
+            "20260901",
+        ],
+        &[
+            "ccusage",
+            "claude",
+            "session",
+            "--since",
+            "2026-09-14",
+            "--until",
+            "20260901",
+        ],
+        &[
+            "ccusage",
+            "blocks",
+            "--since",
+            "2026-09-14",
+            "--until",
+            "2026-09-01",
+        ],
+        &[
+            "ccusage",
+            "codex",
+            "monthly",
+            "--since",
+            "2026-09-14",
+            "--until",
+            "2026-09-01",
+        ],
+    ];
+    for args in cases {
+        assert_eq!(
+            parse_error(args),
+            "The --since date '20260914' is later than the --until date '20260901'."
+        );
+    }
+}
+
+#[test]
+fn accepts_a_since_date_equal_to_the_until_date() {
+    let cli = parse(&[
+        "ccusage",
+        "claude",
+        "daily",
+        "--since",
+        "2026-09-14",
+        "--until",
+        "20260914",
+    ]);
+    let Some(Command::Daily(args)) = cli.command else {
+        panic!("expected claude daily command");
+    };
+    assert_eq!(args.shared.since.as_deref(), Some("20260914"));
+    assert_eq!(args.shared.until.as_deref(), Some("20260914"));
+}
+
+#[test]
+fn rejects_a_config_since_date_later_than_the_until_flag() {
+    let config = TestConfig {
+        shared_since: Some("20260914"),
+        ..TestConfig::default()
+    };
+    let result = Cli::parse_from_with_config(
+        ["ccusage", "daily", "--until", "2026-09-01"]
+            .iter()
+            .map(OsString::from),
+        &config,
+        5.0,
+        env!("CARGO_PKG_VERSION"),
+    );
+    let Err(error) = result else {
+        panic!("expected parse error");
+    };
+    assert_eq!(
+        error,
+        "The --since date '20260914' is later than the --until date '20260901'."
+    );
+}
+
+#[test]
+fn checks_the_date_window_after_config_and_flags_are_merged() {
+    let fixture = fs_fixture!({
+        "ccusage.json": r#"{ "defaults": { "since": "2026-09-14", "until": "2026-09-01" } }"#,
+    });
+    let config_path = fixture.path("ccusage.json").to_string_lossy().into_owned();
+    let parse_with_file = |extra: &[&str]| {
+        let mut args = vec![
+            "daily".to_string(),
+            "--config".to_string(),
+            config_path.clone(),
+        ];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        let config = ccusage_config::ConfigContext::from_args(&args);
+        Cli::parse_from_with_config(
+            std::iter::once(OsString::from("ccusage"))
+                .chain(args.iter().map(|arg| OsString::from(arg.as_str()))),
+            &config,
+            ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+            env!("CARGO_PKG_VERSION"),
+        )
+    };
+
+    let Err(error) = parse_with_file(&[]) else {
+        panic!("expected a reversed config window to be rejected");
+    };
+    assert_eq!(
+        error,
+        "The --since date '20260914' is later than the --until date '20260901'."
+    );
+
+    let Ok(cli) = parse_with_file(&["--until", "2026-09-30"]) else {
+        panic!("expected a flag to repair the reversed config window");
+    };
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected unified daily command");
+    };
+    assert_eq!(args.shared.since.as_deref(), Some("20260914"));
+    assert_eq!(args.shared.until.as_deref(), Some("20260930"));
+}
+
+#[test]
+fn statusline_ignores_reversed_default_date_window() {
+    let fixture = fs_fixture!({
+        "ccusage.json": r#"{ "defaults": { "since": "2026-09-14", "until": "2026-09-01" } }"#,
+    });
+    let config_path = fixture.path("ccusage.json").to_string_lossy().into_owned();
+    let args = ["statusline", "--config", config_path.as_str()]
+        .map(str::to_string)
+        .to_vec();
+    let config = ccusage_config::ConfigContext::from_args(&args);
+
+    let result = Cli::parse_from_with_config(
+        std::iter::once(OsString::from("ccusage")).chain(args.iter().map(OsString::from)),
+        &config,
+        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let Ok(cli) = result else {
+        panic!("expected statusline to ignore the report date window");
+    };
+    assert!(matches!(cli.command, Some(Command::Statusline(_))));
 }
 
 #[test]
@@ -528,6 +687,7 @@ fn parses_root_session_as_all_agent_report_without_id() {
     };
     assert_eq!(args.kind, AgentReportKind::Session);
     assert!(args.shared.json);
+    assert!(args.session_id.is_none());
 }
 
 #[test]
@@ -651,7 +811,7 @@ fn root_help_lists_agent_namespaces_without_nested_commands() {
     let help = help_text();
     let agents = [
         "claude", "codex", "opencode", "amp", "droid", "codebuff", "hermes", "pi", "goose", "kilo",
-        "copilot", "gemini", "kimi", "qwen", "openclaw", "grok",
+        "copilot", "gemini", "kimi", "qwen", "openclaw", "grok", "zcode",
     ];
 
     for agent in agents {
@@ -682,6 +842,17 @@ fn contextual_codex_help_lists_speed_choices() {
     assert!(help.contains("Show Codex token usage grouped by day"));
     assert!(help.contains("USAGE:\n  ccusage codex daily <OPTIONS>"));
     assert!(help.contains("choices: auto | standard | fast"));
+}
+
+#[test]
+fn contextual_codex_session_help_lists_id_option() {
+    let help = help_text_for_args(&[
+        "ccusage".to_string(),
+        "codex".to_string(),
+        "session".to_string(),
+    ]);
+
+    assert!(help.contains("-i, --id <id>"));
 }
 
 #[test]
@@ -866,6 +1037,14 @@ fn snapshots_representative_cli_parse_shapes() {
         json!({
             "case": "grok daily",
             "cli": cli_snapshot(parse(&["ccusage", "grok", "daily", "--json"])),
+        }),
+        json!({
+            "case": "antigravity session",
+            "cli": cli_snapshot(parse(&["ccusage", "antigravity", "session", "--json"])),
+        }),
+        json!({
+            "case": "zcode daily",
+            "cli": cli_snapshot(parse(&["ccusage", "zcode", "daily", "--json"])),
         }),
         json!({
             "case": "blocks active recent",
@@ -1053,6 +1232,18 @@ fn parses_codex_speed_option() {
 }
 
 #[test]
+fn rejects_removed_codex_by_source_option() {
+    assert_eq!(
+        parse_error(&["ccusage", "codex", "daily", "--by-source"]),
+        "Unknown codex option '--by-source'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "daily", "--by-source"]),
+        "Unknown option '--by-source'"
+    );
+}
+
+#[test]
 fn parses_legacy_colon_agent_commands() {
     let cli = parse(&["ccusage", "codex:monthly", "--json"]);
     let Some(Command::Codex(args)) = cli.command else {
@@ -1107,6 +1298,34 @@ fn parses_top_level_session_id_lookup() {
     };
     assert!(args.shared.json);
     assert_eq!(args.id.as_deref(), Some("abc"));
+}
+
+#[test]
+fn parses_codex_session_id_filter() {
+    let cli = parse(&[
+        "ccusage",
+        "codex",
+        "session",
+        "--json",
+        "--id",
+        "01a0bb8c-c7c0-7630-9d82-860b875930f0",
+    ]);
+    let Some(Command::Codex(args)) = cli.command else {
+        panic!("expected codex session command");
+    };
+    assert_eq!(args.kind, AgentReportKind::Session);
+    assert!(args.shared.json);
+    assert_eq!(
+        args.session_id.as_deref(),
+        Some("01a0bb8c-c7c0-7630-9d82-860b875930f0")
+    );
+}
+
+#[test]
+fn rejects_codex_id_filter_outside_session_report() {
+    let error = parse_error(&["ccusage", "codex", "daily", "--id", "abc"]);
+
+    assert_eq!(error, "Unknown codex option '--id'");
 }
 
 #[test]
@@ -1256,6 +1475,16 @@ fn parses_grok_daily_options() {
 }
 
 #[test]
+fn parses_zcode_daily_options() {
+    let cli = parse(&["ccusage", "zcode", "daily", "--json"]);
+    let Some(Command::ZCode(args)) = cli.command else {
+        panic!("expected zcode command");
+    };
+    assert_eq!(args.kind, AgentReportKind::Daily);
+    assert!(args.shared.json);
+}
+
+#[test]
 fn rejects_grok_path_option() {
     let error = parse_error(&["ccusage", "grok", "daily", "--grok-path", "/tmp/grok-home"]);
 
@@ -1375,4 +1604,98 @@ fn reports_named_pi_store_validation_through_cli_config_error_path() {
         error,
         "Invalid ccusage config: pi.stores name 'codex' collides with a built-in agent"
     );
+}
+
+#[test]
+fn preserves_whether_report_order_was_supplied() {
+    for (args, order, explicit) in [
+        (vec!["ccusage", "session"], SortOrder::Asc, false),
+        (vec!["ccusage", "daily"], SortOrder::Asc, false),
+        (
+            vec!["ccusage", "session", "--order", "asc"],
+            SortOrder::Asc,
+            true,
+        ),
+        (
+            vec!["ccusage", "--order", "desc", "session"],
+            SortOrder::Desc,
+            true,
+        ),
+        (
+            vec![
+                "ccusage",
+                "session",
+                "-o",
+                "asc",
+                "--sections",
+                "daily,weekly,monthly",
+            ],
+            SortOrder::Asc,
+            true,
+        ),
+    ] {
+        let Some(Command::All(report)) = parse(&args).command else {
+            panic!("expected unified report");
+        };
+        assert_eq!(report.shared.order, order);
+        assert_eq!(report.shared.order_explicit, explicit);
+    }
+}
+
+#[test]
+fn preserves_configured_order_and_cli_precedence() {
+    for (config_json, extra, expected, explicit) in [
+        (r#"{}"#, vec![], SortOrder::Asc, false),
+        (
+            r#"{"defaults":{"order":"asc"}}"#,
+            vec![],
+            SortOrder::Asc,
+            true,
+        ),
+        (
+            r#"{"defaults":{"order":"desc"}}"#,
+            vec![],
+            SortOrder::Desc,
+            true,
+        ),
+        (
+            r#"{"defaults":{"order":"desc"},"commands":{"session":{"order":"asc"}}}"#,
+            vec![],
+            SortOrder::Asc,
+            true,
+        ),
+        (
+            r#"{"commands":{"session":{"order":"asc"}}}"#,
+            vec!["--order", "desc"],
+            SortOrder::Desc,
+            true,
+        ),
+        (
+            r#"{"defaults":{"order":"desc"}}"#,
+            vec!["--order", "asc"],
+            SortOrder::Asc,
+            true,
+        ),
+    ] {
+        let fixture = fs_fixture!({});
+        let _ = fixture.write_file("ccusage.json", config_json);
+        let config_path = fixture.path("ccusage.json").to_string_lossy().into_owned();
+        let mut args = vec![
+            "session",
+            "--config",
+            &config_path,
+            "--sections",
+            "daily,weekly,monthly",
+        ];
+        args.extend(extra);
+        let config = ccusage_config::ConfigContext::from_args(
+            &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+        );
+        args.insert(0, "ccusage");
+        let Some(Command::All(report)) = parse_with_config(&args, &config).command else {
+            panic!("expected unified report");
+        };
+        assert_eq!(report.shared.order, expected, "{config_json}");
+        assert_eq!(report.shared.order_explicit, explicit, "{config_json}");
+    }
 }

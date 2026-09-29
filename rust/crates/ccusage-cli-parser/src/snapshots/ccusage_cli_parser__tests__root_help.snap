@@ -25,11 +25,13 @@ COMMANDS:
   kilo                       Show Kilo usage commands
   copilot                    Show GitHub Copilot CLI usage commands
   gemini                     Show Gemini CLI usage commands
+  antigravity                Show Antigravity usage commands
   kimi                       Show Kimi usage commands
   qwen                       Show Qwen usage commands
   openclaw                   Show OpenClaw usage commands
   grok                       Show Grok Build CLI usage commands
   clear-cache                Clear the on-disk cache, optionally for a single agent
+  zcode                      Show ZCode usage commands
 
 For more info, run any command with the `--help` flag:
   ccusage daily --help
@@ -50,11 +52,13 @@ For more info, run any command with the `--help` flag:
   ccusage kilo --help
   ccusage copilot --help
   ccusage gemini --help
+  ccusage antigravity --help
   ccusage kimi --help
   ccusage qwen --help
   ccusage openclaw --help
   ccusage grok --help
   ccusage clear-cache --help
+  ccusage zcode --help
 
 OPTIONS:
   -j, --json                           Output in JSON format (default: false)

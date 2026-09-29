@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 use jiff::tz::TimeZone as JiffTimeZone;
 use serde::Deserialize;
@@ -6,7 +6,8 @@ use serde_json::Value;
 
 use crate::{
     LoadedEntry, PricingMap, Result, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost, cli::CostMode, format_date_tz, json_value_u64,
+    apply_total_token_fallback, calculate_cost, cli::CostMode, format_date_tz,
+    fast::FxHashMap, json_value_u64,
     missing_pricing_model_for_usage, non_empty_json_string,
 };
 
@@ -120,7 +121,7 @@ pub fn read_thread_file(
 
 fn parse_ledger_events(
     events: &[AmpLedgerEvent],
-    cache_tokens: &HashMap<i64, (u64, u64)>,
+    cache_tokens: &FxHashMap<i64, (u64, u64)>,
     thread_id: &str,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
@@ -332,8 +333,8 @@ fn parse_message_usage(
     entries
 }
 
-fn cache_tokens_by_message_id(messages: &[AmpMessage]) -> HashMap<i64, (u64, u64)> {
-    let mut cache_tokens = HashMap::new();
+fn cache_tokens_by_message_id(messages: &[AmpMessage]) -> FxHashMap<i64, (u64, u64)> {
+    let mut cache_tokens = FxHashMap::default();
     for message in messages {
         if message.role.as_ref().and_then(Value::as_str) != Some("assistant") {
             continue;

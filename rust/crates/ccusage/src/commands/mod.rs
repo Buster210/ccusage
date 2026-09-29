@@ -6,14 +6,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ccusage_adapter_common::filter_loaded_entries_by_date;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::blocks::SessionBlock;
 use crate::pricing::PricingMap;
 use crate::{
     BucketKind, Color, Context, DEFAULT_RECENT_DAYS, DEFAULT_SESSION_DURATION_HOURS,
-    MILLIS_PER_DAY, MILLIS_PER_MINUTE, Result, SessionAccumulator, TimestampMs, block_json,
-    calculate_burn_rate,
+    LoadedEntry, MILLIS_PER_DAY, MILLIS_PER_HOUR, MILLIS_PER_MINUTE, Result, SessionAccumulator,
+    TimestampMs, UsageSummary, block_json, calculate_burn_rate,
     cli::{
         BlocksArgs, CostSource, DailyArgs, SessionArgs, SharedArgs, SortOrder, StatuslineArgs,
         VisualBurnRate, WeekDay, WeeklyArgs,
@@ -22,7 +24,7 @@ use crate::{
     fast::FxHashMap,
     filter_and_sort_summaries, filter_blocks_by_date, format_currency, format_date, format_number,
     format_remaining_time, format_rfc3339_millis, group_project_output, identify_session_blocks,
-    load_daily_summaries, load_entries, print_active_block_detail, print_blocks_table,
+    load_daily_summaries, load_entries, load_entries_since, print_active_block_detail, print_blocks_table,
     print_json_or_jq, print_usage_table, session_summary_json, sort_blocks, sort_summaries,
     summarize_by_key, summarize_summaries_by_bucket, summary_json, total_usage_tokens, totals_json,
     utc_now, wants_json,
@@ -68,7 +70,7 @@ pub(crate) fn run_daily(args: DailyArgs) -> Result<()> {
 }
 
 pub(crate) fn run_bucket(shared: SharedArgs, kind: BucketKind) -> Result<()> {
-    let entries = load_entries(&shared, None)?;
+    let entries = load_entries_since(&shared, None)?;
     let mut daily = summarize_by_key(
         &entries,
         |entry| entry.date.clone(),
@@ -107,7 +109,7 @@ pub(crate) fn run_bucket(shared: SharedArgs, kind: BucketKind) -> Result<()> {
 
 pub(crate) fn run_weekly(args: WeeklyArgs) -> Result<()> {
     let shared = args.shared.clone();
-    let entries = load_entries(&shared, None)?;
+    let entries = load_entries_since(&shared, None)?;
     let mut daily = summarize_by_key(
         &entries,
         |entry| entry.date.clone(),
@@ -149,43 +151,7 @@ pub(crate) fn run_session(args: SessionArgs) -> Result<()> {
 
     let mut session_shared = shared.clone();
     session_shared.order = SortOrder::Desc;
-    let entries = load_entries(&session_shared, None)?;
-    let mut grouped = Vec::<SessionAccumulator>::new();
-    let mut group_indexes = FxHashMap::<(Arc<str>, Arc<str>), usize>::default();
-    for entry in &entries {
-        let key = (
-            Arc::clone(&entry.project_path),
-            Arc::clone(&entry.session_id),
-        );
-        let index = *group_indexes.entry(key).or_insert_with(|| {
-            let index = grouped.len();
-            grouped.push(SessionAccumulator::default());
-            index
-        });
-        grouped[index].add_entry(entry);
-    }
-
-    let mut rows = Vec::with_capacity(grouped.len());
-    for group in grouped {
-        rows.push(group.into_summary()?);
-    }
-    if session_shared.since.is_some() || session_shared.until.is_some() {
-        rows.retain(|row| {
-            let date = row
-                .last_activity
-                .as_deref()
-                .unwrap_or_default()
-                .replace('-', "");
-            session_shared
-                .since
-                .as_ref()
-                .is_none_or(|since| &date >= since)
-                && session_shared
-                    .until
-                    .as_ref()
-                    .is_none_or(|until| &date <= until)
-        });
-    }
+    let mut rows = load_session_rows(&session_shared)?;
     rows.retain(|row| {
         row.input_tokens + row.output_tokens + row.cache_creation_tokens + row.cache_read_tokens > 0
     });
@@ -214,8 +180,34 @@ pub(crate) fn run_session(args: SessionArgs) -> Result<()> {
     Ok(())
 }
 
+fn load_session_rows(shared: &SharedArgs) -> Result<Vec<UsageSummary>> {
+    let mut entries = load_entries_since(shared, None)?;
+    filter_loaded_entries_by_date(&mut entries, shared);
+    let mut grouped = Vec::<SessionAccumulator>::new();
+    let mut group_indexes = FxHashMap::<(Arc<str>, Arc<str>), usize>::default();
+    for entry in &entries {
+        let key = (
+            Arc::clone(&entry.project_path),
+            Arc::clone(&entry.session_id),
+        );
+        let index = *group_indexes.entry(key).or_insert_with(|| {
+            let index = grouped.len();
+            grouped.push(SessionAccumulator::default());
+            index
+        });
+        grouped[index].add_entry(entry);
+    }
+
+    let mut rows = Vec::with_capacity(grouped.len());
+    for group in grouped {
+        rows.push(group.into_summary()?);
+    }
+    Ok(rows)
+}
+
 fn run_session_id(id: &str, shared: &SharedArgs) -> Result<()> {
-    let entries = load_entries(shared, None)?;
+    let mut entries = load_entries_since(shared, None)?;
+    filter_loaded_entries_by_date(&mut entries, shared);
     let mut session_entries = entries
         .into_iter()
         .filter(|entry| {
@@ -331,10 +323,7 @@ pub(crate) fn run_statusline(args: StatuslineArgs) -> Result<()> {
 
     let hook: StatuslineHook =
         serde_json::from_str(stdin.trim()).context("Invalid input format")?;
-    let shared = SharedArgs {
-        offline: args.offline && !args.no_offline,
-        ..SharedArgs::default()
-    };
+    let shared = statusline_shared(&args);
     let cache_enabled = args.cache && !args.no_cache;
     let cache_path = statusline_cache_path(&hook.session_id);
     let transcript_path = Path::new(&hook.transcript_path);
@@ -384,6 +373,14 @@ pub(crate) fn run_statusline(args: StatuslineArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn statusline_shared(args: &StatuslineArgs) -> SharedArgs {
+    SharedArgs {
+        offline: args.offline && !args.no_offline,
+        pricing_overrides: args.pricing_overrides.clone(),
+        ..SharedArgs::default()
+    }
 }
 
 /// Resolve the model label shown in the statusline.
@@ -443,7 +440,7 @@ fn render_statusline(
     };
 
     let today_shared = statusline_today_shared(args, shared, utc_now());
-    let today_cost = load_entries(&today_shared, None)
+    let today_cost = load_entries_since(&today_shared, None)
         .map(|entries| {
             entries
                 .iter()
@@ -455,11 +452,8 @@ fn render_statusline(
         })
         .unwrap_or(0.0);
 
-    let blocks = load_entries(shared, None)
-        .map(|entries| identify_session_blocks(entries, DEFAULT_SESSION_DURATION_HOURS))
-        .unwrap_or_default();
-    let active_block = blocks.iter().find(|block| block.is_active && !block.is_gap);
-    let (block_info, burn_rate_info) = if let Some(block) = active_block {
+    let active_block = load_statusline_active_block(args, shared, utc_now());
+    let (block_info, burn_rate_info) = if let Some(block) = active_block.as_ref() {
         let remaining = block.end_time.duration_since(utc_now()) / MILLIS_PER_MINUTE;
         let mut burn = String::new();
         if let Some(rate) = calculate_burn_rate(block) {
@@ -557,6 +551,114 @@ fn statusline_today_shared(
         pricing_overrides: shared.pricing_overrides.clone(),
         timezone: args.timezone.clone(),
         ..SharedArgs::default()
+    }
+}
+
+const STATUSLINE_BLOCK_LOOKBACK_DAYS: [i64; 3] = [1, 7, 30];
+
+/// Finds the active billing block, reading only recent usage files when the
+/// history allows it.
+///
+/// Block boundaries chain from earlier entries until usage pauses for longer
+/// than a session window, so a bounded load only reproduces the unbounded
+/// blocks once it reaches back past such a pause. Each window is widened until
+/// it does, and the full history is read as a last resort.
+fn load_statusline_active_block(
+    args: &StatuslineArgs,
+    shared: &SharedArgs,
+    now: TimestampMs,
+) -> Option<SessionBlock> {
+    let session_ms = (DEFAULT_SESSION_DURATION_HOURS * MILLIS_PER_HOUR as f64) as i64;
+    for lookback_days in STATUSLINE_BLOCK_LOOKBACK_DAYS {
+        let window_shared = statusline_block_shared(args, shared, now, lookback_days);
+        let since = window_shared.since.clone().unwrap_or_default();
+        let mut entries = load_entries_since(&window_shared, None).ok()?;
+        // Entries dated before the window may come from partially skipped
+        // sessions; only the ones inside it are complete.
+        entries.retain(|entry| entry.date.replace('-', "") >= since);
+        entries.sort_by_key(|entry| entry.timestamp);
+        let timestamps = entries
+            .iter()
+            .map(|entry| entry.timestamp)
+            .collect::<Vec<_>>();
+        match statusline_block_anchor(&timestamps, now, session_ms) {
+            BlockAnchor::NoActiveBlock => return None,
+            BlockAnchor::From(start) => {
+                entries.retain(|entry| entry.timestamp >= start);
+                return find_active_block(entries);
+            }
+            BlockAnchor::NeedsMoreHistory => {}
+            BlockAnchor::NeedsFullHistory => break,
+        }
+    }
+    find_active_block(load_entries(shared, None).ok()?)
+}
+
+fn find_active_block(entries: Vec<LoadedEntry>) -> Option<SessionBlock> {
+    identify_session_blocks(entries, DEFAULT_SESSION_DURATION_HOURS)
+        .into_iter()
+        .find(|block| block.is_active && !block.is_gap)
+}
+
+#[derive(Debug, PartialEq)]
+enum BlockAnchor {
+    NoActiveBlock,
+    /// Blocks from this entry onward match an unbounded load.
+    From(TimestampMs),
+    /// The window holds no pause long enough to anchor block boundaries.
+    NeedsMoreHistory,
+    /// Future-dated entries can form blocks after the current one, so only
+    /// the unbounded selection is safe.
+    NeedsFullHistory,
+}
+
+/// Decides whether the entries inside a window pin down the active block.
+fn statusline_block_anchor(
+    timestamps: &[TimestampMs],
+    now: TimestampMs,
+    session_ms: i64,
+) -> BlockAnchor {
+    // The window reaches further back than one session, so without an entry in
+    // the last session window no block can be active, whatever lies before it.
+    let Some(&last) = timestamps.last() else {
+        return BlockAnchor::NoActiveBlock;
+    };
+    if last > now {
+        return BlockAnchor::NeedsFullHistory;
+    }
+    if now.duration_since(last) >= session_ms {
+        return BlockAnchor::NoActiveBlock;
+    }
+    // A pause longer than a session starts a fresh block at the next entry,
+    // which is the same rule `identify_session_blocks` applies.
+    timestamps
+        .windows(2)
+        .rposition(|pair| pair[1].duration_since(pair[0]) > session_ms)
+        .map_or(BlockAnchor::NeedsMoreHistory, |index| {
+            BlockAnchor::From(timestamps[index + 1])
+        })
+}
+
+/// Bounds a statusline load to the session window plus `lookback_days`.
+///
+/// `until` stays open because an active block ends in the future.
+fn statusline_block_shared(
+    args: &StatuslineArgs,
+    shared: &SharedArgs,
+    now: TimestampMs,
+    lookback_days: i64,
+) -> SharedArgs {
+    let lookback = (DEFAULT_SESSION_DURATION_HOURS * MILLIS_PER_HOUR as f64) as i64
+        + lookback_days * MILLIS_PER_DAY;
+    let since = format_date(
+        TimestampMs::from_millis(now.as_millis() - lookback),
+        args.timezone.as_deref(),
+    )
+    .replace('-', "");
+    SharedArgs {
+        since: Some(since),
+        timezone: args.timezone.clone(),
+        ..shared.clone()
     }
 }
 
@@ -842,9 +944,178 @@ struct HookContext {
 
 #[cfg(test)]
 mod tests {
-    use ccusage_test_support::fs_fixture;
+    use std::ffi::OsString;
+
+    use ccusage_config::ConfigContext;
+    use ccusage_test_support::{CacheEnv, EnvVarGuard, fs_fixture};
 
     use super::*;
+    use crate::cli::{Cli, Command, CostMode};
+
+    #[test]
+    fn claude_session_totals_only_include_entries_inside_date_window() {
+        let rows = claude_session_rows(
+            &[
+                r#"{"timestamp":"2026-08-12T12:00:00.000Z","sessionId":"session-a","requestId":"request-old","costUSD":1.25,"message":{"id":"message-old","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                r#"{"timestamp":"2026-08-13T12:00:00.000Z","sessionId":"session-a","requestId":"request-new","costUSD":2.5,"message":{"id":"message-new","model":"claude-sonnet-4-20250514","usage":{"input_tokens":30,"output_tokens":4}}}"#,
+            ]
+            .join("\n"),
+            SharedArgs {
+                mode: CostMode::Display,
+                since: Some("20260813".to_string()),
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 30);
+        assert_eq!(rows[0].output_tokens, 4);
+        assert_eq!(rows[0].total_tokens(), 34);
+        assert_eq!(rows[0].total_cost, 2.5);
+    }
+
+    #[test]
+    fn claude_session_until_includes_the_boundary_date() {
+        let rows = claude_session_rows(
+            r#"{"timestamp":"2026-08-14T09:38:56.467Z","sessionId":"session-a","requestId":"request-boundary","costUSD":3.75,"message":{"id":"message-boundary","model":"claude-sonnet-4-20250514","usage":{"input_tokens":40,"output_tokens":5}}}"#,
+            SharedArgs {
+                mode: CostMode::Display,
+                until: Some("20260814".to_string()),
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].total_tokens(), 45);
+        assert_eq!(rows[0].total_cost, 3.75);
+    }
+
+    #[test]
+    fn claude_session_date_window_uses_requested_timezone() {
+        let rows = claude_session_rows(
+            r#"{"timestamp":"2026-08-14T23:30:00.000Z","sessionId":"session-a","requestId":"request-timezone","costUSD":4.5,"message":{"id":"message-timezone","model":"claude-sonnet-4-20250514","usage":{"input_tokens":50,"output_tokens":6}}}"#,
+            SharedArgs {
+                mode: CostMode::Display,
+                since: Some("20260815".to_string()),
+                timezone: Some("Asia/Tokyo".to_string()),
+                ..SharedArgs::default()
+            },
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].total_tokens(), 56);
+        assert_eq!(rows[0].total_cost, 4.5);
+    }
+
+    fn claude_session_rows(log: &str, shared: SharedArgs) -> Vec<UsageSummary> {
+        let _cache_env = CacheEnv::new("claude-session-rows");
+        let fixture = fs_fixture!({
+            "projects/project-a/session-a/chat.jsonl": log,
+        });
+        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        load_session_rows(&shared).unwrap()
+    }
+
+    #[test]
+    fn claude_session_calculate_uses_each_deepseek_v4_event_timestamp() {
+        let rows = claude_session_rows(
+            &[
+                r#"{"timestamp":"2026-08-15T23:59:59.000Z","sessionId":"session-a","requestId":"request-old","message":{"id":"message-old","model":"deepseek-v4-flash","usage":{"input_tokens":1000000,"output_tokens":0}}}"#,
+                r#"{"timestamp":"2026-08-17T01:00:00.000Z","sessionId":"session-a","requestId":"request-peak","message":{"id":"message-peak","model":"deepseek-v4-pro","usage":{"input_tokens":1000000,"output_tokens":0}}}"#,
+            ]
+            .join("\n"),
+            SharedArgs {
+                mode: CostMode::Calculate,
+                offline: true,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].total_cost - 1.46).abs() < 1e-9);
+    }
+
+    #[test]
+    fn statusline_invocation_passes_config_pricing_overrides_to_cost_loading() {
+        let fixture = fs_fixture!({
+            "ccusage.json": r#"{
+                "defaults": {
+                    "pricingOverrides": {
+                        "third-party-model": {
+                            "inputCostPerToken": 0.000001,
+                            "outputCostPerToken": 0.000002
+                        }
+                    }
+                },
+                "commands": {
+                    "statusline": {
+                        "pricingOverrides": {
+                            "third-party-model": {
+                                "outputCostPerToken": 0.000003
+                            }
+                        }
+                    }
+                }
+            }"#,
+            "projects/project/session.jsonl": r#"{"timestamp":"2020-01-01T00:00:00.000Z","sessionId":"session","message":{"id":"message","model":"third-party-model","usage":{"input_tokens":100000,"output_tokens":100000}}}"#,
+        });
+        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let config_path = fixture.path("ccusage.json");
+        let config_path = config_path.to_string_lossy().into_owned();
+        let config_args = vec![
+            "statusline".to_string(),
+            "--config".to_string(),
+            config_path.clone(),
+        ];
+        let config = ConfigContext::from_args(&config_args);
+        let cli = Cli::parse_from_with_config(
+            [
+                "ccusage",
+                "statusline",
+                "--config",
+                config_path.as_str(),
+                "--cost-source",
+                "ccusage",
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &config,
+            DEFAULT_SESSION_DURATION_HOURS,
+            env!("CCUSAGE_VERSION"),
+        )
+        .unwrap();
+        let Some(Command::Statusline(args)) = cli.command else {
+            panic!("expected statusline command");
+        };
+
+        let shared = statusline_shared(&args);
+        let pricing = &shared.pricing_overrides["third-party-model"];
+        assert_eq!(pricing.input_cost_per_token, Some(0.000001));
+        assert_eq!(pricing.output_cost_per_token, Some(0.000003));
+
+        let hook = StatuslineHook {
+            session_id: "session".to_string(),
+            transcript_path: fixture
+                .path("transcript.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+            model: HookModel {
+                id: Some("third-party-model".to_string()),
+                display_name: "Third-party model".to_string(),
+            },
+            cost: None,
+            context_window: Some(HookContext {
+                total_input_tokens: 100_000,
+                context_window_size: 200_000,
+            }),
+            effort: None,
+        };
+        let output = render_statusline(&hook, &args, &shared).unwrap();
+        assert!(output.contains("💰 $0.40 session"), "{output}");
+    }
 
     #[test]
     fn calculates_context_tokens_from_latest_assistant_transcript_line() {
@@ -936,6 +1207,73 @@ mod tests {
             today_shared
                 .pricing_overrides
                 .contains_key("statusline-model")
+        );
+    }
+
+    #[test]
+    fn bounds_statusline_block_load_behind_the_session_window() {
+        let args = StatuslineArgs {
+            timezone: Some("Asia/Tokyo".to_string()),
+            ..StatuslineArgs::default()
+        };
+        let shared = SharedArgs {
+            offline: true,
+            ..SharedArgs::default()
+        };
+        // 2026-05-22T01:27:00+09:00
+        let now = TimestampMs::from_millis(1_779_380_820_000);
+
+        let block_shared = statusline_block_shared(&args, &shared, now, 1);
+
+        assert_eq!(block_shared.since.as_deref(), Some("20260520"));
+        assert_eq!(
+            statusline_block_shared(&args, &shared, now, 7)
+                .since
+                .as_deref(),
+            Some("20260514")
+        );
+        assert_eq!(block_shared.until, None);
+        assert_eq!(block_shared.timezone.as_deref(), Some("Asia/Tokyo"));
+        assert!(block_shared.offline);
+    }
+
+    #[test]
+    fn anchors_statusline_blocks_after_the_latest_long_pause() {
+        const HOUR: i64 = 60 * 60 * 1000;
+        let now = TimestampMs::from_millis(1_779_380_820_000);
+        let at = |hours_ago: i64| TimestampMs::from_millis(now.as_millis() - hours_ago * HOUR);
+        let session = 5 * HOUR;
+
+        assert_eq!(
+            statusline_block_anchor(&[], now, session),
+            BlockAnchor::NoActiveBlock
+        );
+        assert_eq!(
+            statusline_block_anchor(&[at(30), at(6)], now, session),
+            BlockAnchor::NoActiveBlock
+        );
+        // Only the latest pause longer than a session counts.
+        assert_eq!(
+            statusline_block_anchor(&[at(40), at(30), at(20), at(18), at(1)], now, session),
+            BlockAnchor::From(at(1))
+        );
+        assert_eq!(
+            statusline_block_anchor(
+                &[at(30), at(20), at(16), at(12), at(8), at(4)],
+                now,
+                session
+            ),
+            BlockAnchor::From(at(20))
+        );
+        // A pause of exactly one session keeps the chain going.
+        assert_eq!(
+            statusline_block_anchor(&[at(9), at(4), at(1)], now, session),
+            BlockAnchor::NeedsMoreHistory
+        );
+        // A gap before a future-dated entry must not hide the current block.
+        assert_eq!(
+            statusline_block_anchor(&[at(1), at(-8)], now, session),
+            BlockAnchor::NeedsFullHistory
         );
     }
 

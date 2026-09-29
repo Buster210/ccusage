@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 use jiff::tz::TimeZone as JiffTimeZone;
 use serde::Deserialize;
@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     LoadedEntry, PricingMap, Result, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost_for_usage, cli::CostMode, format_date_tz,
+    apply_total_token_fallback, calculate_cost_for_usage_at, cli::CostMode,
+    fast::{FxHashMap, FxHashSet}, format_date_tz,
     missing_pricing_model_for_candidates, non_empty_json_string,
 };
 use ccusage_adapter_common::jsonl;
@@ -171,7 +172,7 @@ pub(super) fn parse_jsonl_file(path: &Path) -> Result<Vec<GeminiUsageEvent>> {
         .to_string();
     let mut current_model = None::<String>;
     let mut events = Vec::new();
-    let mut direct_event_indexes = HashMap::<String, usize>::new();
+    let mut direct_event_indexes = FxHashMap::default();
     let content = fs::read(path)?;
     for record in jsonl::records::<GeminiRecord>(&content, None) {
         if let Some(value) = record.session_id() {
@@ -460,7 +461,7 @@ pub(super) fn event_to_loaded(
     let extra_total_tokens = event
         .total_tokens
         .saturating_sub(event.input_tokens + event.output_tokens + event.cache_read_tokens);
-    let cost = calculate_gemini_cost(&event.model, cost_usage, mode, pricing);
+    let cost = calculate_gemini_cost(&event.model, cost_usage, event.timestamp, mode, pricing);
     let missing_pricing_model = missing_gemini_pricing(&event.model, cost_usage, mode, pricing);
     let data = UsageEntry {
         session_id: Some(event.session_id.clone()),
@@ -498,6 +499,7 @@ pub(super) fn event_to_loaded(
 fn calculate_gemini_cost(
     model: &str,
     usage: TokenUsageRaw,
+    timestamp: TimestampMs,
     mode: CostMode,
     pricing: &PricingMap,
 ) -> f64 {
@@ -506,10 +508,11 @@ fn calculate_gemini_cost(
         CostMode::Auto | CostMode::Calculate => {
             for candidate in model_candidates(model) {
                 if pricing.find(&candidate).is_some() {
-                    return calculate_cost_for_usage(
+                    return calculate_cost_for_usage_at(
                         Some(&candidate),
                         usage,
                         None,
+                        Some(timestamp),
                         CostMode::Calculate,
                         Some(pricing),
                     );
@@ -551,7 +554,14 @@ pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: &Pricing
         cache_creation: None,
         ..entry.data.message.usage
     };
-    entry.cost = calculate_gemini_cost(&model, cost_usage, mode, pricing);
+    entry.cost = calculate_gemini_cost(
+        &model,
+        cost_usage,
+        crate::parse_ts_timestamp(&entry.data.timestamp)
+            .unwrap_or(crate::TimestampMs::UNIX_EPOCH),
+        mode,
+        pricing,
+    );
     entry.missing_pricing_model = missing_gemini_pricing(&model, cost_usage, mode, pricing);
 }
 
@@ -563,7 +573,7 @@ fn model_candidates(model: &str) -> Vec<String> {
             .map(|prefix| format!("{prefix}/{model}")),
     );
     candidates.push(model.to_string());
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
     candidates.retain(|candidate| seen.insert(candidate.clone()));
     candidates
 }

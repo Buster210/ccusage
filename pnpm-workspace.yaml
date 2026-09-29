@@ -7,13 +7,13 @@ catalogMode: strict
 
 catalogs:
   docs:
-    '@ryoppippi/vite-plugin-cloudflare-redirect': ^1.1.3
-    vitepress: 2.0.0-alpha.19
-    vitepress-plugin-group-icons: ^1.7.6
-    vitepress-plugin-llms: ^1.13.5
+    '@ryoppippi/vite-plugin-cloudflare-redirect': 1.1.3
+    vitepress: 2.0.0-alpha.20
+    vitepress-plugin-group-icons: 1.7.6
+    vitepress-plugin-llms: 1.14.0
   types:
-    '@types/node': ^24.13.3
-    '@types/react': ^19.2.18
+    '@types/node': 24.13.3
+    '@types/react': 19.3.0
 
 enablePrePostScripts: true
 
@@ -39,3 +39,7 @@ allowBuilds:
   workerd: true
 
 shellEmulator: true
+
+# Nix pins pnpm for local development and CI, so pnpm should not download a
+# second package-manager binary or add its bootstrap metadata to the lockfile.
+pmOnFail: ignore

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { describe, it, mock } from 'node:test';
 import {
+	createNativeSpawner,
 	ensureNativeBinaryExecutable,
 	isMainModule,
 	resolveCliRuntime,
@@ -121,5 +123,142 @@ void describe(resolveCliRuntime.name, () => {
 		});
 
 		assert.equal(actual, true);
+	});
+});
+
+void describe(createNativeSpawner.name, () => {
+	void it('forwards every supported launcher signal delivery', async () => {
+		const signalSource = new EventEmitter();
+		const kill = mock.fn(() => true);
+		const child = /** @type {import('node:child_process').ChildProcess} */ (
+			/** @type {unknown} */ (Object.assign(new EventEmitter(), { kill }))
+		);
+		const spawnProcess = mock.fn(() => child);
+		const spawnNative = createNativeSpawner({
+			platform: 'linux',
+			signalSource,
+			spawnProcess,
+		});
+
+		const resultPromise = spawnNative('/native/bin/ccusage', ['statusline']);
+		for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
+			signalSource.emit(signal);
+			signalSource.emit(signal);
+		}
+		child.emit('exit', 0, null);
+
+		assert.deepEqual(await resultPromise, { signal: null, status: 0 });
+		assert.deepEqual(
+			kill.mock.calls.map((call) => call.arguments),
+			[
+				['SIGINT'],
+				['SIGINT'],
+				['SIGTERM'],
+				['SIGTERM'],
+				['SIGHUP'],
+				['SIGHUP'],
+				['SIGQUIT'],
+				['SIGQUIT'],
+			],
+		);
+		const spawnCall = spawnProcess.mock.calls[0];
+		assert.ok(spawnCall);
+		assert.deepEqual(spawnCall.arguments, [
+			'/native/bin/ccusage',
+			['statusline'],
+			{ stdio: 'inherit' },
+		]);
+	});
+
+	void it('forwards the supported Windows console signals', async () => {
+		const signalSource = new EventEmitter();
+		const kill = mock.fn(() => true);
+		const child = /** @type {import('node:child_process').ChildProcess} */ (
+			/** @type {unknown} */ (Object.assign(new EventEmitter(), { kill }))
+		);
+		const spawnNative = createNativeSpawner({
+			platform: 'win32',
+			signalSource,
+			spawnProcess: () => child,
+		});
+
+		const resultPromise = spawnNative('/native/bin/ccusage.exe', []);
+		assert.deepEqual(
+			['SIGINT', 'SIGBREAK', 'SIGHUP'].map((signal) => signalSource.listenerCount(signal)),
+			[1, 1, 1],
+		);
+		signalSource.emit('SIGINT');
+		signalSource.emit('SIGBREAK');
+		signalSource.emit('SIGHUP');
+		signalSource.emit('SIGTERM');
+		assert.equal(signalSource.listenerCount('SIGTERM'), 0);
+		assert.deepEqual(
+			kill.mock.calls.map((call) => call.arguments),
+			[['SIGINT'], ['SIGBREAK'], ['SIGHUP']],
+		);
+		child.emit('exit', 0, null);
+
+		assert.deepEqual(await resultPromise, { signal: null, status: 0 });
+		assert.deepEqual(
+			['SIGINT', 'SIGBREAK', 'SIGHUP'].map((signal) => signalSource.listenerCount(signal)),
+			[0, 0, 0],
+		);
+	});
+
+	void it('removes signal listeners after the child exits', async () => {
+		const signalSource = new EventEmitter();
+		const kill = mock.fn(() => true);
+		const child = /** @type {import('node:child_process').ChildProcess} */ (
+			/** @type {unknown} */ (Object.assign(new EventEmitter(), { kill }))
+		);
+		const spawnNative = createNativeSpawner({
+			platform: 'linux',
+			signalSource,
+			spawnProcess: () => child,
+		});
+
+		const resultPromise = spawnNative('/native/bin/ccusage', []);
+		child.emit('exit', 7, 'SIGTERM');
+
+		assert.deepEqual(await resultPromise, { signal: 'SIGTERM', status: 7 });
+		assert.deepEqual(
+			['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'].map((signal) =>
+				signalSource.listenerCount(signal),
+			),
+			[0, 0, 0, 0],
+		);
+		signalSource.emit('SIGTERM');
+		assert.equal(kill.mock.callCount(), 0);
+	});
+
+	void it('removes signal listeners after a child error', async () => {
+		const signalSource = new EventEmitter();
+		const kill = mock.fn(() => true);
+		const child = /** @type {import('node:child_process').ChildProcess} */ (
+			/** @type {unknown} */ (Object.assign(new EventEmitter(), { kill }))
+		);
+		const spawnNative = createNativeSpawner({
+			platform: 'linux',
+			signalSource,
+			spawnProcess: () => child,
+		});
+		const error = new Error('spawn failed');
+
+		const resultPromise = spawnNative('/native/bin/ccusage', []);
+		child.emit('error', error);
+
+		assert.deepEqual(await resultPromise, {
+			error,
+			signal: null,
+			status: null,
+		});
+		assert.deepEqual(
+			['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'].map((signal) =>
+				signalSource.listenerCount(signal),
+			),
+			[0, 0, 0, 0],
+		);
+		signalSource.emit('SIGINT');
+		assert.equal(kill.mock.callCount(), 0);
 	});
 });

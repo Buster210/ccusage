@@ -9,6 +9,7 @@
 		"claude_session_options": ["shared_claude_options", "session_options"],
 		"claude_weekly_options": ["shared_claude_options", "weekly_options", "last_options"],
 		"codex_period_options": ["codex_options", "last_options"],
+		"codex_session_options": ["codex_options", "session_options"],
 		"openclaw_combined_options": ["agent_options", "openclaw_options"],
 		"openclaw_period_options": ["agent_options", "openclaw_options", "last_options"],
 		"pi_combined_options": ["agent_options", "pi_options"],
@@ -90,6 +91,10 @@
 				"description": "Show Gemini CLI usage commands"
 			},
 			{
+				"name": "antigravity",
+				"description": "Show Antigravity usage commands"
+			},
+			{
 				"name": "kimi",
 				"description": "Show Kimi usage commands"
 			},
@@ -108,6 +113,10 @@
 			{
 				"name": "clear-cache",
 				"description": "Clear the on-disk cache, optionally for a single agent"
+			},
+			{
+				"name": "zcode",
+				"description": "Show ZCode usage commands"
 			}
 		]
 	},
@@ -250,7 +259,7 @@
 			"path": ["codex", "session"],
 			"description": "Show Codex token usage grouped by session",
 			"usage": "ccusage codex session <OPTIONS>",
-			"options": "codex_options"
+			"options": "codex_session_options"
 		},
 		{
 			"path": ["opencode"],
@@ -633,6 +642,43 @@
 			"options": "agent_options"
 		},
 		{
+			"path": ["antigravity"],
+			"description": "Usage reports for antigravity.",
+			"usage": "ccusage antigravity <COMMANDS>",
+			"commands": [
+				{
+					"name": "daily",
+					"description": "Show Antigravity usage grouped by date"
+				},
+				{
+					"name": "monthly",
+					"description": "Show Antigravity usage grouped by month"
+				},
+				{
+					"name": "session",
+					"description": "Show Antigravity usage grouped by session"
+				}
+			]
+		},
+		{
+			"path": ["antigravity", "daily"],
+			"description": "Show Antigravity usage grouped by date",
+			"usage": "ccusage antigravity daily <OPTIONS>",
+			"options": "agent_period_options"
+		},
+		{
+			"path": ["antigravity", "monthly"],
+			"description": "Show Antigravity usage grouped by month",
+			"usage": "ccusage antigravity monthly <OPTIONS>",
+			"options": "agent_period_options"
+		},
+		{
+			"path": ["antigravity", "session"],
+			"description": "Show Antigravity usage grouped by session",
+			"usage": "ccusage antigravity session <OPTIONS>",
+			"options": "agent_options"
+		},
+		{
 			"path": ["kimi"],
 			"description": "Usage reports for kimi.",
 			"usage": "ccusage kimi <COMMANDS>",
@@ -785,6 +831,42 @@
 			"description": "Clear the on-disk cache, optionally for a single agent (omit the agent or pass \"all\" to clear everything).",
 			"usage": "ccusage clear-cache [AGENT]",
 			"options": "clear_cache_options"
+		},
+		{			"path": ["zcode"],
+			"description": "Usage reports for ZCode.",
+			"usage": "ccusage zcode <COMMANDS>",
+			"commands": [
+				{
+					"name": "daily",
+					"description": "Show ZCode usage grouped by date"
+				},
+				{
+					"name": "monthly",
+					"description": "Show ZCode usage grouped by month"
+				},
+				{
+					"name": "session",
+					"description": "Show ZCode usage grouped by session"
+				}
+			]
+		},
+		{
+			"path": ["zcode", "daily"],
+			"description": "Show ZCode usage grouped by date",
+			"usage": "ccusage zcode daily <OPTIONS>",
+			"options": "agent_period_options"
+		},
+		{
+			"path": ["zcode", "monthly"],
+			"description": "Show ZCode usage grouped by month",
+			"usage": "ccusage zcode monthly <OPTIONS>",
+			"options": "agent_period_options"
+		},
+		{
+			"path": ["zcode", "session"],
+			"description": "Show ZCode usage grouped by session",
+			"usage": "ccusage zcode session <OPTIONS>",
+			"options": "agent_options"
 		}
 	]
 }

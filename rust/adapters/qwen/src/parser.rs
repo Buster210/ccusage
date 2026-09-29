@@ -14,9 +14,8 @@ use ccusage_adapter_common::jsonl;
 use super::paths;
 use crate::{
     LoadedEntry, PricingMap, Result, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost_for_usage,
+    apply_total_token_fallback, calculate_cost_for_usage_at,
     cli::{CostMode, SharedArgs},
-    debug_log,
     fast::LinePrefilter,
     format_date_tz, format_rfc3339_millis, missing_pricing_model_for_candidates,
     parse_ts_timestamp, parse_tz,
@@ -77,14 +76,16 @@ pub(super) fn load_entries(shared: &SharedArgs) -> Result<Vec<LoadedEntry>> {
         },
         crate::cache::Freshness::FileStat,
         |file| {
-            Ok(read_chat_file(file, tz.as_ref(), shared.mode, pricing.as_ref(), shared)
-                .unwrap_or_else(|error| {
-                    debug_log(
-                        shared,
-                        format!("Failed to load Qwen chat file {}: {error}", file.display()),
-                    );
-                    Vec::new()
-                }))
+            Ok(
+                read_chat_file(file, tz.as_ref(), shared.mode, pricing.as_ref(), shared)
+                    .unwrap_or_else(|error| {
+                        crate::debug_log(
+                            shared,
+                            format!("Failed to read Qwen chat file {}: {error}", file.display()),
+                        );
+                        Vec::new()
+                    }),
+            )
         },
         |e| reprice(e, shared.mode, pricing.as_ref()),
         None,
@@ -181,7 +182,7 @@ fn parse_line(
         cache_creation: None,
         ..display_usage
     };
-    let cost = calculate_qwen_cost(&model, billable_usage, mode, pricing);
+    let cost = calculate_qwen_cost(&model, billable_usage, timestamp, mode, pricing);
     let missing_pricing_model = missing_qwen_pricing(&model, billable_usage, mode, pricing);
     let data = UsageEntry {
         session_id: Some(session_id.clone()),
@@ -230,13 +231,21 @@ pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&
         cache_creation: None,
         ..entry.data.message.usage
     };
-    entry.cost = calculate_qwen_cost(&model, billable_usage, mode, pricing);
+    entry.cost = calculate_qwen_cost(
+        &model,
+        billable_usage,
+        crate::parse_ts_timestamp(&entry.data.timestamp)
+            .unwrap_or(crate::TimestampMs::UNIX_EPOCH),
+        mode,
+        pricing,
+    );
     entry.missing_pricing_model = missing_qwen_pricing(&model, billable_usage, mode, pricing);
 }
 
 fn calculate_qwen_cost(
     model: &str,
     usage: TokenUsageRaw,
+    timestamp: TimestampMs,
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> f64 {
@@ -244,7 +253,14 @@ fn calculate_qwen_cost(
         if mode == CostMode::Display
             || pricing.is_some_and(|pricing| pricing.find(&candidate).is_some())
         {
-            return calculate_cost_for_usage(Some(&candidate), usage, None, mode, pricing);
+            return calculate_cost_for_usage_at(
+                Some(&candidate),
+                usage,
+                None,
+                Some(timestamp),
+                mode,
+                pricing,
+            );
         }
     }
     0.0
@@ -350,6 +366,7 @@ mod tests {
                 speed: None,
                 cache_creation: None,
             },
+            TimestampMs::UNIX_EPOCH,
             CostMode::Calculate,
             Some(&pricing),
         );

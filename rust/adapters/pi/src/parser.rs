@@ -1,12 +1,16 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use jiff::tz::TimeZone as JiffTimeZone;
 use serde::Deserialize;
 
 use crate::{
     LoadedEntry, Pricing, PricingMap, Result, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost_for_usage, calculate_cost_from_pricing,
-    cli::CostMode, fast::LinePrefilter, format_date_tz, missing_pricing_model_for_usage,
+    apply_total_token_fallback, calculate_cost_for_usage_at, calculate_cost_from_pricing,
+    cli::CostMode, fast::{FxHashMap, FxHashSet, LinePrefilter}, format_date_tz, missing_pricing_model_for_usage,
 };
 use ccusage_adapter_common::jsonl;
 
@@ -18,7 +22,36 @@ struct PiLine {
     r#type: Option<String>,
     #[serde(default, deserialize_with = "jsonl::non_empty_string")]
     timestamp: Option<String>,
+    #[serde(
+        rename = "parentSession",
+        default,
+        deserialize_with = "jsonl::non_empty_string"
+    )]
+    parent_session: Option<String>,
+    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
+    id: Option<String>,
+    #[serde(
+        rename = "parentId",
+        default,
+        deserialize_with = "jsonl::non_empty_string"
+    )]
+    parent_id: Option<String>,
     message: Option<PiMessage>,
+}
+
+/// The link fields carried by every tree-format pi session entry.
+#[derive(Debug, Deserialize)]
+struct PiEntryLink {
+    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
+    r#type: Option<String>,
+    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
+    id: Option<String>,
+    #[serde(
+        rename = "parentId",
+        default,
+        deserialize_with = "jsonl::non_empty_string"
+    )]
+    parent_id: Option<String>,
 }
 
 /// The pi `message` block carried by assistant records.
@@ -65,28 +98,141 @@ struct PiCost {
     total: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PiSessionHeader {
+    pub(crate) parent_session: Option<PathBuf>,
+    pub(crate) parent_session_is_malformed: bool,
+    pub(crate) timestamp: Option<crate::TimestampMs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PiUsageSignature {
+    timestamp: crate::TimestampMs,
+    model: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    effective_total_tokens: u64,
+    billed_cost_bits: Option<u64>,
+}
+
+struct PiUsageRecord {
+    signature: PiUsageSignature,
+    entry_id: Option<String>,
+}
+
+enum PiReplayUsagePath {
+    Linear,
+    Active(Vec<usize>),
+    Invalid,
+}
+
+pub(crate) struct PiSessionData {
+    pub(crate) header: Option<PiSessionHeader>,
+    usage: Vec<PiUsageRecord>,
+    replay_usage_path: PiReplayUsagePath,
+    pub(crate) entries: Vec<LoadedEntry>,
+}
+
+impl PiSessionData {
+    pub(crate) fn matching_replay_prefix(
+        &self,
+        child: &Self,
+        fork_timestamp: crate::TimestampMs,
+    ) -> Option<usize> {
+        if matches!(&child.replay_usage_path, PiReplayUsagePath::Invalid) {
+            return None;
+        }
+
+        match &self.replay_usage_path {
+            PiReplayUsagePath::Linear => Some(matching_replay_prefix(
+                child.usage.iter().map(|usage| &usage.signature),
+                self.usage.iter().map(|usage| &usage.signature),
+                fork_timestamp,
+            )),
+            PiReplayUsagePath::Active(indices) => Some(matching_replay_prefix(
+                child.usage.iter().map(|usage| &usage.signature),
+                indices.iter().map(|&index| &self.usage[index].signature),
+                fork_timestamp,
+            )),
+            PiReplayUsagePath::Invalid => None,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_session_file(
     path: &Path,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> Result<Vec<LoadedEntry>> {
-    read_session_file_with_context(path, tz, mode, pricing, PiStoreContext::Default)
+    Ok(read_session_file_data(path, tz, mode, pricing)?.entries)
 }
 
-pub(super) fn read_session_file_for_store(
+#[cfg_attr(not(test), allow(dead_code))]
+fn read_session_file_for_store(
     path: &Path,
     store_root: &Path,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> Result<Vec<LoadedEntry>> {
-    read_session_file_with_context(
+    Ok(read_session_file_data_for_store(path, store_root, tz, mode, pricing)?.entries)
+}
+
+pub(crate) fn read_session_file_data(
+    path: &Path,
+    tz: Option<&JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+) -> Result<PiSessionData> {
+    read_session_file_data_with_context(path, tz, mode, pricing, PiStoreContext::Default, true)
+}
+
+pub(crate) fn read_session_file_data_for_store(
+    path: &Path,
+    store_root: &Path,
+    tz: Option<&JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+) -> Result<PiSessionData> {
+    read_session_file_data_with_context(
         path,
         tz,
         mode,
         pricing,
         PiStoreContext::Named { root: store_root },
+        true,
+    )
+}
+
+/// Entries-only parse for files excluded from replay matching.
+/// Entry output is identical to the full parse.
+pub(crate) fn read_session_file_data_lean(
+    path: &Path,
+    tz: Option<&JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+) -> Result<PiSessionData> {
+    read_session_file_data_with_context(path, tz, mode, pricing, PiStoreContext::Default, false)
+}
+
+pub(crate) fn read_session_file_data_for_store_lean(
+    path: &Path,
+    store_root: &Path,
+    tz: Option<&JiffTimeZone>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+) -> Result<PiSessionData> {
+    read_session_file_data_with_context(
+        path,
+        tz,
+        mode,
+        pricing,
+        PiStoreContext::Named { root: store_root },
+        false,
     )
 }
 
@@ -99,6 +245,15 @@ enum PiStoreContext<'a> {
     },
 }
 
+#[derive(Clone, Copy)]
+struct PiCostInput<'a> {
+    raw_model: Option<&'a str>,
+    display_model: Option<&'a str>,
+    usage: TokenUsageRaw,
+    display_cost: Option<f64>,
+    timestamp: crate::TimestampMs,
+}
+
 impl<'a> PiStoreContext<'a> {
     fn project(self, path: &Path) -> String {
         match self {
@@ -107,22 +262,35 @@ impl<'a> PiStoreContext<'a> {
         }
     }
 
-    fn cost(
-        self,
-        raw_model: Option<&str>,
-        display_model: Option<&str>,
-        usage: TokenUsageRaw,
-        display_cost: Option<f64>,
-        mode: CostMode,
-        pricing: Option<&PricingMap>,
-    ) -> f64 {
+    fn cost(self, input: PiCostInput<'_>, mode: CostMode, pricing: Option<&PricingMap>) -> f64 {
+        let source_cost = source_cost_for_mode(input.display_cost, mode);
         match self {
             Self::Default => {
-                calculate_cost_for_usage(display_model, usage, display_cost, mode, pricing)
+                let model = input
+                    .display_model
+                    .filter(|model| {
+                        pricing.is_some_and(|pricing| pricing.find_exact(model).is_some())
+                    })
+                    .or(input.raw_model)
+                    .or(input.display_model);
+                calculate_cost_for_usage_at(
+                    model,
+                    input.usage,
+                    source_cost,
+                    Some(input.timestamp),
+                    mode,
+                    pricing,
+                )
             }
-            Self::Named { .. } => {
-                calculate_store_cost(raw_model, display_model, usage, display_cost, mode, pricing)
-            }
+            Self::Named { .. } => calculate_store_cost(
+                input.raw_model,
+                input.display_model,
+                input.usage,
+                source_cost,
+                input.timestamp,
+                mode,
+                pricing,
+            ),
         }
     }
 
@@ -135,15 +303,16 @@ impl<'a> PiStoreContext<'a> {
         mode: CostMode,
         pricing: Option<&PricingMap>,
     ) -> Option<String> {
+        let source_cost = source_cost_for_mode(display_cost, mode);
         match self {
             Self::Default => {
-                missing_pricing_model_for_usage(display_model, usage, display_cost, mode, pricing)
+                missing_pricing_model_for_usage(display_model, usage, source_cost, mode, pricing)
             }
             Self::Named { .. } => missing_store_pricing_model(
                 raw_model,
                 display_model,
                 usage,
-                display_cost,
+                source_cost,
                 mode,
                 pricing,
             ),
@@ -151,22 +320,57 @@ impl<'a> PiStoreContext<'a> {
     }
 }
 
-fn read_session_file_with_context(
+fn read_session_file_data_with_context(
     path: &Path,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
     context: PiStoreContext<'_>,
-) -> Result<Vec<LoadedEntry>> {
+    collect_usage: bool,
+) -> Result<PiSessionData> {
     let content = fs::read(path)?;
     let project = context.project(path);
     let session_id = extract_session_id(path);
+    let header = parse_session_header(&content);
     // Usable pi lines carry token counts under a `usage` key nested in a
     // `message` object, so require both substrings before JSON parsing.
     let prefilter = LinePrefilter::all(&[br#""usage""#, br#""message""#]);
-    let mut entries = Vec::new();
+    let line_hint = crate::fast::byte_lines(&content).count();
+    let mut entries = Vec::with_capacity(line_hint);
+    // Usage records feed replay matching only; the lean path skips them
+    // (and their capacity reservation) entirely.
+    let mut usage_records = Vec::with_capacity(if collect_usage { line_hint } else { 0 });
+    // Single-pass link collection, byte-for-byte identical to the old two-pass set.
+    let mut links: Vec<PiEntryLink> = Vec::with_capacity(if collect_usage {
+        line_hint
+    } else {
+        0
+    });
 
-    for record in jsonl::records::<PiLine>(&content, Some(&prefilter)) {
+    for line in crate::fast::byte_lines(&content) {
+        if !prefilter.matches(line) {
+            if collect_usage
+                && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line)
+            {
+                links.push(link);
+            }
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<PiLine>(line) else {
+            if collect_usage
+                && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line)
+            {
+                links.push(link);
+            }
+            continue;
+        };
+        if collect_usage {
+            links.push(PiEntryLink {
+                r#type: record.r#type.clone(),
+                id: record.id.clone(),
+                parent_id: record.parent_id.clone(),
+            });
+        }
         if !is_pi_message_usage(&record) {
             continue;
         }
@@ -202,13 +406,32 @@ fn read_session_file_with_context(
         let model = message.model.clone();
         let display_cost = usage_value.cost.as_ref().and_then(|cost| cost.total);
         let cost = context.cost(
-            model.as_deref(),
-            model.as_deref(),
-            usage,
-            display_cost,
+            PiCostInput {
+                raw_model: model.as_deref(),
+                display_model: model.as_deref(),
+                usage,
+                display_cost,
+                timestamp,
+            },
             mode,
             pricing,
         );
+        if collect_usage {
+            usage_records.push(PiUsageRecord {
+                signature: PiUsageSignature {
+                    timestamp,
+                    model: model.clone(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    effective_total_tokens: crate::total_usage_tokens(usage)
+                        .saturating_add(extra_total_tokens),
+                    billed_cost_bits: replay_billed_cost_bits(mode, cost),
+                },
+                entry_id: record.id.clone(),
+            });
+        }
         let missing_pricing_model = context.missing_pricing_model(
             model.as_deref(),
             model.as_deref(),
@@ -249,7 +472,147 @@ fn read_session_file_with_context(
             missing_pricing_model,
         });
     }
-    Ok(entries)
+    Ok(PiSessionData {
+        header,
+        // Lean files never reach replay matching (no parent header and
+        // unreferenced), so with empty inputs this is the default path -
+        // identical to what the full computation returns for them.
+        replay_usage_path: replay_usage_path(links, &usage_records),
+        usage: usage_records,
+        entries,
+    })
+}
+
+fn matching_replay_prefix<'a>(
+    child_usage: impl Iterator<Item = &'a PiUsageSignature>,
+    parent_usage: impl Iterator<Item = &'a PiUsageSignature>,
+    fork_timestamp: crate::TimestampMs,
+) -> usize {
+    child_usage
+        .zip(parent_usage.take_while(|usage| usage.timestamp <= fork_timestamp))
+        .take_while(|(child, parent)| child == parent)
+        .count()
+}
+
+fn replay_usage_path(links: Vec<PiEntryLink>, usage: &[PiUsageRecord]) -> PiReplayUsagePath {
+    let links = links
+        .into_iter()
+        .filter(|link| link.r#type.as_deref() != Some("session"))
+        .collect::<Vec<_>>();
+    if links
+        .iter()
+        .all(|link| link.id.is_none() && link.parent_id.is_none())
+    {
+        // Version 1 sessions predate entry links, so their physical order is
+        // the only available linear history.
+        return PiReplayUsagePath::Linear;
+    }
+
+    let mut parents_by_id = FxHashMap::default();
+    let mut leaf_id = None;
+    for link in links {
+        // A partially linked session cannot identify an active branch safely.
+        let Some(id) = link.id else {
+            return PiReplayUsagePath::Invalid;
+        };
+        if parents_by_id.insert(id.clone(), link.parent_id).is_some() {
+            return PiReplayUsagePath::Invalid;
+        }
+        leaf_id = Some(id);
+    }
+    let Some(mut entry_id) = leaf_id else {
+        return PiReplayUsagePath::Linear;
+    };
+    if parents_by_id
+        .values()
+        .flatten()
+        .any(|parent| !parents_by_id.contains_key(parent))
+        || has_cyclic_entry_links(&parents_by_id)
+    {
+        return PiReplayUsagePath::Invalid;
+    }
+
+    let usage_by_id = usage
+        .iter()
+        .enumerate()
+        .filter_map(|(index, usage)| usage.entry_id.as_deref().map(|id| (id, index)))
+        .collect::<FxHashMap<_, _>>();
+    let mut active_usage = Vec::new();
+    let mut visited = FxHashSet::default();
+    loop {
+        // Pi writes the current leaf last; walking its parents excludes sibling
+        // branches that remain earlier in the same physical JSONL file.
+        if !visited.insert(entry_id.clone()) {
+            return PiReplayUsagePath::Invalid;
+        }
+        if let Some(&usage_index) = usage_by_id.get(entry_id.as_str()) {
+            active_usage.push(usage_index);
+        }
+        let Some(parent_id) = parents_by_id.get(&entry_id) else {
+            return PiReplayUsagePath::Invalid;
+        };
+        let Some(parent_id) = parent_id else {
+            break;
+        };
+        entry_id = parent_id.clone();
+    }
+    active_usage.reverse();
+    PiReplayUsagePath::Active(active_usage)
+}
+
+fn has_cyclic_entry_links(parents_by_id: &FxHashMap<String, Option<String>>) -> bool {
+    let mut validated = FxHashSet::default();
+    for start in parents_by_id.keys() {
+        if validated.contains(start) {
+            continue;
+        }
+
+        let mut path = FxHashSet::default();
+        let mut entry_id = start.clone();
+        while !validated.contains(&entry_id) {
+            if !path.insert(entry_id.clone()) {
+                return true;
+            }
+            let Some(parent_id) = parents_by_id.get(&entry_id) else {
+                return true;
+            };
+            let Some(parent_id) = parent_id else {
+                break;
+            };
+            entry_id = parent_id.clone();
+        }
+        validated.extend(path);
+    }
+    false
+}
+
+fn replay_billed_cost_bits(mode: CostMode, cost: f64) -> Option<u64> {
+    if mode == CostMode::Calculate {
+        return None;
+    }
+    Some(if cost == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        cost.to_bits()
+    })
+}
+
+pub(crate) fn parse_session_header(content: &[u8]) -> Option<PiSessionHeader> {
+    let first_line = content.split(|byte| *byte == b'\n').next()?;
+    let value = serde_json::from_slice::<serde_json::Value>(first_line).ok()?;
+    let header = serde_json::from_value::<PiLine>(value.clone()).ok()?;
+    (header.r#type.as_deref() == Some("session")).then(|| PiSessionHeader {
+        parent_session: header.parent_session.map(PathBuf::from),
+        parent_session_is_malformed: value.get("parentSession").is_some_and(|parent| {
+            !parent
+                .as_str()
+                .is_some_and(|parent| !parent.trim().is_empty())
+        }),
+        timestamp: header
+            .timestamp
+            .as_deref()
+            .and_then(crate::parse_ts_timestamp),
+    })
 }
 
 fn is_pi_message_usage(record: &PiLine) -> bool {
@@ -298,7 +661,7 @@ fn extract_project_for_store(path: &Path, store_root: &Path) -> String {
     extract_project(path)
 }
 
-pub(super) fn entry_id(entry: &LoadedEntry) -> String {
+pub(crate) fn entry_id(entry: &LoadedEntry) -> String {
     entry_id_for_store("pi", entry)
 }
 
@@ -307,17 +670,26 @@ fn calculate_store_cost(
     display_model: Option<&str>,
     usage: TokenUsageRaw,
     display_cost: Option<f64>,
+    timestamp: crate::TimestampMs,
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> f64 {
     match mode {
         CostMode::Display => display_cost.unwrap_or(0.0),
         CostMode::Auto => display_cost.unwrap_or_else(|| {
-            calculate_store_cost_from_tokens(raw_model, display_model, usage, pricing)
+            calculate_store_cost_from_tokens(raw_model, display_model, usage, timestamp, pricing)
         }),
         CostMode::Calculate => {
-            calculate_store_cost_from_tokens(raw_model, display_model, usage, pricing)
+            calculate_store_cost_from_tokens(raw_model, display_model, usage, timestamp, pricing)
         }
+    }
+}
+
+fn source_cost_for_mode(display_cost: Option<f64>, mode: CostMode) -> Option<f64> {
+    if mode == CostMode::Auto {
+        display_cost.filter(|cost| cost.is_finite() && *cost >= 0.0)
+    } else {
+        display_cost
     }
 }
 
@@ -325,9 +697,10 @@ fn calculate_store_cost_from_tokens(
     raw_model: Option<&str>,
     display_model: Option<&str>,
     usage: TokenUsageRaw,
+    timestamp: crate::TimestampMs,
     pricing: Option<&PricingMap>,
 ) -> f64 {
-    let Some(pricing) = store_pricing(raw_model, display_model, pricing) else {
+    let Some(pricing) = store_pricing_at(raw_model, display_model, timestamp, pricing) else {
         return 0.0;
     };
     calculate_cost_from_pricing(usage, pricing)
@@ -364,32 +737,86 @@ fn store_pricing(
         .or_else(|| raw_model.and_then(|model| pricing.find(model)))
 }
 
-pub(super) fn entry_id_for_store(store_name: &str, entry: &LoadedEntry) -> String {
-    [
+fn store_pricing_at(
+    raw_model: Option<&str>,
+    display_model: Option<&str>,
+    timestamp: crate::TimestampMs,
+    pricing: Option<&PricingMap>,
+) -> Option<Pricing> {
+    let pricing = pricing?;
+    display_model
+        .and_then(|model| pricing.find_exact(model))
+        .or_else(|| raw_model.and_then(|model| pricing.find_at(model, timestamp)))
+}
+
+pub(crate) fn entry_id_for_store(store_name: &str, entry: &LoadedEntry) -> String {
+    // Single allocation: the parts below used to be formatted one by one
+    // and joined, which cost ~11 small allocations per entry on this hot
+    // dedupe path. `format!` renders each part with the same `Display`
+    // impls, so the resulting key is byte-identical.
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         store_name,
         entry.project.as_ref(),
         entry.session_id.as_ref(),
         entry.data.timestamp.as_str(),
         entry.model.as_deref().unwrap_or_default(),
-        &entry.data.message.usage.input_tokens.to_string(),
-        &entry.data.message.usage.output_tokens.to_string(),
-        &entry
-            .data
-            .message
-            .usage
-            .cache_creation_input_tokens
-            .to_string(),
-        &entry.data.message.usage.cache_read_input_tokens.to_string(),
-        &entry.extra_total_tokens.to_string(),
-        &entry.cost.to_string(),
-    ]
-    .join(":")
+        entry.data.message.usage.input_tokens,
+        entry.data.message.usage.output_tokens,
+        entry.data.message.usage.cache_creation_input_tokens,
+        entry.data.message.usage.cache_read_input_tokens,
+        entry.extra_total_tokens,
+        entry.cost,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ccusage_test_support::fs_fixture;
+    use std::path::Path;
+
+    fn pricing_for_cost_tests() -> PricingMap {
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "test-model": {
+                    "input_cost_per_token": 0.000002,
+                    "output_cost_per_token": 0.000008
+                }
+            }"#,
+        );
+        pricing
+    }
+
+    fn usage_for_cost_tests() -> crate::TokenUsageRaw {
+        crate::TokenUsageRaw {
+            input_tokens: 1000,
+            output_tokens: 2000,
+            ..crate::TokenUsageRaw::default()
+        }
+    }
+
+    #[test]
+    fn lean_parse_matches_full_parse_for_lineage_free_files() {
+        let fixture = fs_fixture!({
+            "sessions/project-a/agent_session-a.jsonl": [
+                r#"{"type":"session","timestamp":"2026-01-01T00:00:00.000Z"}"#,
+                r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":100,"output":200}}}"#,
+                r#"{"type":"message","timestamp":"2026-01-02T00:01:00.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":300,"output":400}}}"#,
+            ]
+            .join("\n"),
+        });
+        let file = fixture.path("sessions/project-a/agent_session-a.jsonl");
+
+        let full = read_session_file_data(&file, None, CostMode::Display, None).unwrap();
+        let lean = read_session_file_data_lean(&file, None, CostMode::Display, None).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&lean.entries).unwrap(),
+            serde_json::to_value(&full.entries).unwrap()
+        );
+    }
 
     #[test]
     fn falls_back_to_total_tokens_when_pi_parts_are_missing() {
@@ -583,7 +1010,10 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].model.as_deref(), Some("gpt-5"));
-        assert_eq!(entries[0].data.message.model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            entries[0].data.message.model.as_deref(),
+            Some("gpt-5")
+        );
     }
 
     #[test]
@@ -609,5 +1039,128 @@ mod tests {
         .unwrap();
 
         assert_ne!(entry_id(&pi), entry_id_for_store("omp", &omp));
+    }
+
+    #[test]
+    fn auto_recalculates_negative_but_keeps_zero_source_cost_for_default_and_named_stores() {
+        let fixture = fs_fixture!({
+            "sessions/project-a/agent_session-a.jsonl": [
+                r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"test-model","usage":{"input":1000,"output":2000,"cost":{"total":-1.25}}}}"#,
+                r#"{"type":"message","timestamp":"2026-01-02T00:01:00.000Z","message":{"role":"assistant","model":"test-model","usage":{"input":1000,"output":2000,"cost":{"total":0}}}}"#,
+            ]
+            .join("\n"),
+        });
+        let file = fixture.path("sessions/project-a/agent_session-a.jsonl");
+        let pricing = pricing_for_cost_tests();
+        let expected_cost = 0.018000000000000002;
+
+        let default_entries =
+            read_session_file(&file, None, CostMode::Auto, Some(&pricing)).unwrap();
+        assert_eq!(default_entries.len(), 2);
+        assert_eq!(default_entries[0].cost, expected_cost);
+        assert_eq!(default_entries[0].data.cost_usd, Some(-1.25));
+        assert_eq!(default_entries[1].cost, 0.0);
+        assert_eq!(default_entries[1].data.cost_usd, Some(0.0));
+
+        let named_entries = read_session_file_for_store(
+            &file,
+            &fixture.path("sessions"),
+            None,
+            CostMode::Auto,
+            Some(&pricing),
+        )
+        .unwrap();
+        assert_eq!(named_entries.len(), 2);
+        assert_eq!(named_entries[0].cost, expected_cost);
+        assert_eq!(named_entries[0].data.cost_usd, Some(-1.25));
+        assert_eq!(named_entries[1].cost, 0.0);
+        assert_eq!(named_entries[1].data.cost_usd, Some(0.0));
+    }
+
+    #[test]
+    fn auto_recalculates_non_finite_source_cost_while_display_preserves_it() {
+        let pricing = pricing_for_cost_tests();
+        let usage = usage_for_cost_tests();
+        let expected_cost = 0.018000000000000002;
+        let contexts = [
+            PiStoreContext::Default,
+            PiStoreContext::Named { root: Path::new(".") },
+        ];
+
+        for context in contexts {
+            let display_cost = context.cost(
+                PiCostInput {
+                    raw_model: Some("test-model"),
+                    display_model: Some("test-model"),
+                    usage,
+                    display_cost: Some(f64::NAN),
+                    timestamp: crate::TimestampMs::UNIX_EPOCH,
+                },
+                CostMode::Display,
+                Some(&pricing),
+            );
+            assert!(display_cost.is_nan());
+
+            let auto_cost = context.cost(
+                PiCostInput {
+                    raw_model: Some("test-model"),
+                    display_model: Some("test-model"),
+                    usage,
+                    display_cost: Some(f64::INFINITY),
+                    timestamp: crate::TimestampMs::UNIX_EPOCH,
+                },
+                CostMode::Auto,
+                Some(&pricing),
+            );
+            assert_eq!(auto_cost, expected_cost);
+
+            let calculated_cost = context.cost(
+                PiCostInput {
+                    raw_model: Some("test-model"),
+                    display_model: Some("test-model"),
+                    usage,
+                    display_cost: Some(f64::NEG_INFINITY),
+                    timestamp: crate::TimestampMs::UNIX_EPOCH,
+                },
+                CostMode::Calculate,
+                Some(&pricing),
+            );
+            assert_eq!(calculated_cost, expected_cost);
+        }
+    }
+
+    #[test]
+    fn auto_reports_missing_pricing_for_invalid_source_cost() {
+        let fixture = fs_fixture!({
+            "sessions/project-a/agent_session-a.jsonl": r#"{"type":"message","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"assistant","model":"unknown-model","usage":{"input":1000,"output":2000,"cost":{"total":-1.25}}}}"#,
+        });
+        let file = fixture.path("sessions/project-a/agent_session-a.jsonl");
+        let pricing = PricingMap::default();
+
+        let default_entry = read_session_file(&file, None, CostMode::Auto, Some(&pricing))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(default_entry.cost, 0.0);
+        assert_eq!(
+            default_entry.missing_pricing_model.as_deref(),
+            Some("unknown-model")
+        );
+
+        let named_entry = read_session_file_for_store(
+            &file,
+            &fixture.path("sessions"),
+            None,
+            CostMode::Auto,
+            Some(&pricing),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert_eq!(named_entry.cost, 0.0);
+        assert_eq!(
+            named_entry.missing_pricing_model.as_deref(),
+            Some("unknown-model")
+        );
     }
 }

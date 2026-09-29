@@ -498,6 +498,9 @@ fn apply_config_to_statusline_args(args: &mut StatuslineArgs, config: &ConfigCon
         if let Some(aliases) = options.model_label_aliases {
             args.model_label_aliases = aliases;
         }
+        if let Some(pricing_overrides) = options.pricing_overrides {
+            merge_pricing_overrides(&mut args.pricing_overrides, pricing_overrides);
+        }
     }
 }
 
@@ -584,6 +587,7 @@ fn apply_shared_options(shared: &mut SharedArgs, options: SharedOptions) {
     }
     if let Some(order) = options.order {
         shared.order = order.into();
+        shared.order_explicit = true;
     }
     if let Some(breakdown) = options.breakdown {
         shared.breakdown = breakdown;
@@ -1005,6 +1009,27 @@ mod tests {
             }),
             "grok session",
             Some("grok"),
+            "session",
+        );
+        let mut shared = SharedArgs::default();
+
+        apply_config_to_shared(&mut shared, &config);
+
+        assert!(shared.offline);
+        assert!(shared.json);
+    }
+
+    #[test]
+    fn zcode_namespace_keeps_shared_report_options() {
+        let config = context(
+            json!({
+                "zcode": {
+                    "defaults": { "offline": true },
+                    "commands": { "session": { "json": true } }
+                }
+            }),
+            "zcode session",
+            Some("zcode"),
             "session",
         );
         let mut shared = SharedArgs::default();

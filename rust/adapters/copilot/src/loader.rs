@@ -1,15 +1,15 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use jiff::tz::TimeZone as JiffTimeZone;
 
 use super::{
-    parser::{CopilotUsageEntry, parse_otel_file},
-    paths::paths,
+    parser::{CopilotUsageEntry, parse_otel_file, parse_session_state_file},
+    paths::{CopilotSourceKind, paths},
 };
 use crate::{
-    LoadedEntry, Result, TokenUsageRaw, UsageEntry, UsageMessage, adapter::parse_or_log,
-    calculate_cost_for_usage, cli::CostMode, format_date_tz, missing_pricing_model_for_usage,
-    parse_tz,
+    LoadedEntry, Result, TokenUsageRaw, UsageEntry, UsageMessage, calculate_cost_for_usage_at,
+    cli::CostMode, date_range_bounds_ms, debug_log, format_date_tz,
+    missing_pricing_model_for_usage, parse_tz, read_files_parallel,
 };
 
 pub fn load_entries(
@@ -28,24 +28,46 @@ fn load_entries_inner(
     pricing: &crate::PricingMap,
 ) -> Result<Vec<LoadedEntry>> {
     let tz = parse_tz(shared.timezone.as_deref());
-    let files = paths()?;
+    let sources = paths()?;
     let mode = shared.mode;
-    let mut entries = crate::cache::load_with_cache(
+    let mut otel_files = Vec::new();
+    let mut session_files = Vec::new();
+    for source in &sources {
+        match source.kind {
+            CopilotSourceKind::Otel => otel_files.push(source.path.clone()),
+            CopilotSourceKind::SessionState => session_files.push(source.path.clone()),
+        }
+    }
+    // OTEL files go through the persistent cache (fast path); session-state
+    // files are small and parsed fresh, then reconciled across files below.
+    let mut otel_entries = crate::cache::load_with_cache(
         "copilot",
-        &files,
+        &otel_files,
         crate::cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
         },
         crate::cache::Freshness::FileStat,
         |path| {
-            Ok(parse_or_log(path, shared, "Copilot OTEL file", || {
-                read_otel_file(path, tz.as_ref(), mode, pricing)
-            }))
+            Ok(read_source_file(path, CopilotSourceKind::Otel)
+                .unwrap_or_else(|error| {
+                    debug_log(
+                        shared,
+                        format!(
+                            "Failed to read Copilot OTEL file {}: {error}",
+                            path.display(),
+                        ),
+                    );
+                    Vec::new()
+                })
+                .into_iter()
+                .map(|entry| usage_entry_to_loaded(entry, tz.as_ref(), mode, pricing))
+                .collect())
         },
         |e| {
-            // Copilot bills reasoning tokens as output; extra_total_tokens holds them.
-            let cost_usage = crate::TokenUsageRaw {
+            // Reprice cached entries at the current mode/pricing (mirrors
+            // usage_entry_to_loaded; Copilot bills reasoning tokens as output).
+            let cost_usage = TokenUsageRaw {
                 output_tokens: e
                     .data
                     .message
@@ -55,24 +77,206 @@ fn load_entries_inner(
                 cache_creation: None,
                 ..e.data.message.usage
             };
-            let model = e.data.message.model.as_deref();
-            e.cost = calculate_cost_for_usage(model, cost_usage, None, mode, Some(pricing));
-            e.missing_pricing_model =
-                missing_pricing_model_for_usage(model, cost_usage, None, mode, Some(pricing));
+            e.cost = calculate_cost_for_usage_at(
+                e.model.as_deref(),
+                cost_usage,
+                None,
+                Some(e.timestamp),
+                mode,
+                Some(pricing),
+            );
+            e.missing_pricing_model = missing_pricing_model_for_usage(
+                e.model.as_deref(),
+                cost_usage,
+                None,
+                mode,
+                Some(pricing),
+            );
         },
         None,
     )?;
+    let session_parsed = read_files_parallel(&session_files, shared.single_thread, |path| {
+        parse_session_state_file(path).unwrap_or_else(|error| {
+            debug_log(
+                shared,
+                format!(
+                    "Failed to read Copilot session-state file {}: {error}",
+                    path.display(),
+                ),
+            );
+            Vec::new()
+        })
+    });
+    let (since_millis, until_millis) = date_range_bounds_ms(
+        shared.since.as_deref(),
+        shared.until.as_deref(),
+        tz.as_ref(),
+    );
+    let session_state = reconcile_session_state_entries(
+        session_parsed.into_iter().flatten().collect(),
+        since_millis,
+        until_millis,
+    );
+    let latest_shutdown_timestamps = session_state
+        .shutdown_entries
+        .iter()
+        .map(|entry| {
+            (
+                (entry.session_id.as_str(), entry.model.as_str()),
+                entry.timestamp,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    otel_entries.retain(|entry| {
+        latest_shutdown_timestamps
+            .get(&(
+                &*entry.session_id,
+                entry.model.as_deref().unwrap_or(""),
+            ))
+            .is_none_or(|shutdown_timestamp| entry.timestamp > *shutdown_timestamp)
+    });
+
+    let mut entries = session_state
+        .entries
+        .into_iter()
+        .map(|entry| usage_entry_to_loaded(entry, tz.as_ref(), shared.mode, pricing))
+        .chain(otel_entries)
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.timestamp);
     Ok(entries)
 }
 
+struct SessionStateReconciliation {
+    entries: Vec<CopilotUsageEntry>,
+    shutdown_entries: Vec<CopilotUsageEntry>,
+}
+
+// Session-state usage is cumulative per `(session, model)`, so resumed sessions
+// emit one shutdown per resume. Each snapshot is turned into interval usage:
+// the first snapshot is kept as-is and every later snapshot subtracts its
+// predecessor, keeping daily attribution while preserving the total.
+fn reconcile_session_state_entries(
+    entries: Vec<CopilotUsageEntry>,
+    since_millis: Option<i64>,
+    until_millis: Option<i64>,
+) -> SessionStateReconciliation {
+    let entries = deduplicate_session_entries(entries);
+    let mut grouped = HashMap::<(String, String), Vec<usize>>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        grouped
+            .entry((entry.session_id.clone(), entry.model.clone()))
+            .or_default()
+            .push(index);
+    }
+    let mut interval_indices = Vec::new();
+    let mut shutdown_entries = Vec::new();
+    // Sort keys for deterministic output across HashMap iteration.
+    let mut keys = grouped.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        let mut sorted = grouped.remove(&key).unwrap_or_default();
+        sorted.sort_by_key(|index| (entries[*index].timestamp, *index));
+        let latest_visible = sorted.iter().rposition(|index| {
+            until_millis.is_none_or(|end| entries[*index].timestamp.as_millis() < end)
+        });
+        let Some(latest_pos) = latest_visible else {
+            continue;
+        };
+        shutdown_entries.push(entries[sorted[latest_pos]].clone());
+        let mut previous: Option<&CopilotUsageEntry> = None;
+        for position in 0..=latest_pos {
+            let current = &entries[sorted[position]];
+            if since_millis.is_some_and(|start| current.timestamp.as_millis() < start) {
+                previous = Some(current);
+                continue;
+            }
+            let reconciled = previous.map_or_else(
+                || current.clone(),
+                |baseline| subtract_usage(current, baseline),
+            );
+            previous = Some(current);
+            if has_usage(&reconciled) {
+                interval_indices.push(reconciled);
+            }
+        }
+    }
+    // Keep chronological order for downstream sorting stability.
+    interval_indices.sort_by_key(|entry| (entry.timestamp, entry.dedup_key.clone()));
+    shutdown_entries.sort_by_key(|entry| (entry.timestamp, entry.dedup_key.clone()));
+    SessionStateReconciliation {
+        entries: interval_indices,
+        shutdown_entries,
+    }
+}
+
+fn deduplicate_session_entries(entries: Vec<CopilotUsageEntry>) -> Vec<CopilotUsageEntry> {
+    let mut indexes = HashMap::<String, usize>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if indexes
+            .get(&entry.dedup_key)
+            .is_none_or(|previous| entries[*previous].timestamp <= entry.timestamp)
+        {
+            indexes.insert(entry.dedup_key.clone(), index);
+        }
+    }
+    let mut indexes = indexes.into_values().collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes
+        .into_iter()
+        .map(|index| entries[index].clone())
+        .collect()
+}
+
+fn subtract_usage(current: &CopilotUsageEntry, baseline: &CopilotUsageEntry) -> CopilotUsageEntry {
+    CopilotUsageEntry {
+        timestamp: current.timestamp,
+        timestamp_text: current.timestamp_text.clone(),
+        session_id: current.session_id.clone(),
+        model: current.model.clone(),
+        input_tokens: current.input_tokens.saturating_sub(baseline.input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(baseline.output_tokens),
+        cache_creation_tokens: current
+            .cache_creation_tokens
+            .saturating_sub(baseline.cache_creation_tokens),
+        cache_read_tokens: current
+            .cache_read_tokens
+            .saturating_sub(baseline.cache_read_tokens),
+        reasoning_output_tokens: current
+            .reasoning_output_tokens
+            .saturating_sub(baseline.reasoning_output_tokens),
+        extra_total_tokens: current
+            .extra_total_tokens
+            .saturating_sub(baseline.extra_total_tokens),
+        request_count: current.request_count.saturating_sub(baseline.request_count),
+        dedup_key: current.dedup_key.clone(),
+    }
+}
+
+fn has_usage(entry: &CopilotUsageEntry) -> bool {
+    entry.input_tokens > 0
+        || entry.output_tokens > 0
+        || entry.cache_creation_tokens > 0
+        || entry.cache_read_tokens > 0
+        || entry.reasoning_output_tokens > 0
+        || entry.extra_total_tokens > 0
+        || entry.request_count > 0
+}
+
+fn read_source_file(path: &Path, kind: CopilotSourceKind) -> Result<Vec<CopilotUsageEntry>> {
+    match kind {
+        CopilotSourceKind::Otel => parse_otel_file(path),
+        CopilotSourceKind::SessionState => parse_session_state_file(path),
+    }
+}
+
+#[cfg(test)]
 fn read_otel_file(
     path: &Path,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: &crate::PricingMap,
 ) -> Result<Vec<LoadedEntry>> {
-    Ok(parse_otel_file(path)?
+    Ok(read_source_file(path, CopilotSourceKind::Otel)?
         .into_iter()
         .map(|entry| usage_entry_to_loaded(entry, tz, mode, pricing))
         .collect())
@@ -93,7 +297,7 @@ fn usage_entry_to_loaded(
         cache_creation: None,
     };
     let cost_usage = TokenUsageRaw {
-        output_tokens: entry.output_tokens + entry.reasoning_output_tokens,
+        output_tokens: usage.output_tokens.saturating_add(entry.extra_total_tokens),
         cache_creation: None,
         ..usage
     };
@@ -113,7 +317,14 @@ fn usage_entry_to_loaded(
         is_api_error_message: None,
         is_sidechain: None,
     };
-    let cost = calculate_cost_for_usage(Some(&entry.model), cost_usage, None, mode, Some(pricing));
+    let cost = calculate_cost_for_usage_at(
+        Some(&entry.model),
+        cost_usage,
+        None,
+        Some(entry.timestamp),
+        mode,
+        Some(pricing),
+    );
     let missing_pricing_model =
         missing_pricing_model_for_usage(Some(&entry.model), cost_usage, None, mode, Some(pricing));
     LoadedEntry {
@@ -123,9 +334,9 @@ fn usage_entry_to_loaded(
         session_id: Arc::from(entry.session_id),
         project_path: Arc::from("GitHub Copilot CLI"),
         cost,
-        extra_total_tokens: entry.reasoning_output_tokens,
+        extra_total_tokens: entry.extra_total_tokens,
         credits: None,
-        message_count: None,
+        message_count: (entry.request_count > 0).then_some(entry.request_count),
         model: Some(entry.model),
         data,
         usage_limit_reset_time: None,
@@ -138,7 +349,9 @@ use super::report::{report_from_rows, summarize_entries};
 
 #[cfg(test)]
 mod tests {
-    use ccusage_test_support::fs_fixture;
+    use std::ffi::OsString;
+
+    use ccusage_test_support::{CacheEnv, EnvVarsGuard, fs_fixture};
     use serde_json::json;
 
     use super::super::parser::parse_otel_file;
@@ -147,6 +360,7 @@ mod tests {
 
     #[test]
     fn parses_copilot_chat_spans() {
+        let _cache_env = CacheEnv::new("copilot-parses-copilot-chat-spans");
         let fixture = fs_fixture!({
             "copilot.jsonl": [
                 json!({ "type": "metric", "name": "gen_ai.client.token.usage" }).to_string(),
@@ -190,6 +404,7 @@ mod tests {
 
     #[test]
     fn suppresses_lower_priority_records_for_same_response() {
+        let _cache_env = CacheEnv::new("copilot-suppresses-lower-priority-records-for-sa");
         let fixture = fs_fixture!({
             "copilot.jsonl": [
                 json!({
@@ -248,7 +463,8 @@ mod tests {
     }
 
     #[test]
-    fn includes_reasoning_tokens_in_total_tokens() {
+    fn does_not_double_count_reasoning_tokens() {
+        let _cache_env = CacheEnv::new("copilot-does-not-double-count-reasoning-tokens");
         let fixture = fs_fixture!({
             "copilot.jsonl":
             format!(
@@ -284,8 +500,8 @@ mod tests {
 
         assert_eq!(report["daily"][0]["inputTokens"], 90);
         assert_eq!(report["daily"][0]["outputTokens"], 50);
-        assert_eq!(report["daily"][0]["totalTokens"], 175);
-        assert_eq!(report["daily"][0]["totalCost"], 300.0);
+        assert_eq!(report["daily"][0]["totalTokens"], 170);
+        assert_eq!(report["daily"][0]["totalCost"], 290.0);
         assert_eq!(
             report["daily"][0]["modelBreakdowns"],
             json!([{
@@ -294,13 +510,57 @@ mod tests {
                 "outputTokens": 50,
                 "cacheCreationTokens": 20,
                 "cacheReadTokens": 10,
-                "cost": 300.0
+                "cost": 290.0
             }])
         );
     }
 
     #[test]
+    fn includes_separate_otel_reasoning_tokens_in_total_and_cost() {
+        let _cache_env = CacheEnv::new("copilot-includes-separate-otel-reasoning-tokens-");
+        let fixture = fs_fixture!({
+            "copilot.jsonl": format!(
+                "{}\n",
+                json!({
+                    "type": "span",
+                    "traceId": "trace-1",
+                    "spanId": "span-1",
+                    "name": "chat test-model",
+                    "endTime": [1_775_934_264_u64, 0_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "test-model",
+                        "gen_ai.conversation.id": "conv-1",
+                        "gen_ai.usage.input_tokens": 100,
+                        "gen_ai.usage.output_tokens": 50,
+                        "gen_ai.usage.cache_read.input_tokens": 10,
+                        "gen_ai.usage.cache_creation.input_tokens": 20,
+                        "gen_ai.usage.reasoning.output_tokens": 5,
+                        "gen_ai.usage.total_tokens": 175,
+                    },
+                })
+            ),
+        });
+        let file = fixture.path("copilot.jsonl");
+        let mut pricing = crate::PricingMap::default();
+        pricing.load_json(
+            r#"{"test-model":{"input_cost_per_token":1,"output_cost_per_token":2,"cache_creation_input_token_cost":3,"cache_read_input_token_cost":4}}"#,
+        );
+
+        let loaded = read_otel_file(&file, None, CostMode::Auto, &pricing).unwrap();
+        let rows = summarize_entries(&loaded, AgentReportKind::Daily).unwrap();
+        let report = report_from_rows(&rows, AgentReportKind::Daily);
+
+        assert_eq!(loaded[0].extra_total_tokens, 5);
+        assert_eq!(report["daily"][0]["outputTokens"], 50);
+        assert_eq!(report["daily"][0]["totalTokens"], 175);
+        assert_eq!(report["daily"][0]["totalCost"], 300.0);
+        assert_eq!(report["daily"][0]["modelBreakdowns"][0]["cost"], 300.0);
+    }
+
+    #[test]
     fn falls_back_to_total_tokens_when_copilot_parts_are_missing() {
+        let _cache_env = CacheEnv::new("copilot-falls-back-to-total-tokens-when-copilot-");
         let fixture = fs_fixture!({
             "copilot.jsonl":
             format!(
@@ -316,6 +576,7 @@ mod tests {
                         "gen_ai.response.model": "test-model",
                         "gen_ai.conversation.id": "conv-1",
                         "gen_ai.usage.total_tokens": 567,
+                        "gen_ai.usage.reasoning_tokens": 5,
                     },
                 })
             ),
@@ -326,6 +587,564 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].output_tokens, 567);
-        assert_eq!(entries[0].reasoning_output_tokens, 0);
+        assert_eq!(entries[0].reasoning_output_tokens, 5);
+        assert_eq!(entries[0].extra_total_tokens, 0);
+    }
+
+    #[test]
+    fn loads_session_state_tokens_and_calculates_token_cost() {
+        let _cache_env = CacheEnv::new("copilot-loads-session-state-tokens-and-calculate");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": format!(
+                "{}\n",
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-04-15T09:52:27.352Z",
+                    "data": {
+                        "modelMetrics": {
+                            "test-model": {
+                                "usage": {
+                                    "inputTokens": 100,
+                                    "outputTokens": 50,
+                                    "cacheReadTokens": 10,
+                                    "cacheWriteTokens": 20,
+                                    "reasoningTokens": 5
+                                },
+                                "requests": {"count": 3, "cost": 999}
+                            }
+                        }
+                    }
+                })
+            ),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let mut pricing = crate::PricingMap::default();
+        pricing.load_json(
+            r#"{"test-model":{"input_cost_per_token":1,"output_cost_per_token":2,"cache_creation_input_token_cost":3,"cache_read_input_token_cost":4}}"#,
+        );
+        let shared = crate::cli::SharedArgs {
+            mode: CostMode::Auto,
+            single_thread: true,
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &pricing).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data.message.usage.input_tokens, 70);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(
+            entries[0].data.message.usage.cache_creation_input_tokens,
+            20
+        );
+        assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 10);
+        assert_eq!(entries[0].extra_total_tokens, 0);
+        assert_eq!(entries[0].message_count, Some(3));
+        assert_eq!(entries[0].cost, 270.0);
+    }
+
+    #[test]
+    fn uses_shutdown_snapshot_as_of_until_for_otel_reconciliation() {
+        let _cache_env = CacheEnv::new("copilot-uses-shutdown-snapshot-as-of-until-for-o");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": [
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-old",
+                    "timestamp": "2026-01-02T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 50,
+                        "cacheReadTokens": 10,
+                        "cacheWriteTokens": 20
+                    }}}}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-latest",
+                    "timestamp": "2026-01-03T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 200,
+                        "outputTokens": 80,
+                        "cacheReadTokens": 20,
+                        "cacheWriteTokens": 30
+                    }}}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+            "home/.copilot/otel/otel.jsonl": json!({
+                "type": "span",
+                "traceId": "trace-between-shutdowns",
+                "spanId": "span-between-shutdowns",
+                "name": "chat test-model",
+                "endTime": [1_767_320_400_u64, 0_u64],
+                "attributes": {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.response.model": "test-model",
+                    "gen_ai.conversation.id": "session-1",
+                    "gen_ai.usage.input_tokens": 11,
+                    "gen_ai.usage.output_tokens": 12
+                }
+            })
+            .to_string(),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            single_thread: true,
+            timezone: Some("UTC".to_string()),
+            until: Some("20260102".to_string()),
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::default()).unwrap();
+        let mut entries = entries;
+        ccusage_adapter_common::filter_loaded_entries_by_date(&mut entries, &shared);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].data.message.usage.input_tokens, 70);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(entries[1].data.message.usage.input_tokens, 11);
+        assert_eq!(entries[1].data.message.usage.output_tokens, 12);
+    }
+
+    #[test]
+    fn subtracts_the_pre_since_shutdown_before_retaining_resumed_otel_rows() {
+        let _cache_env = CacheEnv::new("copilot-subtracts-the-pre-since-shutdown-before-");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": [
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-old",
+                    "timestamp": "2026-01-02T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {
+                        "usage": {
+                            "inputTokens": 100,
+                            "outputTokens": 50,
+                            "cacheReadTokens": 10,
+                            "cacheWriteTokens": 20
+                        },
+                        "requests": {"count": 1}
+                    }}}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-latest",
+                    "timestamp": "2026-01-03T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {
+                        "usage": {
+                            "inputTokens": 200,
+                            "outputTokens": 80,
+                            "cacheReadTokens": 20,
+                            "cacheWriteTokens": 30
+                        },
+                        "requests": {"count": 3}
+                    }}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+            "home/.copilot/otel/otel.jsonl": json!({
+                "type": "span",
+                "traceId": "trace-resumed",
+                "spanId": "span-resumed",
+                "name": "chat test-model",
+                "endTime": [1_767_406_800_u64, 0_u64],
+                "attributes": {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.response.model": "test-model",
+                    "gen_ai.conversation.id": "session-1",
+                    "gen_ai.usage.input_tokens": 13,
+                    "gen_ai.usage.output_tokens": 14
+                }
+            })
+            .to_string(),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            single_thread: true,
+            since: Some("20260103".to_string()),
+            timezone: Some("UTC".to_string()),
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::default()).unwrap();
+        let mut entries = entries;
+        ccusage_adapter_common::filter_loaded_entries_by_date(&mut entries, &shared);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].data.message.usage.input_tokens, 80);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 30);
+        assert_eq!(
+            entries[0].data.message.usage.cache_creation_input_tokens,
+            10
+        );
+        assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 10);
+        assert_eq!(entries[0].message_count, Some(2));
+        assert_eq!(entries[1].data.message.usage.input_tokens, 13);
+        assert_eq!(entries[1].data.message.usage.output_tokens, 14);
+        assert_eq!(entries[1].message_count, Some(1));
+    }
+
+    #[test]
+    fn normalizes_copilot_model_suffixes_for_pricing_and_otel_dedupe() {
+        let _cache_env = CacheEnv::new("copilot-normalizes-copilot-model-suffixes-for-pr");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": format!(
+                "{}\n",
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-08-30T12:00:00Z",
+                    "data": {
+                        "modelMetrics": {
+                            "claude-opus-4.6-1m": {
+                                "usage": {
+                                    "inputTokens": 100,
+                                    "outputTokens": 50,
+                                    "cacheReadTokens": 10,
+                                    "cacheWriteTokens": 20,
+                                    "reasoningTokens": 5
+                                }
+                            }
+                        }
+                    }
+                })
+            ),
+            "home/.copilot/otel/session.jsonl": format!(
+                "{}\n",
+                json!({
+                    "type": "span",
+                    "traceId": "trace-1",
+                    "spanId": "span-1",
+                    "name": "chat claude-opus-4.6-1m-internal",
+                    "endTime": [1_775_934_264_u64, 0_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "claude-opus-4.6-1m-internal",
+                        "gen_ai.conversation.id": "session-1",
+                        "gen_ai.usage.input_tokens": 999,
+                        "gen_ai.usage.output_tokens": 999
+                    }
+                })
+            )
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            mode: CostMode::Auto,
+            single_thread: true,
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::load_embedded()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model.as_deref(), Some("claude-opus-4.6"));
+        assert_eq!(entries[0].data.message.usage.input_tokens, 70);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(
+            entries[0].data.message.usage.cache_creation_input_tokens,
+            20
+        );
+        assert_eq!(entries[0].data.message.usage.cache_read_input_tokens, 10);
+        assert_eq!(entries[0].extra_total_tokens, 0);
+        assert!((entries[0].cost - 0.00173).abs() < 1e-12);
+    }
+
+    #[test]
+    fn splits_cumulative_shutdowns_into_intervals_and_keeps_unmatched_otel_rows() {
+        let _cache_env = CacheEnv::new("copilot-splits-cumulative-shutdowns-into-interva");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": [
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-04-15T09:52:27.352Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 10,
+                        "outputTokens": 20
+                    }}}}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-04-15T09:52:27.352Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 10,
+                        "outputTokens": 20
+                    }}}}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-2",
+                    "timestamp": "2026-04-15T09:53:27.352Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 30,
+                        "outputTokens": 40
+                    }}}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+            "home/.copilot/otel/otel.jsonl": [
+                json!({
+                    "type": "span",
+                    "traceId": "trace-duplicate",
+                    "spanId": "span-duplicate",
+                    "name": "chat test-model",
+                    "endTime": [1_776_246_780_u64, 352_000_000_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "test-model",
+                        "gen_ai.conversation.id": "session-1",
+                        "gen_ai.usage.input_tokens": 100,
+                        "gen_ai.usage.output_tokens": 200
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "span",
+                    "traceId": "trace-post-shutdown",
+                    "spanId": "span-post-shutdown",
+                    "name": "chat test-model",
+                    "endTime": [1_776_246_840_u64, 0_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "test-model",
+                        "gen_ai.conversation.id": "session-1",
+                        "gen_ai.usage.input_tokens": 7,
+                        "gen_ai.usage.output_tokens": 8
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "span",
+                    "traceId": "trace-other-model",
+                    "spanId": "span-other-model",
+                    "name": "chat other-model",
+                    "endTime": [1_775_934_264_u64, 0_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "other-model",
+                        "gen_ai.conversation.id": "session-1",
+                        "gen_ai.usage.input_tokens": 3,
+                        "gen_ai.usage.output_tokens": 4
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "span",
+                    "traceId": "trace-other-session",
+                    "spanId": "span-other-session",
+                    "name": "chat test-model",
+                    "endTime": [1_775_934_264_u64, 0_u64],
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.response.model": "test-model",
+                        "gen_ai.conversation.id": "session-2",
+                        "gen_ai.usage.input_tokens": 5,
+                        "gen_ai.usage.output_tokens": 6
+                    }
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            single_thread: true,
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::default()).unwrap();
+        let rows = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.session_id.to_string(),
+                    entry.model.clone().unwrap_or_default(),
+                    entry.data.message.usage.input_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("session-1".to_string(), "other-model".to_string(), 3),
+                ("session-2".to_string(), "test-model".to_string(), 5),
+                ("session-1".to_string(), "test-model".to_string(), 10),
+                ("session-1".to_string(), "test-model".to_string(), 20),
+                ("session-1".to_string(), "test-model".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_resumed_shutdowns_across_dates_without_double_counting() {
+        let _cache_env = CacheEnv::new("copilot-splits-resumed-shutdowns-across-dates-wi");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": [
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-old",
+                    "timestamp": "2026-01-02T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 50,
+                        "cacheReadTokens": 10,
+                        "cacheWriteTokens": 20
+                    },
+                    "requests": {"count": 1}}}}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-latest",
+                    "timestamp": "2026-01-03T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 200,
+                        "outputTokens": 80,
+                        "cacheReadTokens": 20,
+                        "cacheWriteTokens": 30
+                    },
+                    "requests": {"count": 3}}}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            single_thread: true,
+            timezone: Some("UTC".to_string()),
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::default()).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].date, "2026-01-02");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 70);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(entries[0].message_count, Some(1));
+        assert_eq!(entries[1].date, "2026-01-03");
+        assert_eq!(entries[1].data.message.usage.input_tokens, 80);
+        assert_eq!(entries[1].data.message.usage.output_tokens, 30);
+        assert_eq!(entries[1].message_count, Some(2));
+        let total_input: u64 = entries
+            .iter()
+            .map(|entry| entry.data.message.usage.input_tokens)
+            .sum();
+        assert_eq!(total_input, 150);
+    }
+
+    #[test]
+    fn keeps_one_entry_for_a_single_shutdown_snapshot() {
+        let _cache_env = CacheEnv::new("copilot-keeps-one-entry-for-a-single-shutdown-sn");
+        let fixture = fs_fixture!({
+            "home/.copilot/session-state/session-1/events.jsonl": format!(
+                "{}\n",
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-01-02T01:20:00.000Z",
+                    "data": {"modelMetrics": {"test-model": {"usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 50
+                    },
+                    "requests": {"count": 1}}}}
+                })
+            ),
+        });
+        let _guard = EnvVarsGuard::set_many([
+            ("HOME", Some(OsString::from(fixture.path("home")))),
+            ("USERPROFILE", None),
+            ("HOMEDRIVE", None),
+            ("HOMEPATH", None),
+            (super::super::paths::COPILOT_HOME_ENV, None),
+            (
+                super::super::paths::COPILOT_OTEL_FILE_EXPORTER_PATH_ENV,
+                None,
+            ),
+        ]);
+        let shared = crate::cli::SharedArgs {
+            single_thread: true,
+            timezone: Some("UTC".to_string()),
+            ..crate::cli::SharedArgs::default()
+        };
+
+        let entries = load_entries_inner(&shared, &crate::PricingMap::default()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].date, "2026-01-02");
+        assert_eq!(entries[0].data.message.usage.input_tokens, 100);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+        assert_eq!(entries[0].message_count, Some(1));
     }
 }

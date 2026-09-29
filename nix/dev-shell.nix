@@ -27,7 +27,7 @@ in
         buildInputs =
           (with pkgs; [
             nodejs
-            pnpm
+            config.packages.pnpm
             bun
             inputs.bun2nix.packages.${system}.default
             nushell
@@ -67,10 +67,10 @@ in
             delta
             dust
           ])
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.mold
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.apple-sdk_15
           ]
           ++ config.pre-commit.settings.enabledPackages;

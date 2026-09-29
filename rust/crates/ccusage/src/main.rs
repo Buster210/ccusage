@@ -4,7 +4,7 @@ mod cli;
 mod commands;
 mod http;
 
-pub(crate) use adapter::claude::{load_daily_summaries, load_entries};
+pub(crate) use adapter::claude::{load_daily_summaries, load_entries, load_entries_since};
 #[cfg(test)]
 pub(crate) use adapter::codex::CodexTokenUsageEvent;
 pub(crate) use blocks::{
@@ -73,13 +73,16 @@ fn main() -> Result<()> {
         Some(Command::Qwen(args)) => adapter::qwen::run(args),
         Some(Command::Copilot(args)) => adapter::copilot::run(args),
         Some(Command::Gemini(args)) => adapter::gemini::run(args),
+        Some(Command::Antigravity(args)) => adapter::antigravity::run(args),
         Some(Command::Kimi(args)) => adapter::kimi::run(args),
         Some(Command::OpenClaw(args)) => adapter::openclaw::run(args),
         Some(Command::Grok(args)) => adapter::grok::run(args),
+        Some(Command::ZCode(args)) => adapter::zcode::run(args),
         None => {
             let args = AgentCommandArgs {
                 shared: cli.shared,
                 kind: AgentReportKind::Daily,
+                session_id: None,
                 sections: None,
                 by_agent: false,
                 pi_path: None,
@@ -95,7 +98,7 @@ fn main() -> Result<()> {
 mod tests {
     use std::{collections::HashMap, env, fs, sync::Arc};
 
-    use ccusage_test_support::fs_fixture;
+    use ccusage_test_support::{EnvVarGuard, fs_fixture};
     use serde_json::json;
 
     use super::*;
@@ -159,8 +162,9 @@ mod tests {
 
     #[test]
     fn agent_commands_are_exposed_by_independent_crates() {
-        let runs: [fn(AgentCommandArgs) -> Result<()>; 15] = [
+        let runs: [fn(AgentCommandArgs) -> Result<()>; 17] = [
             ccusage_adapter_amp::run,
+            ccusage_adapter_antigravity::run,
             ccusage_adapter_codebuff::run,
             ccusage_adapter_codex::run,
             ccusage_adapter_copilot::run,
@@ -175,9 +179,10 @@ mod tests {
             ccusage_adapter_opencode::run,
             ccusage_adapter_pi::run,
             ccusage_adapter_qwen::run,
+            ccusage_adapter_zcode::run,
         ];
 
-        assert_eq!(runs.len(), 15);
+        assert_eq!(runs.len(), 17);
     }
 
     #[test]
@@ -351,7 +356,32 @@ mod tests {
     }
 
     #[test]
-    fn dedupes_usage_entries_by_message_id_without_request_id() {
+    fn keeps_reused_message_id_from_distinct_sessions_at_same_timestamp() {
+        let _cache_env = CacheEnv::new("keeps-reused-message-id");
+        let fixture = fs_fixture!({
+            "projects/project1/session1/chat.jsonl": r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":25,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}},"costUSD":0.001}"#,
+            "projects/project1/session2/chat.jsonl": r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":250,"cache_creation_input_tokens":10,"cache_read_input_tokens":5,"speed":"standard"}},"costUSD":0.01}"#,
+        });
+
+        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", fixture.root());
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            ..SharedArgs::default()
+        };
+        let entries = load_entries(&shared, None).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.data.message.usage.output_tokens)
+                .sum::<u64>(),
+            275
+        );
+    }
+
+    #[test]
+    fn keeps_reused_message_id_from_same_session_without_request_id() {
         let fixture = fs_fixture!({
             "projects/project1/session1/chat.jsonl": [
                 r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":25,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}},"costUSD":0.001}"#,
@@ -362,6 +392,37 @@ mod tests {
 
         let _env = ClaudeEnv::new(
             "dedupes_usage_entries_by_message_id_without_request_id",
+            fixture.root(),
+        );
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            ..SharedArgs::default()
+        };
+        let entries = load_entries(&shared, None).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.data.message.usage.output_tokens)
+                .sum::<u64>(),
+            275
+        );
+        assert_eq!(entries.iter().map(|entry| entry.cost).sum::<f64>(), 0.011);
+    }
+
+    #[test]
+    fn dedupes_repeated_requestless_writes_from_same_session_at_the_same_timestamp() {
+        let fixture = fs_fixture!({
+            "projects/project1/session1/chat.jsonl": [
+                r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":25,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}},"costUSD":0.001}"#,
+                r#"{"timestamp":"2025-01-10T10:00:00.000Z","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":250,"cache_creation_input_tokens":10,"cache_read_input_tokens":5,"speed":"standard"}},"costUSD":0.01}"#,
+            ]
+            .join("\n"),
+        });
+
+        let _env = ClaudeEnv::new(
+            "dedupes_repeated_requestless_writes_from_same_session_at_the_same_timestamp",
             fixture.root(),
         );
         let shared = SharedArgs {
@@ -447,6 +508,42 @@ mod tests {
                 "claude-opus-4-20250514".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn daily_summaries_match_entry_aggregation_for_requestless_rewrites() {
+        let fixture = fs_fixture!({
+            "projects/project-a/session-a/chat.jsonl": [
+                r#"{"timestamp":"2026-09-03T12:00:00.000Z","sessionId":"session-a","message":{"id":"msg-gateway","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                r#"{"timestamp":"2026-09-04T12:00:00.000Z","sessionId":"session-a","message":{"id":"msg-gateway","model":"claude-sonnet-4-20250514","usage":{"input_tokens":30,"output_tokens":4}}}"#,
+            ]
+            .join("\n"),
+        });
+
+        let _env = ClaudeEnv::new(
+            "daily_summaries_match_entry_aggregation_for_requestless_rewrites",
+            fixture.root(),
+        );
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let entries = load_entries(&shared, None).unwrap();
+        let daily = load_daily_summaries(&shared, None, false).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        let expected_daily = summarize_by_key(
+            &entries,
+            |entry| entry.date.clone(),
+            |key| (key.to_string(), None),
+        )
+        .unwrap();
+        assert_eq!(
+            daily.iter().map(summary_json).collect::<Vec<_>>(),
+            expected_daily.iter().map(summary_json).collect::<Vec<_>>()
+        );
+        assert_eq!(daily.iter().map(|row| row.total_tokens()).sum::<u64>(), 46);
     }
 
     #[test]
@@ -634,6 +731,7 @@ mod tests {
             model: Some("gpt-5".to_string()),
             input_tokens: 100,
             cached_input_tokens: 10,
+            cache_creation_tokens: 0,
             output_tokens: 50,
             reasoning_output_tokens: 0,
             total_tokens: 150,
@@ -676,6 +774,7 @@ mod tests {
             model: Some("gpt-5.3-codex".to_string()),
             input_tokens: 120,
             cached_input_tokens: 30,
+            cache_creation_tokens: 0,
             output_tokens: 11,
             reasoning_output_tokens: 3,
             total_tokens: 131,
@@ -714,6 +813,7 @@ mod tests {
             model: Some("gpt-test".to_string()),
             input_tokens: 10,
             cached_input_tokens: 2,
+            cache_creation_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
             total_tokens: 15,
@@ -751,6 +851,7 @@ mod tests {
             model: Some("gpt-5.4".to_string()),
             input_tokens: 100,
             cached_input_tokens: 40,
+            cache_creation_tokens: 0,
             output_tokens: 10,
             reasoning_output_tokens: 0,
             total_tokens: 110,

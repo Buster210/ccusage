@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     LoadedEntry, PricingMap, Result, TokenUsageRaw, apply_total_token_fallback,
-    calculate_cost_for_usage, cli::CostMode, format_rfc3339_millis,
+    calculate_cost_for_usage_at, cli::CostMode, format_rfc3339_millis,
     missing_pricing_model_for_candidates, parse_ts_timestamp,
 };
 
@@ -399,10 +399,11 @@ pub(super) fn calculate_codebuff_cost(entry: &CodebuffEntry, pricing: &PricingMa
         cache_creation: None,
         ..entry.usage
     };
-    let raw = calculate_cost_for_usage(
+    let raw = calculate_cost_for_usage_at(
         Some(&entry.model),
         usage,
         None,
+        Some(entry.timestamp),
         CostMode::Calculate,
         Some(pricing),
     );
@@ -412,10 +413,11 @@ pub(super) fn calculate_codebuff_cost(entry: &CodebuffEntry, pricing: &PricingMa
     {
         return raw;
     }
-    calculate_cost_for_usage(
+    calculate_cost_for_usage_at(
         Some(&format!("{}/{}", entry.provider, entry.model)),
         usage,
         None,
+        Some(entry.timestamp),
         CostMode::Calculate,
         Some(pricing),
     )
@@ -459,10 +461,14 @@ pub(super) fn reprice(entry: &mut LoadedEntry, pricing: &PricingMap) {
         cache_creation: None,
         ..entry.data.message.usage
     };
-    let raw = calculate_cost_for_usage(
+    // Mirror parse (`_at` with entry timestamp): time-versioned schedules
+    // must agree between cold and warm runs.
+    let timestamp = parse_ts_timestamp(&entry.data.timestamp);
+    let raw = calculate_cost_for_usage_at(
         Some(&model),
         usage,
         None,
+        timestamp,
         CostMode::Calculate,
         Some(pricing),
     );
@@ -470,10 +476,11 @@ pub(super) fn reprice(entry: &mut LoadedEntry, pricing: &PricingMap) {
         if raw > 0.0 || provider == "unknown" || model.starts_with(&format!("{}/", provider)) {
             raw
         } else {
-            calculate_cost_for_usage(
+            calculate_cost_for_usage_at(
                 Some(&format!("{}/{}", provider, model)),
                 usage,
                 None,
+                timestamp,
                 CostMode::Calculate,
                 Some(pricing),
             )

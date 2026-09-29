@@ -12,6 +12,8 @@ use assert_fs::{
     fixture::{ChildPath, FileWriteStr, PathChild, PathCreateDir},
 };
 
+pub mod zcode;
+
 /// One lock for every guard that mutates the process-global environment.
 /// Two separate mutexes let a thread holding one call `std::env::set_var` while
 /// a thread holding the other did the same. That races `getenv` in any code

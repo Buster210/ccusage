@@ -77,11 +77,13 @@ pub(super) struct AllAccumulator {
 
 impl AllAccumulator {
     pub(super) fn add(&mut self, row: AllRow) {
-        self.input_tokens += row.input_tokens;
-        self.output_tokens += row.output_tokens;
-        self.cache_creation_tokens += row.cache_creation_tokens;
-        self.cache_read_tokens += row.cache_read_tokens;
-        self.total_tokens += row.total_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(row.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(row.output_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(row.cache_creation_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(row.cache_read_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(row.total_tokens);
         self.total_cost += row.total_cost;
         self.models.extend(row.models_used.iter().cloned());
         if let Some(agents) = row.metadata_agents.as_ref() {
@@ -130,11 +132,15 @@ impl AllAccumulator {
 }
 
 fn merge_agent_breakdown(target: &mut AllRow, source: AllRow) {
-    target.input_tokens += source.input_tokens;
-    target.output_tokens += source.output_tokens;
-    target.cache_creation_tokens += source.cache_creation_tokens;
-    target.cache_read_tokens += source.cache_read_tokens;
-    target.total_tokens += source.total_tokens;
+    target.input_tokens = target.input_tokens.saturating_add(source.input_tokens);
+    target.output_tokens = target.output_tokens.saturating_add(source.output_tokens);
+    target.cache_creation_tokens = target
+        .cache_creation_tokens
+        .saturating_add(source.cache_creation_tokens);
+    target.cache_read_tokens = target
+        .cache_read_tokens
+        .saturating_add(source.cache_read_tokens);
+    target.total_tokens = target.total_tokens.saturating_add(source.total_tokens);
     target.total_cost += source.total_cost;
     let mut models: BTreeSet<String> = target.models_used.drain(..).collect();
     models.extend(source.models_used);
@@ -159,11 +165,13 @@ fn merge_model_breakdowns(
             i
         });
         let b = &mut breakdowns[index];
-        b.input_tokens += item.input_tokens;
-        b.output_tokens += item.output_tokens;
-        b.cache_creation_tokens += item.cache_creation_tokens;
-        b.cache_read_tokens += item.cache_read_tokens;
-        b.extra_total_tokens += item.extra_total_tokens;
+        b.input_tokens = b.input_tokens.saturating_add(item.input_tokens);
+        b.output_tokens = b.output_tokens.saturating_add(item.output_tokens);
+        b.cache_creation_tokens = b
+            .cache_creation_tokens
+            .saturating_add(item.cache_creation_tokens);
+        b.cache_read_tokens = b.cache_read_tokens.saturating_add(item.cache_read_tokens);
+        b.extra_total_tokens = b.extra_total_tokens.saturating_add(item.extra_total_tokens);
         b.cost += item.cost;
         b.missing_pricing |= item.missing_pricing;
     }
@@ -185,11 +193,13 @@ fn aggregate_model_breakdowns(rows: &[AllRow]) -> Vec<ModelBreakdown> {
                 i
             });
             let b = &mut breakdowns[index];
-            b.input_tokens += item.input_tokens;
-            b.output_tokens += item.output_tokens;
-            b.cache_creation_tokens += item.cache_creation_tokens;
-            b.cache_read_tokens += item.cache_read_tokens;
-            b.extra_total_tokens += item.extra_total_tokens;
+            b.input_tokens = b.input_tokens.saturating_add(item.input_tokens);
+            b.output_tokens = b.output_tokens.saturating_add(item.output_tokens);
+            b.cache_creation_tokens = b
+                .cache_creation_tokens
+                .saturating_add(item.cache_creation_tokens);
+            b.cache_read_tokens = b.cache_read_tokens.saturating_add(item.cache_read_tokens);
+            b.extra_total_tokens = b.extra_total_tokens.saturating_add(item.extra_total_tokens);
             b.cost += item.cost;
             b.missing_pricing |= item.missing_pricing;
         }

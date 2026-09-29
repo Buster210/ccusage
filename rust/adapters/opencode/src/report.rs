@@ -63,7 +63,7 @@ pub fn summarize_entries(
         }
         AgentReportKind::Session => {
             let mut grouped: Vec<SessionAccumulator> = Vec::new();
-            let mut group_indexes = std::collections::HashMap::new();
+            let mut group_indexes = ccusage_core::fast::FxHashMap::default();
             for entry in entries {
                 let key = &entry.session_id;
                 let index = *group_indexes.entry(key.clone()).or_insert_with(|| {
