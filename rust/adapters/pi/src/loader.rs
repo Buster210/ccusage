@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     LoadedEntry, PricingMap, Result, cli::SharedArgs, collect_files_with_extension,
-    cost_and_missing_for_output, debug_log, parse_tz, read_files_parallel,
+    cost_and_missing_for_output, debug_log, fast::FxHashSet, parse_tz, read_files_parallel,
 };
 
 use super::{parser, paths};
@@ -155,28 +155,37 @@ fn load_entries_from_paths(
             }
         }
     }
-    let namespaces: Vec<String> = unit_by_index
+    let namespaces: Vec<&str> = unit_by_index
         .iter()
-        .map(|&unit_no| units[unit_no].namespace.clone())
+        .map(|&unit_no| units[unit_no].namespace.as_str())
         .collect();
     let headers = load_session_headers(&flat, &namespaces, shared.single_thread);
+    // Replay prep below only matters when some file carries a parent
+    // header; otherwise the lineage set stays empty and every downstream
+    // replay loop is a proven no-op, so skip both path maps.
+    let has_replay = headers
+        .iter()
+        .flatten()
+        .any(|header| header.parent_session.is_some());
     let mut files_by_path = HashMap::new();
-    for (index, file) in flat.iter().enumerate() {
-        files_by_path.entry(normalize_path(file)).or_insert(index);
-    }
     let mut lineage = HashSet::new();
-    for (index, header) in headers.iter().enumerate() {
-        let Some(header) = header else {
-            continue;
-        };
-        let Some(parent) = header.parent_session.as_ref() else {
-            continue;
-        };
-        lineage.insert(index);
-        if let Some(parent_index) =
-            resolve_parent_index(parent, &flat[index], &files_by_path)
-        {
-            lineage.insert(parent_index);
+    if has_replay {
+        for (index, file) in flat.iter().enumerate() {
+            files_by_path.entry(normalize_path(file)).or_insert(index);
+        }
+        for (index, header) in headers.iter().enumerate() {
+            let Some(header) = header else {
+                continue;
+            };
+            let Some(parent) = header.parent_session.as_ref() else {
+                continue;
+            };
+            lineage.insert(index);
+            if let Some(parent_index) =
+                resolve_parent_index(parent, &flat[index], &files_by_path)
+            {
+                lineage.insert(parent_index);
+            }
         }
     }
     // Lineage files take the full parse fresh every run (replay signatures
@@ -322,45 +331,30 @@ fn load_entries_from_paths(
         eprintln!("[timing] pi: parse {:?}", parse_started.elapsed());
     }
     let tail_started = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
-    let discovered: Vec<DiscoveredFile> = flat
-        .iter()
-        .map(|path| DiscoveredFile { path: path.clone() })
-        .collect();
-    let replay_plan = PiReplayPlan::new(&discovered, &loaded);
+    let replay_plan = PiReplayPlan::new(&flat, &loaded, &files_by_path);
     for (index, data) in loaded.into_iter().enumerate() {
         let Some(data) = data else {
             continue;
         };
-        entries_by_index.insert(
-            index,
+        let skip = replay_plan.skip_prefix(index);
+        let entries = if skip == 0 {
             data.entries
-                .into_iter()
-                .skip(replay_plan.skip_prefix(index))
-                .collect(),
-        );
+        } else {
+            data.entries.into_iter().skip(skip).collect()
+        };
+        entries_by_index.insert(index, entries);
     }
-    // First-wins dedup over the original file order, tagging each survivor
-    // with its cache unit so the ledger below records per-namespace live
-    // sets for deleted-file history.
-    let mut seen = HashSet::new();
-    let mut tagged: Vec<(usize, LoadedEntry)> = Vec::new();
+    // Route entries to their cache unit in original file order without
+    // deduping: the ledger below is idempotent to duplicate live keys
+    // (primary-key INSERT OR IGNORE plus set-based merge), and the single
+    // post-ledger pass removes duplicates with first-wins order intact.
+    // Skipping this pass saves one id string per entry with zero output change.
+    let mut per_unit: Vec<Vec<LoadedEntry>> = (0..units.len()).map(|_| Vec::new()).collect();
     for (index, unit_no) in unit_by_index.iter().enumerate() {
         let Some(entries) = entries_by_index.remove(&index) else {
             continue;
         };
-        for entry in entries {
-            let id = match scope {
-                PiLoadScope::Default => parser::entry_id(&entry),
-                PiLoadScope::Named { .. } => parser::entry_id_for_store(scope.store_name(), &entry),
-            };
-            if seen.insert(id) {
-                tagged.push((*unit_no, entry));
-            }
-        }
-    }
-    let mut per_unit: Vec<Vec<LoadedEntry>> = (0..units.len()).map(|_| Vec::new()).collect();
-    for (unit_no, entry) in tagged {
-        per_unit[unit_no].push(entry);
+        per_unit[*unit_no].extend(entries);
     }
     let mut live: Vec<LoadedEntry> = Vec::new();
     let ledger_started = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
@@ -375,7 +369,7 @@ fn load_entries_from_paths(
     if let Some(ledger_started) = ledger_started {
         eprintln!("[timing] pi: ledger {:?}", ledger_started.elapsed());
     }
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
     let mut entries = Vec::with_capacity(live.len());
     for entry in live {
         let id = match scope {
@@ -445,7 +439,7 @@ fn file_stat_ms(path: &Path) -> Option<(u64, u64)> {
 /// Session headers for every file, opening only new/changed ones; failures fall back to reading, never skipping.
 fn load_session_headers(
     files: &[PathBuf],
-    namespaces: &[String],
+    namespaces: &[&str],
     single_thread: bool,
 ) -> Vec<Option<parser::PiSessionHeader>> {
     let timed = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some();
@@ -458,12 +452,10 @@ fn load_session_headers(
         .filter(|sidecar: &HeaderSidecar| sidecar.v == 1)
         .unwrap_or_default();
     let mut headers: Vec<Option<parser::PiSessionHeader>> = Vec::with_capacity(files.len());
-    let mut need: Vec<(usize, PathBuf)> = Vec::new();
-    let mut keys: Vec<String> = Vec::with_capacity(files.len());
+    let mut need: Vec<(usize, PathBuf, String)> = Vec::new();
     let mut reused = 0usize;
     for (index, file) in files.iter().enumerate() {
         let key = format!("{}\0{}", namespaces[index], file.to_string_lossy());
-        keys.push(key.clone());
         let reuse = file_stat_ms(file).and_then(|(mtime_ms, size)| {
             let stored = sidecar.files.get(&key)?;
             (stored.mtime_ms == mtime_ms && stored.size == size).then(|| {
@@ -481,15 +473,15 @@ fn load_session_headers(
             }
             None => {
                 headers.push(None);
-                need.push((index, file.clone()));
+                need.push((index, file.clone(), key));
             }
         }
     }
     if !need.is_empty() {
-        let paths: Vec<PathBuf> = need.iter().map(|(_, file)| file.clone()).collect();
+        let paths: Vec<PathBuf> = need.iter().map(|(_, file, _)| file.clone()).collect();
         let parsed = read_files_parallel(&paths, single_thread, read_first_line_header);
         let mut inserts: HashMap<String, StoredSessionHeader> = HashMap::new();
-        for ((index, _), header) in need.into_iter().zip(parsed) {
+        for ((index, _, key), header) in need.into_iter().zip(parsed) {
             // Stat is bound to the content just parsed; a file that vanished
             // mid-read is simply not stored and fails open next run.
             if let Some((mtime_ms, size)) = file_stat_ms(&files[index]) {
@@ -511,7 +503,7 @@ fn load_session_headers(
                     })
                     .unwrap_or((false, None, false, None));
                 inserts.insert(
-                    keys[index].clone(),
+                    key,
                     StoredSessionHeader {
                         mtime_ms,
                         size,
@@ -564,10 +556,6 @@ fn load_session_headers(
     headers
 }
 
-struct DiscoveredFile {
-    path: PathBuf,
-}
-
 struct ParentReplay {
     parent_index: usize,
     fork_timestamp: crate::TimestampMs,
@@ -578,12 +566,21 @@ struct PiReplayPlan {
 }
 
 impl PiReplayPlan {
-    fn new(files: &[DiscoveredFile], loaded: &[Option<parser::PiSessionData>]) -> Self {
-        let mut files_by_path = HashMap::new();
-        for (index, file) in files.iter().enumerate() {
-            files_by_path
-                .entry(normalize_path(&file.path))
-                .or_insert(index);
+    fn new(
+        files: &[PathBuf],
+        loaded: &[Option<parser::PiSessionData>],
+        files_by_path: &HashMap<PathBuf, usize>,
+    ) -> Self {
+        // No parsed parent header means no child to suppress; the loops
+        // below would leave every set empty, so return that directly.
+        if !loaded.iter().flatten().any(|data| {
+            data.header
+                .as_ref()
+                .is_some_and(|header| header.parent_session.is_some())
+        }) {
+            return Self {
+                skip_by_file: HashMap::new(),
+            };
         }
 
         let mut invalid_lineage = HashSet::new();
@@ -609,7 +606,7 @@ impl PiReplayPlan {
                 continue;
             };
             let Some(parent_index) =
-                resolve_parent_index(parent_path, &files[child_index].path, &files_by_path)
+                resolve_parent_index(parent_path, &files[child_index], files_by_path)
             else {
                 invalid_lineage.insert(child_index);
                 continue;
