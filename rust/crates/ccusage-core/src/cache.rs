@@ -334,10 +334,18 @@ fn decode_entries(bytes: &[u8]) -> Option<Vec<LoadedEntry>> {
     Some(cached.into_iter().map(LoadedEntry::from).collect())
 }
 
+/// Concurrent opens pile onto SQLite's file locks (0.2ms -> 24ms under 8 loader
+/// threads), so serialize just the open+migrate phase. Leaf-level: nothing under
+/// it takes another lock.
+static OPEN_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Open (creating if needed) the cache database, apply pragmas, and migrate the
 /// schema. Returns `None` on any failure so the caller degrades to parsing
 /// without a cache, consistent with this module's non-fatal philosophy.
 fn open_db() -> Option<sqlite::Connection> {
+    // `None` degrades to parsing without a cache, matching this function's
+    // contract; a poisoned lock would mean a loader thread panicked mid-open.
+    let _guard = OPEN_DB_LOCK.lock().ok()?;
     timed!("open_db", {
         let dir = cache_dir()?;
         fs::create_dir_all(&dir).ok()?;
@@ -628,7 +636,94 @@ struct StoredFile {
 
 /// Load every `files` row for `namespace`, keyed by source path. The entries
 /// blob is decoded lazily by [`partition_files`] only on a confirmed cache hit.
+/// Blob transfer dominates warm runs, so large namespaces shard the scan across
+/// workers (connections are not shareable); failed shards read as fresh, never loss.
 fn load_namespace_files(conn: &sqlite::Connection, namespace: &str) -> HashMap<String, StoredFile> {
+    if row_count(conn, namespace) >= 128 {
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(2, 8);
+        let mut map = HashMap::new();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for shard in 0..workers {
+                handles.push(scope.spawn(move || load_namespace_shard(namespace, workers, shard)));
+            }
+            for handle in handles {
+                map.extend(handle.join().unwrap_or_default());
+            }
+        });
+        if !map.is_empty() {
+            return map;
+        }
+        // Sharded load came back empty (connections refused?); fall through
+        // to the single-connection scan rather than dropping the cache.
+    }
+    load_namespace_files_single(conn, namespace)
+}
+
+fn row_count(conn: &sqlite::Connection, namespace: &str) -> usize {
+    let Ok(mut st) = conn.prepare("SELECT COUNT(*) FROM files WHERE namespace = ?") else {
+        return 0;
+    };
+    if st.bind((1, namespace)).is_err() {
+        return 0;
+    }
+    match st.next() {
+        Ok(sqlite::State::Row) => st.read::<i64, _>(0).unwrap_or(0).max(0) as usize,
+        _ => 0,
+    }
+}
+
+fn load_namespace_shard(
+    namespace: &str,
+    workers: usize,
+    shard: usize,
+) -> HashMap<String, StoredFile> {
+    let mut map = HashMap::new();
+    let Some(conn) = open_db() else {
+        return map;
+    };
+    let Ok(mut st) = conn.prepare(
+        "SELECT path, mtime, size, cost_fingerprint, entries FROM files \
+         WHERE namespace = ? AND (rowid % ?2) = ?3",
+    ) else {
+        return map;
+    };
+    if st.bind((1, namespace)).is_err()
+        || st.bind((2, workers as i64)).is_err()
+        || st.bind((3, shard as i64)).is_err()
+    {
+        return map;
+    }
+    while let Ok(sqlite::State::Row) = st.next() {
+        let (Ok(path), Ok(mtime), Ok(size), Ok(cost), Ok(entries)) = (
+            st.read::<String, _>(0),
+            st.read::<i64, _>(1),
+            st.read::<i64, _>(2),
+            st.read::<i64, _>(3),
+            st.read::<Vec<u8>, _>(4),
+        ) else {
+            continue;
+        };
+        map.insert(
+            path,
+            StoredFile {
+                mtime: mtime as u64,
+                size: size as u64,
+                fingerprint: cost as u64,
+                entries,
+            },
+        );
+    }
+    map
+}
+
+fn load_namespace_files_single(
+    conn: &sqlite::Connection,
+    namespace: &str,
+) -> HashMap<String, StoredFile> {
     let mut map = HashMap::new();
     let Ok(mut st) = conn.prepare(
         "SELECT path, mtime, size, cost_fingerprint, entries FROM files WHERE namespace = ?",
@@ -675,8 +770,8 @@ struct FreshFile {
 
 /// The split of an input file list into cache hits and files needing parsing.
 struct FilePartition {
-    cached: Vec<CachedEntries>,
-    fresh: Vec<FreshFile>,
+    cached: Vec<(usize, CachedEntries)>,
+    fresh: Vec<(usize, FreshFile)>,
 }
 
 /// Partition source files into cached (still valid) and fresh (must re-parse).
@@ -695,15 +790,18 @@ fn partition_files(
             .min(files.len())
     };
     if worker_count <= 1 {
-        let mut cached = Vec::new();
-        let mut fresh = Vec::new();
+        let mut cached: Vec<(usize, CachedEntries)> = Vec::new();
+        let mut fresh: Vec<(usize, FreshFile)> = Vec::new();
 
-        for path in files {
+        for (index, path) in files.iter().enumerate() {
             let Some(current) = file_metadata(path) else {
-                fresh.push(FreshFile {
-                    path: path.clone(),
-                    metadata: None,
-                });
+                fresh.push((
+                    index,
+                    FreshFile {
+                        path: path.clone(),
+                        metadata: None,
+                    },
+                ));
                 continue;
             };
 
@@ -725,15 +823,18 @@ fn partition_files(
                     }
                 };
                 if unchanged && let Some(entries) = decode_entries(&entry.entries) {
-                    cached.push(CachedEntries { entries });
+                    cached.push((index, CachedEntries { entries }));
                     continue;
                 }
             }
 
-            fresh.push(FreshFile {
-                path: path.clone(),
-                metadata: Some(current),
-            });
+            fresh.push((
+                index,
+                FreshFile {
+                    path: path.clone(),
+                    metadata: Some(current),
+                },
+            ));
         }
 
         return FilePartition { cached, fresh };
@@ -811,8 +912,8 @@ fn partition_files(
         all_cached.sort_by_key(|(index, _)| *index);
         all_fresh.sort_by_key(|(index, _)| *index);
         FilePartition {
-            cached: all_cached.into_iter().map(|(_, v)| v).collect(),
-            fresh: all_fresh.into_iter().map(|(_, v)| v).collect(),
+            cached: all_cached,
+            fresh: all_fresh,
         }
     })
 }
@@ -963,7 +1064,11 @@ where
         );
     }
 
-    let fresh_paths: Vec<PathBuf> = partition.fresh.iter().map(|f| f.path.clone()).collect();
+    let fresh_paths: Vec<PathBuf> = partition
+        .fresh
+        .iter()
+        .map(|(_, f)| f.path.clone())
+        .collect();
     let __parse_start = timing_enabled().then(Instant::now);
     let mut parsed = parse_fresh_files(&fresh_paths, opts.single_thread, &parse_file)?;
     if let Some(s) = __parse_start {
@@ -983,7 +1088,7 @@ where
     // in one transaction. Skipped when the cache is unavailable.
     if let Some(conn) = conn.as_ref() {
         let __wb_start = timing_enabled().then(Instant::now);
-        write_back(conn, namespace, &partition.fresh, &parsed, files);
+        write_back(conn, namespace, &partition.fresh, &parsed, files, true);
         if let Some(s) = __wb_start {
             eprintln!(
                 "[timing] load_with_cache:{namespace}: write_back {:?}",
@@ -993,10 +1098,10 @@ where
     }
 
     // Assemble live entries (cached hits first, then freshly parsed).
-    let cached_total: usize = partition.cached.iter().map(|c| c.entries.len()).sum();
+    let cached_total: usize = partition.cached.iter().map(|(_, c)| c.entries.len()).sum();
     let fresh_total: usize = parsed.iter().map(Vec::len).sum();
     let mut live = Vec::with_capacity(cached_total + fresh_total);
-    for cached in partition.cached {
+    for (_, cached) in partition.cached {
         live.extend(cached.entries);
     }
     for entries in parsed {
@@ -1031,28 +1136,92 @@ where
     res
 }
 
-/// Upsert fresh entries, append them to the ledger, and prune deleted sources in
-/// one transaction. On failure it rolls back, so an uncached file is re-parsed and
-/// re-appended next run.
+/// [`load_with_cache`] variant returning per-file entry vectors 1:1 with `files`
+/// (pi's replay suppression matches parent/child sessions across files).
+///
+/// This does NOT touch the ledger: the caller suppresses first and passes only
+/// the surviving live set to [`retain_via_ledger`], or suppressed duplicates
+/// would be re-emitted as deleted spend on the next run.
+pub fn load_with_cache_grouped<F, R>(
+    namespace: &str,
+    files: &[PathBuf],
+    opts: CacheOpts,
+    freshness: Freshness,
+    parse_file: F,
+    reprice: R,
+) -> crate::Result<Vec<Vec<LoadedEntry>>>
+where
+    F: Fn(&Path) -> crate::Result<Vec<LoadedEntry>> + Sync,
+    R: Fn(&mut LoadedEntry) + Sync,
+{
+    if files.is_empty() {
+        if let Some(conn) = open_db()
+            && conn.execute("BEGIN IMMEDIATE").is_ok()
+        {
+            let ok = prune_deleted(&conn, namespace, files).is_some();
+            let _ = conn.execute(if ok { "COMMIT" } else { "ROLLBACK" });
+        }
+        return Ok(Vec::new());
+    }
+    clear_known_empty(namespace);
+    let conn = open_db();
+    let stored = conn
+        .as_ref()
+        .map(|conn| load_namespace_files(conn, namespace))
+        .unwrap_or_default();
+    let partition = partition_files(files, &stored, &freshness, opts.single_thread);
+    let fresh_paths: Vec<PathBuf> = partition
+        .fresh
+        .iter()
+        .map(|(_, fresh)| fresh.path.clone())
+        .collect();
+    let mut parsed = parse_fresh_files(&fresh_paths, opts.single_thread, &parse_file)?;
+    for entry in parsed.iter_mut().flatten() {
+        reprice(entry);
+    }
+    if let Some(conn) = conn.as_ref() {
+        write_back(conn, namespace, &partition.fresh, &parsed, files, false);
+    }
+    let mut groups: Vec<Vec<LoadedEntry>> = vec![Vec::new(); files.len()];
+    for ((index, _), entries) in partition.fresh.iter().zip(parsed) {
+        groups[*index] = entries;
+    }
+    for (index, mut cached) in partition.cached {
+        for entry in &mut cached.entries {
+            reprice(entry);
+        }
+        groups[index] = cached.entries;
+    }
+    Ok(groups)
+}
+
+/// Upsert fresh entries, optionally append them to the ledger, and prune
+/// deleted sources in one transaction (rolls back, so failures re-parse next run).
+///
+/// `append_ledger` is false when the caller suppresses cross-file duplicates
+/// after loading: only the surviving live set may reach the ledger.
 fn write_back(
     conn: &sqlite::Connection,
     namespace: &str,
-    fresh: &[FreshFile],
+    fresh: &[(usize, FreshFile)],
     parsed: &[Vec<LoadedEntry>],
     files: &[PathBuf],
+    append_ledger: bool,
 ) {
     if conn.execute("BEGIN IMMEDIATE").is_err() {
         return;
     }
     let committed = (|| -> Option<()> {
-        for (fresh, entries) in fresh.iter().zip(parsed.iter()) {
+        for ((_, fresh), entries) in fresh.iter().zip(parsed.iter()) {
             // Cache against the pre-parse fingerprint so a concurrent append is
             // re-parsed next run instead of being silently trusted as cached. A
             // file that vanished mid-run has no metadata and is left uncached.
             if let Some(meta) = &fresh.metadata {
                 upsert_file(conn, namespace, &fresh.path, meta, entries)?;
             }
-            append_entries_to_ledger(conn, namespace, entries)?;
+            if append_ledger {
+                append_entries_to_ledger(conn, namespace, entries)?;
+            }
         }
         prune_deleted(conn, namespace, files)?;
         Some(())
@@ -1322,8 +1491,36 @@ fn merge_ledger(
     live_only: bool,
     date_filter: Option<(&str, &str)>,
 ) -> Vec<LoadedEntry> {
-    let mut seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
-    seen.extend(live.iter().map(entry_ledger_key));
+    merge_ledger_with(conn, namespace, live, live_only, date_filter, None)
+}
+
+/// [`merge_ledger`] with optionally precomputed key sets. `Some` sets must be the
+/// full unwindowed scan; `None` behaves exactly like [`merge_ledger`].
+fn merge_ledger_with(
+    conn: &sqlite::Connection,
+    namespace: &str,
+    live: Vec<LoadedEntry>,
+    live_only: bool,
+    date_filter: Option<(&str, &str)>,
+    precomputed: Option<(FxHashSet<String>, Vec<String>)>,
+) -> Vec<LoadedEntry> {
+    // Blobs load under raw keys, so normalization stays at comparison time.
+    let mut seen: FxHashSet<String>;
+    let owned_raw: Vec<String>;
+    let stored_raw: &[String];
+    match precomputed {
+        Some((live_keys, raw)) => {
+            seen = live_keys;
+            owned_raw = raw;
+            stored_raw = &owned_raw;
+        }
+        None => {
+            seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
+            seen.extend(live.iter().map(entry_ledger_key));
+            owned_raw = Vec::new();
+            stored_raw = &owned_raw;
+        }
+    }
     let mut out = live;
 
     if !live_only {
@@ -1358,9 +1555,19 @@ fn merge_ledger(
         // is skipped — so a warm run with no deletions decodes no ledger blobs.
         // Windowed: SQL already filtered by date (plus NULL), but NULL rows need
         // Rust-side date check via the blob so legacy rows don't leak outside the window.
-        let deleted_keys: Vec<String> = load_ledger_keys(conn, namespace, date_filter)
-            .into_iter()
+        // A windowed filter always re-scans so date/NULL semantics stay in SQL.
+        let scanned;
+        let stored_keys: &[String] =
+            if date_filter.is_none() && !stored_raw.is_empty() {
+                stored_raw
+            } else {
+                scanned = load_ledger_keys(conn, namespace, date_filter);
+                &scanned
+            };
+        let deleted_keys: Vec<String> = stored_keys
+            .iter()
             .filter(|k| !seen.contains(normalize_ledger_key(k).as_ref()))
+            .cloned()
             .collect();
         for key in deleted_keys {
             if let Some(blob) = load_ledger_blob(conn, namespace, &key)
@@ -1403,18 +1610,27 @@ fn append_entries_to_ledger(
              VALUES (?, ?, ?, ?)",
         )
         .ok()?;
-    for e in entries {
-        let key = entry_ledger_key(e);
-        // The dedup key is the row's primary-key column, so the blob omits every
-        // dedup-identity field; the id is restored from the column on read.
-        let blob = postcard::to_allocvec(&LedgerEntry::from(e)).ok()?;
-        st.reset().ok()?;
-        st.bind((1, namespace)).ok()?;
-        st.bind((2, key.as_str())).ok()?;
-        st.bind((3, e.date.as_str())).ok()?;
-        st.bind((4, &blob[..])).ok()?;
-        st.next().ok()?;
+    for entry in entries {
+        append_ledger_row(&mut st, namespace, entry)?;
     }
+    Some(())
+}
+
+fn append_ledger_row(
+    st: &mut sqlite::Statement<'_>,
+    namespace: &str,
+    entry: &LoadedEntry,
+) -> Option<()> {
+    let key = entry_ledger_key(entry);
+    // The dedup key is the row's primary-key column, so the blob omits every
+    // dedup-identity field; the id is restored from the column on read.
+    let blob = postcard::to_allocvec(&LedgerEntry::from(entry)).ok()?;
+    st.reset().ok()?;
+    st.bind((1, namespace)).ok()?;
+    st.bind((2, key.as_str())).ok()?;
+    st.bind((3, entry.date.as_str())).ok()?;
+    st.bind((4, &blob[..])).ok()?;
+    st.next().ok()?;
     Some(())
 }
 
@@ -1488,15 +1704,91 @@ pub fn retain_via_ledger(
 ) -> Vec<LoadedEntry> {
     match open_db() {
         Some(conn) => {
-            // No per-file cache here, so append the full live set in its own transaction.
-            if !live.is_empty() && conn.execute("BEGIN IMMEDIATE").is_ok() {
-                let ok = append_entries_to_ledger(&conn, namespace, &live).is_some();
+            let cover_started =
+                std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+            let sets = load_ledger_key_sets(&conn, namespace);
+            let mut seen =
+                FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
+            let mut missing = Vec::new();
+            for (index, entry) in live.iter().enumerate() {
+                let key = entry_ledger_key(entry);
+                if !sets.stored_normalized.contains(&key) {
+                    missing.push(index);
+                }
+                seen.insert(key);
+            }
+            if let Some(cover_started) = cover_started {
+                eprintln!(
+                    "[timing] ledger:{namespace}: cover_check {:?} missing={}",
+                    cover_started.elapsed(),
+                    missing.len()
+                );
+            }
+            let append_started =
+                std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+            if !missing.is_empty() && conn.execute("BEGIN IMMEDIATE").is_ok() {
+                // No per-file cache here, so append in our own transaction.
+                let ok = append_missing_ledger_entries(&conn, namespace, &live, &missing)
+                    .is_some();
                 let _ = conn.execute(if ok { "COMMIT" } else { "ROLLBACK" });
             }
-            merge_ledger(&conn, namespace, live, live_only, date_filter)
+            if let Some(append_started) = append_started {
+                eprintln!(
+                    "[timing] ledger:{namespace}: append {:?} appended={}",
+                    append_started.elapsed(),
+                    !missing.is_empty()
+                );
+            }
+            merge_ledger_with(
+                &conn,
+                namespace,
+                live,
+                live_only,
+                date_filter,
+                Some((seen, sets.stored_raw)),
+            )
         }
         None => live,
     }
+}
+
+/// Ledger keys for one namespace, scanned once per retain and shared by the
+/// append filter and the merge below.
+struct LedgerKeySets {
+    stored_raw: Vec<String>,
+    stored_normalized: FxHashSet<String>,
+}
+
+/// Scan the unwindowed stored keys once; a windowed subset cannot prove coverage
+/// because the append covers all dates. Failures surface as empty sets (fail-open).
+fn load_ledger_key_sets(conn: &sqlite::Connection, namespace: &str) -> LedgerKeySets {
+    let stored_raw = load_ledger_keys(conn, namespace, None);
+    let mut stored_normalized =
+        FxHashSet::with_capacity_and_hasher(stored_raw.len(), Default::default());
+    stored_normalized
+        .extend(stored_raw.iter().map(|key| normalize_ledger_key(key).into_owned()));
+    LedgerKeySets {
+        stored_raw,
+        stored_normalized,
+    }
+}
+
+fn append_missing_ledger_entries(
+    conn: &sqlite::Connection,
+    namespace: &str,
+    live: &[LoadedEntry],
+    missing: &[usize],
+) -> Option<()> {
+    let mut st = conn
+        .prepare(
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .ok()?;
+    for &index in missing {
+        append_ledger_row(&mut st, namespace, &live[index])?;
+    }
+    Some(())
 }
 
 /// Parse each fresh path with `parse_file`, returning results aligned 1:1 with
@@ -1725,7 +2017,7 @@ pub(crate) mod tests {
         );
         assert_eq!(part.cached.len(), 1);
         assert!(part.fresh.is_empty());
-        assert_eq!(part.cached[0].entries[0].session_id.as_ref(), "session-a");
+        assert_eq!(part.cached[0].1.entries[0].session_id.as_ref(), "session-a");
         let _ = fs::remove_file(&src);
     }
 
@@ -1747,7 +2039,7 @@ pub(crate) mod tests {
         );
         assert!(part.cached.is_empty());
         assert_eq!(part.fresh.len(), 1);
-        assert_eq!(part.fresh[0].path, src);
+        assert_eq!(part.fresh[0].1.path, src);
         let _ = fs::remove_file(&src);
     }
 
@@ -1863,7 +2155,7 @@ pub(crate) mod tests {
 
         assert_eq!(part.cached.len(), 1);
         assert_eq!(part.fresh.len(), 1);
-        assert_eq!(part.fresh[0].path, fresh_src);
+        assert_eq!(part.fresh[0].1.path, fresh_src);
 
         let _ = fs::remove_file(&cached_src);
         let _ = fs::remove_file(&fresh_src);
@@ -1977,6 +2269,28 @@ pub(crate) mod tests {
         assert!(
             (warm[0].cost - 0.05).abs() < 1e-9,
             "cost must be preserved through synthetic-key ledger round-trip"
+        );
+    }
+
+    #[test]
+    fn covered_retain_skips_append_without_losing_ledger() {
+        let _env = CacheEnv::new("covered-skip");
+        let live = vec![sample_entry()];
+        let first = retain_via_ledger("test-ns-covered", live.clone(), false, None);
+        assert_eq!(first.len(), 1);
+        let sets = load_ledger_key_sets(
+            &open_db().expect("cache db must open"),
+            "test-ns-covered",
+        );
+        assert_eq!(sets.stored_raw.len(), 1);
+        let second = retain_via_ledger("test-ns-covered", live, false, None);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].session_id.as_ref(), "session-a");
+        let reemitted = retain_via_ledger("test-ns-covered", Vec::new(), false, None);
+        assert_eq!(
+            reemitted.len(),
+            1,
+            "skipped append must not lose the ledgered entry"
         );
     }
 
