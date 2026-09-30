@@ -16979,6 +16979,16 @@
 			"context": 262144
 		}
 	},
+	"inclusionai/ling-3.1-flash": {
+		"cost": {
+			"cache_read": 0.015,
+			"input": 0.075,
+			"output": 0.22
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"inclusionai/ring-1t": {
 		"cost": {
 			"cache_read": 0.11,
