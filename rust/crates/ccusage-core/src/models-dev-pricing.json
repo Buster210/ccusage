@@ -10263,8 +10263,8 @@
 	},
 	"deepseek/deepseek-v3": {
 		"cost": {
-			"input": 0.58,
-			"output": 1.68
+			"input": 0.27,
+			"output": 1.1
 		},
 		"limit": {
 			"context": 163840
@@ -33052,9 +33052,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.4,
-			"input": 0.1941,
-			"output": 7.3625
+			"cache_read": 0.18,
+			"input": 0.19,
+			"output": 11
 		},
 		"exactOnly": true,
 		"limit": {
