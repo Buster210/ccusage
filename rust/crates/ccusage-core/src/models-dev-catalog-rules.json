@@ -503,7 +503,7 @@
 		"gpt-5-6-sol": ["fast", "pro"],
 		"gpt-5-6-terra": ["fast", "pro"],
 		"gpt-6-1-sol": ["fast", "pro"],
-		"gpt-6-astra": ["fast", "pro"],
+		"gpt-6-astra": ["fast", "pro", "ultrafast"],
 		"gpt-6-luna": ["fast", "pro"],
 		"gpt-6-sol": ["fast", "pro"]
 	},
