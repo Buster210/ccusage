@@ -9019,16 +9019,6 @@
 			"context": 262144
 		}
 	},
-	"deepinfra/glm-5.1": {
-		"cost": {
-			"cache_read": 0.205,
-			"input": 1.05,
-			"output": 3.5
-		},
-		"limit": {
-			"context": 198000
-		}
-	},
 	"deepinfra/google/gemma-3-12b-it": {
 		"cost": {
 			"input": 0.05,
@@ -9274,16 +9264,6 @@
 			"cache_read": 0.2,
 			"input": 2,
 			"output": 6
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
-	"deepinfra/step-3.7-flash": {
-		"cost": {
-			"cache_read": 0.04,
-			"input": 0.2,
-			"output": 1.15
 		},
 		"limit": {
 			"context": 262144
@@ -32975,9 +32955,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.00291,
-			"input": 0.0198,
-			"output": 0.396
+			"cache_read": 0.0177,
+			"input": 0.0177,
+			"output": 0.6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -32998,7 +32978,7 @@
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
 			"cache_read": 0.001386,
-			"input": 0.0099,
+			"input": 0.007821,
 			"output": 0.13068
 		},
 		"limit": {
@@ -33193,8 +33173,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.13,
-			"input": 0.13,
+			"cache_read": 0.1463,
+			"input": 0.1463,
 			"output": 4
 		},
 		"exactOnly": true,
