@@ -13803,6 +13803,29 @@
 			"context": 1050000
 		}
 	},
+	"global.openai.gpt-6.1-sol": {
+		"cost": {
+			"cache_read": 0.1,
+			"cache_write": 2.5,
+			"input": 2,
+			"output": 10,
+			"tiers": [
+				{
+					"cache_read": 0.2,
+					"cache_write": 5,
+					"input": 4,
+					"output": 15,
+					"tier": {
+						"size": 272000,
+						"type": "context"
+					}
+				}
+			]
+		},
+		"limit": {
+			"context": 1050000
+		}
+	},
 	"global.xai.grok-4.6": {
 		"cost": {
 			"cache_read": 0.5,
@@ -32955,9 +32978,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0177,
-			"input": 0.0177,
-			"output": 0.6
+			"cache_read": 0.00291,
+			"input": 0.015543,
+			"output": 0.396
 		},
 		"exactOnly": true,
 		"limit": {
@@ -32966,8 +32989,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.123,
-			"input": 0.123,
+			"cache_read": 0.15,
+			"input": 0.15,
 			"output": 3.5
 		},
 		"exactOnly": true,
@@ -32978,7 +33001,7 @@
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
 			"cache_read": 0.001386,
-			"input": 0.007821,
+			"input": 0.007326,
 			"output": 0.13068
 		},
 		"limit": {
@@ -33173,8 +33196,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.1463,
-			"input": 0.1463,
+			"cache_read": 0.19,
+			"input": 0.19,
 			"output": 4
 		},
 		"exactOnly": true,
