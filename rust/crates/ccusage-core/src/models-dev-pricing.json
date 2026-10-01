@@ -10112,7 +10112,7 @@
 			"output": 1.14
 		},
 		"limit": {
-			"context": 163840
+			"context": 128000
 		}
 	},
 	"deepseek/deepseek-chat-v3.1": {
