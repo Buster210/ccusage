@@ -9112,7 +9112,7 @@
 			"output": 0.32
 		},
 		"limit": {
-			"context": 131072
+			"context": 65536
 		}
 	},
 	"deepinfra/meta-llama/Llama-Guard-3-8B": {
@@ -32998,8 +32998,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.2888,
-			"input": 0.2888,
+			"cache_read": 0.2909,
+			"input": 0.2909,
 			"output": 3.5
 		},
 		"exactOnly": true,
@@ -33054,8 +33054,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.48,
-			"input": 0.48,
+			"cache_read": 0.58,
+			"input": 0.58,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33205,8 +33205,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.19,
-			"input": 0.19,
+			"cache_read": 0.133,
+			"input": 0.133,
 			"output": 4
 		},
 		"exactOnly": true,
