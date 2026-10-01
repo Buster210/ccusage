@@ -15386,14 +15386,14 @@
 	},
 	"gpt-5.4@eu": {
 		"cost": {
-			"cache_read": 0.25,
-			"input": 2.5,
-			"output": 15,
+			"cache_read": 0.275,
+			"input": 2.75,
+			"output": 16.5,
 			"tiers": [
 				{
-					"cache_read": 0.5,
-					"input": 5,
-					"output": 22.5,
+					"cache_read": 0.55,
+					"input": 5.5,
+					"output": 24.75,
 					"tier": {
 						"size": 272000,
 						"type": "context"
@@ -15450,14 +15450,14 @@
 	},
 	"gpt-5.5@eu": {
 		"cost": {
-			"cache_read": 0.5,
-			"input": 5,
-			"output": 30,
+			"cache_read": 0.55,
+			"input": 5.5,
+			"output": 33,
 			"tiers": [
 				{
-					"cache_read": 1,
-					"input": 10,
-					"output": 45,
+					"cache_read": 1.1,
+					"input": 11,
+					"output": 49.5,
 					"tier": {
 						"size": 272000,
 						"type": "context"
@@ -15531,8 +15531,21 @@
 	"gpt-5.6-luna@eu": {
 		"cost": {
 			"cache_read": 0.022,
+			"cache_write": 0.275,
 			"input": 0.22,
-			"output": 1.32
+			"output": 1.32,
+			"tiers": [
+				{
+					"cache_read": 0.044,
+					"cache_write": 0.55,
+					"input": 0.44,
+					"output": 1.98,
+					"tier": {
+						"size": 272000,
+						"type": "context"
+					}
+				}
+			]
 		},
 		"exactOnly": true,
 		"limit": {
@@ -15576,8 +15589,21 @@
 	"gpt-5.6-sol@eu": {
 		"cost": {
 			"cache_read": 0.44,
+			"cache_write": 5.5,
 			"input": 4.4,
-			"output": 22
+			"output": 22,
+			"tiers": [
+				{
+					"cache_read": 0.88,
+					"cache_write": 11,
+					"input": 8.8,
+					"output": 33,
+					"tier": {
+						"size": 272000,
+						"type": "context"
+					}
+				}
+			]
 		},
 		"exactOnly": true,
 		"limit": {
@@ -15621,8 +15647,21 @@
 	"gpt-5.6-terra@eu": {
 		"cost": {
 			"cache_read": 0.22,
+			"cache_write": 2.75,
 			"input": 2.2,
-			"output": 13.2
+			"output": 13.2,
+			"tiers": [
+				{
+					"cache_read": 0.44,
+					"cache_write": 5.5,
+					"input": 4.4,
+					"output": 19.8,
+					"tier": {
+						"size": 272000,
+						"type": "context"
+					}
+				}
+			]
 		},
 		"exactOnly": true,
 		"limit": {
@@ -15689,11 +15728,13 @@
 	"gpt-6-luna@eu": {
 		"cost": {
 			"cache_read": 0.012,
+			"cache_write": 0.15,
 			"input": 0.12,
 			"output": 0.6,
 			"tiers": [
 				{
 					"cache_read": 0.024,
+					"cache_write": 0.3,
 					"input": 0.24,
 					"output": 0.9,
 					"tier": {
@@ -15734,11 +15775,13 @@
 	"gpt-6-sol@eu": {
 		"cost": {
 			"cache_read": 0.24,
+			"cache_write": 3,
 			"input": 2.4,
 			"output": 12,
 			"tiers": [
 				{
 					"cache_read": 0.48,
+					"cache_write": 6,
 					"input": 4.8,
 					"output": 18,
 					"tier": {
@@ -15779,11 +15822,13 @@
 	"gpt-6.1-sol@eu": {
 		"cost": {
 			"cache_read": 0.12,
+			"cache_write": 3,
 			"input": 2.4,
 			"output": 12,
 			"tiers": [
 				{
 					"cache_read": 0.24,
+					"cache_write": 6,
 					"input": 4.8,
 					"output": 18,
 					"tier": {
@@ -32987,9 +33032,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.00756,
-			"input": 0.2376,
-			"output": 0.7128
+			"cache_read": 0.2276,
+			"input": 0.2276,
+			"output": 3.5
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33043,8 +33088,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.677,
-			"input": 0.677,
+			"cache_read": 0.6913,
+			"input": 0.6913,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33194,9 +33239,9 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.1566,
-			"input": 0.1566,
-			"output": 4
+			"cache_read": 0.186,
+			"input": 0.143,
+			"output": 2.694
 		},
 		"exactOnly": true,
 		"limit": {
