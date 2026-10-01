@@ -3769,17 +3769,6 @@
 			"context": 200000
 		}
 	},
-	"anthropic-claude-4.5-haiku": {
-		"cost": {
-			"cache_read": 1,
-			"cache_write": 1.25,
-			"input": 1,
-			"output": 5
-		},
-		"limit": {
-			"context": 200000
-		}
-	},
 	"anthropic-claude-4.5-sonnet": {
 		"cost": {
 			"cache_read": 0.3,
@@ -32987,9 +32976,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.002851,
-			"input": 0.015543,
-			"output": 0.396
+			"cache_read": 0.027,
+			"input": 0.027,
+			"output": 0.6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -32998,9 +32987,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.2909,
-			"input": 0.2909,
-			"output": 3.5
+			"cache_read": 0.007644,
+			"input": 0.24024,
+			"output": 0.72072
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33009,9 +32998,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.001386,
-			"input": 0.004455,
-			"output": 0.13068
+			"cache_read": 0.0108,
+			"input": 0.0108,
+			"output": 1.28
 		},
 		"limit": {
 			"context": 1048576
@@ -33054,8 +33043,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.58,
-			"input": 0.58,
+			"cache_read": 0.7034,
+			"input": 0.7034,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33196,7 +33185,7 @@
 		"cost": {
 			"cache_read": 0.01,
 			"input": 0.02,
-			"output": 0.2475
+			"output": 0.3
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33205,8 +33194,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.133,
-			"input": 0.133,
+			"cache_read": 0.179,
+			"input": 0.179,
 			"output": 4
 		},
 		"exactOnly": true,
