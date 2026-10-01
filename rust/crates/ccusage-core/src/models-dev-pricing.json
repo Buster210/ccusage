@@ -8320,7 +8320,7 @@
 			"output": 0.35
 		},
 		"limit": {
-			"context": 32768
+			"context": 262000
 		}
 	},
 	"consensusprotocol/deepseek-v4-flash": {
@@ -8370,7 +8370,7 @@
 			"output": 0.19
 		},
 		"limit": {
-			"context": 65536
+			"context": 128000
 		}
 	},
 	"cortecs/Llama-3.3-70B-Instruct-FP8-Dynamic": {
@@ -33062,8 +33062,8 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0255,
-			"input": 0.0255,
+			"cache_read": 0.0259,
+			"input": 0.0259,
 			"output": 0.6
 		},
 		"exactOnly": true,
