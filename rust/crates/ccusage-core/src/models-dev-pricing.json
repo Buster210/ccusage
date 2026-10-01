@@ -2033,6 +2033,16 @@
 			"context": 1000000
 		}
 	},
+	"abliteration-abliterated-model-large-v2": {
+		"cost": {
+			"cache_read": 0.3,
+			"input": 3,
+			"output": 5
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
 	"abliteration-ai/abliterated-model": {
 		"cost": {
 			"cache_read": 0.1,
@@ -2067,9 +2077,9 @@
 	},
 	"accounts/fireworks/models/deepseek-v4p1-flash": {
 		"cost": {
-			"cache_read": 0.007,
-			"input": 0.22,
-			"output": 0.66
+			"cache_read": 0.006,
+			"input": 0.3,
+			"output": 1.2
 		},
 		"limit": {
 			"context": 1000000
@@ -2188,9 +2198,9 @@
 	},
 	"accounts/fireworks/routers/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.007,
-			"input": 0.22,
-			"output": 0.66
+			"cache_read": 0.006,
+			"input": 0.3,
+			"output": 1.2
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33129,8 +33139,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.365,
-			"input": 0.365,
+			"cache_read": 0.415,
+			"input": 0.415,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33281,8 +33291,8 @@
 	"~z-ai/glm-latest": {
 		"cost": {
 			"cache_read": 0.176,
-			"input": 0.119,
-			"output": 2.694
+			"input": 0.106,
+			"output": 2.653
 		},
 		"exactOnly": true,
 		"limit": {
