@@ -1810,15 +1810,6 @@
 			"context": 262144
 		}
 	},
-	"TEE/qwen3.8-27b-uncensored": {
-		"cost": {
-			"input": 0.3,
-			"output": 1.5
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
 	"THUDM/GLM-4-32B-0414": {
 		"cost": {
 			"cache_read": 0.1,
@@ -17139,8 +17130,8 @@
 	},
 	"infomaniak/mistralai/Ministral-3-14B-Instruct-2512": {
 		"cost": {
-			"input": 0.34065,
-			"output": 0.4542
+			"input": 0.33894,
+			"output": 0.45192
 		},
 		"limit": {
 			"context": 100000
@@ -17198,8 +17189,8 @@
 	},
 	"ionos/meta-llama/Llama-3.3-70B-Instruct": {
 		"cost": {
-			"input": 0.738075,
-			"output": 0.738075
+			"input": 0.73437,
+			"output": 0.73437
 		},
 		"limit": {
 			"context": 128000
@@ -17207,8 +17198,8 @@
 	},
 	"ionos/openai/gpt-oss-120b": {
 		"cost": {
-			"input": 0.170325,
-			"output": 0.738075
+			"input": 0.16947,
+			"output": 0.73437
 		},
 		"limit": {
 			"context": 131072
@@ -27693,9 +27684,9 @@
 	},
 	"scaleway/deepseek-v4-flash-0731": {
 		"cost": {
-			"cache_read": 0.09084,
-			"input": 0.4542,
-			"output": 0.9084
+			"cache_read": 0.090384,
+			"input": 0.45192,
+			"output": 0.90384
 		},
 		"limit": {
 			"context": 256000
@@ -27712,8 +27703,8 @@
 	},
 	"scaleway/gpt-oss-120b": {
 		"cost": {
-			"input": 0.170325,
-			"output": 0.6813
+			"input": 0.16947,
+			"output": 0.67788
 		},
 		"limit": {
 			"context": 128000
@@ -27721,8 +27712,8 @@
 	},
 	"scaleway/llama-3.3-70b-instruct": {
 		"cost": {
-			"input": 1.02195,
-			"output": 1.02195
+			"input": 1.01682,
+			"output": 1.01682
 		},
 		"limit": {
 			"context": 128000
@@ -28740,6 +28731,16 @@
 			"cache_read": 0.00363,
 			"input": 0.435,
 			"output": 0.87
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
+	"tencent/deepseek-v4-pro-0813": {
+		"cost": {
+			"cache_read": 0.022,
+			"input": 0.66,
+			"output": 1.98
 		},
 		"limit": {
 			"context": 1000000
@@ -33041,8 +33042,8 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0243,
-			"input": 0.0243,
+			"cache_read": 0.025,
+			"input": 0.025,
 			"output": 0.6
 		},
 		"exactOnly": true,
@@ -33052,9 +33053,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.00588,
-			"input": 0.1848,
-			"output": 0.5544
+			"cache_read": 0.005544,
+			"input": 0.17424,
+			"output": 0.52272
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33108,8 +33109,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.66,
-			"input": 0.66,
+			"cache_read": 0.6572,
+			"input": 0.6572,
 			"output": 10
 		},
 		"exactOnly": true,
