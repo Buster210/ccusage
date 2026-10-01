@@ -8312,6 +8312,16 @@
 			"context": 32768
 		}
 	},
+	"consensusprotocol/deepseek-v4-flash": {
+		"cost": {
+			"cache_read": 0.005,
+			"input": 0.1,
+			"output": 0.2
+		},
+		"limit": {
+			"context": 524288
+		}
+	},
 	"consensusprotocol/deepseek-v4.1-flash": {
 		"cost": {
 			"cache_read": 0.005,
@@ -29426,6 +29436,16 @@
 			"context": 262144
 		}
 	},
+	"unbiased/pareto-26.10-preview": {
+		"cost": {
+			"cache_read": 0.03,
+			"input": 0.8,
+			"output": 3.2
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"undi95/remm-slerp-l2-13b": {
 		"cost": {
 			"cache_read": 0.3995,
@@ -33032,9 +33052,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.1853,
-			"input": 0.1853,
-			"output": 3.5
+			"cache_read": 0.00588,
+			"input": 0.1848,
+			"output": 0.5544
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33088,8 +33108,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.6685,
-			"input": 0.6685,
+			"cache_read": 0.66,
+			"input": 0.66,
 			"output": 10
 		},
 		"exactOnly": true,
