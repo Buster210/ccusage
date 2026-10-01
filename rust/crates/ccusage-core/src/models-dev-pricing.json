@@ -17768,6 +17768,15 @@
 			"context": 131072
 		}
 	},
+	"liquid/d1": {
+		"cost": {
+			"input": 0.04,
+			"output": 0
+		},
+		"limit": {
+			"context": 65536
+		}
+	},
 	"liquid/lfm-2.5-2.6b": {
 		"cost": {
 			"cache_read": 0.05,
@@ -32989,8 +32998,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.3317,
-			"input": 0.3317,
+			"cache_read": 0.2888,
+			"input": 0.2888,
 			"output": 3.5
 		},
 		"exactOnly": true,
@@ -33000,9 +33009,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0045,
-			"input": 0.0045,
-			"output": 1.28
+			"cache_read": 0.001386,
+			"input": 0.004455,
+			"output": 0.13068
 		},
 		"limit": {
 			"context": 1048576
@@ -33045,8 +33054,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.28,
-			"input": 0.28,
+			"cache_read": 0.48,
+			"input": 0.48,
 			"output": 10
 		},
 		"exactOnly": true,
