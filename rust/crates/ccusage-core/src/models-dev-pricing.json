@@ -8,6 +8,26 @@
 			"context": 128000
 		}
 	},
+	"@cf/cloudflare/clef": {
+		"cost": {
+			"input": 0.24,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
+	"@cf/cloudflare/clef-flash": {
+		"cost": {
+			"input": 0.09,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
 	"@cf/deepseek-ai/deepseek-r1-distill-qwen-32b": {
 		"cost": {
 			"input": 0.497,
@@ -33053,9 +33073,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.005544,
-			"input": 0.17424,
-			"output": 0.52272
+			"cache_read": 0.1642,
+			"input": 0.1642,
+			"output": 3.5
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33109,8 +33129,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.6572,
-			"input": 0.6572,
+			"cache_read": 0.6635,
+			"input": 0.6635,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33260,13 +33280,13 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.176,
-			"input": 0.06,
-			"output": 2.694
+			"cache_read": 0.067,
+			"input": 0.12,
+			"output": 1.14
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 1048576
+			"context": 262144
 		}
 	}
 }
