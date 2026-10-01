@@ -33062,8 +33062,8 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.025,
-			"input": 0.025,
+			"cache_read": 0.0255,
+			"input": 0.0255,
 			"output": 0.6
 		},
 		"exactOnly": true,
@@ -33073,8 +33073,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.1642,
-			"input": 0.1642,
+			"cache_read": 0.1536,
+			"input": 0.1536,
 			"output": 3.5
 		},
 		"exactOnly": true,
