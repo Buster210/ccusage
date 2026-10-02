@@ -17817,6 +17817,7 @@
 	},
 	"liquid/d1": {
 		"cost": {
+			"cache_read": 0.04,
 			"input": 0.04,
 			"output": 0
 		},
@@ -33036,9 +33037,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.008,
-			"input": 0.015,
-			"output": 0.3
+			"cache_read": 0.002115,
+			"input": 0.010125,
+			"output": 1.2
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33058,9 +33059,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0077,
-			"input": 0.0077,
-			"output": 1.28
+			"cache_read": 0.003825,
+			"input": 0.003825,
+			"output": 1.6
 		},
 		"limit": {
 			"context": 1048576
