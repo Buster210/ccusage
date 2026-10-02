@@ -8894,15 +8894,6 @@
 			"context": 128000
 		}
 	},
-	"deepcogito/cogito-v2-1-671b": {
-		"cost": {
-			"input": 1.25,
-			"output": 1.25
-		},
-		"limit": {
-			"context": 163840
-		}
-	},
 	"deepinfra/ByteDance/Seed-2.0-code": {
 		"cost": {
 			"cache_read": 0.1,
@@ -14760,15 +14751,6 @@
 			"context": 32768
 		}
 	},
-	"google/gemma-3n-E4B-it": {
-		"cost": {
-			"input": 0.06,
-			"output": 0.12
-		},
-		"limit": {
-			"context": 32768
-		}
-	},
 	"google/gemma-4-12B-it": {
 		"cost": {
 			"cache_read": 0.25,
@@ -18462,15 +18444,6 @@
 		},
 		"limit": {
 			"context": 327680
-		}
-	},
-	"meta-llama/Meta-Llama-3-8B-Instruct-Lite": {
-		"cost": {
-			"input": 0.14,
-			"output": 0.14
-		},
-		"limit": {
-			"context": 8192
 		}
 	},
 	"meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": {
@@ -24654,15 +24627,6 @@
 		},
 		"limit": {
 			"context": 32768
-		}
-	},
-	"pearl-ai/gemma-4-31b-it": {
-		"cost": {
-			"input": 0.28,
-			"output": 0.86
-		},
-		"limit": {
-			"context": 32000
 		}
 	},
 	"perceptron/perceptron-mk1": {
@@ -33072,8 +33036,8 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0264,
-			"input": 0.0264,
+			"cache_read": 0.027,
+			"input": 0.027,
 			"output": 0.6
 		},
 		"exactOnly": true,
@@ -33139,8 +33103,8 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.6824,
-			"input": 0.6824,
+			"cache_read": 0.3644,
+			"input": 0.3644,
 			"output": 10
 		},
 		"exactOnly": true,
@@ -33290,13 +33254,13 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.067,
-			"input": 0.12,
-			"output": 1.14
+			"cache_read": 0.176,
+			"input": 0.106,
+			"output": 2.653
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 262144
+			"context": 1048576
 		}
 	}
 }
