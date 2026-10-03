@@ -17850,15 +17850,6 @@
 			"context": 1048576
 		}
 	},
-	"kitani/clover-1-150b": {
-		"cost": {
-			"input": 0.15,
-			"output": 0.8
-		},
-		"limit": {
-			"context": 200000
-		}
-	},
 	"kuaishou/kat-coder-pro-v2": {
 		"cost": {
 			"cache_read": 0.06,
@@ -33246,7 +33237,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.79,
+			"input": 0.98,
 			"output": 13
 		},
 		"exactOnly": true,
