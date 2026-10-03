@@ -20732,17 +20732,6 @@
 			"context": 262144
 		}
 	},
-	"moonshotai/Kimi-K3": {
-		"cost": {
-			"cache_read": 0.3,
-			"cache_write": 3,
-			"input": 3,
-			"output": 15
-		},
-		"limit": {
-			"context": 1000000
-		}
-	},
 	"moonshotai/Kimi-K3-Fast": {
 		"cost": {
 			"cache_read": 0.45,
@@ -20893,6 +20882,17 @@
 		},
 		"limit": {
 			"context": 262144
+		}
+	},
+	"moonshotai/kimi-k3": {
+		"cost": {
+			"cache_read": 0.3,
+			"cache_write": 3.75,
+			"input": 3,
+			"output": 15
+		},
+		"limit": {
+			"context": 1048576
 		}
 	},
 	"moonshotai/kimi-latest": {
