@@ -11703,6 +11703,16 @@
 			"context": 1048576
 		}
 	},
+	"flexai/DeepSeek-V4.1-Flash": {
+		"cost": {
+			"cache_read": 0.021,
+			"input": 0.14,
+			"output": 0.42
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"flexai/gpt-oss-120b": {
 		"cost": {
 			"cache_read": 0.0045,
@@ -16066,6 +16076,16 @@
 			"output": 1.083
 		},
 		"exactOnly": true,
+		"limit": {
+			"context": 131072
+		}
+	},
+	"greenference/gpt-oss-20b": {
+		"cost": {
+			"cache_read": 0.0045,
+			"input": 0.009,
+			"output": 0.045
+		},
 		"limit": {
 			"context": 131072
 		}
@@ -29079,6 +29099,16 @@
 			"context": 1000000
 		}
 	},
+	"tencent/step-5-preview": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 1,
+			"output": 2.7
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
 	"tensorx/deepseek/deepseek-v4-flash-0731": {
 		"cost": {
 			"cache_read": 0.0625,
@@ -33148,9 +33178,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.005,
-			"input": 0.015,
-			"output": 0.676999
+			"cache_read": 0.01,
+			"input": 0.02,
+			"output": 0.6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33170,8 +33200,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0154,
-			"input": 0.0171,
+			"cache_read": 0.0125,
+			"input": 0.0139,
 			"output": 1.28
 		},
 		"limit": {
@@ -33216,7 +33246,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.615,
+			"input": 0.69,
 			"output": 13
 		},
 		"exactOnly": true,
@@ -33355,9 +33385,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.015,
-			"input": 0.02625,
-			"output": 0.928749
+			"cache_read": 0.035,
+			"input": 0.035,
+			"output": 0.5
 		},
 		"exactOnly": true,
 		"limit": {
