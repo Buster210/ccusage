@@ -59,6 +59,7 @@
 	},
 	"@cf/google/gemma-4-26b-a4b-it": {
 		"cost": {
+			"cache_read": 0.05,
 			"input": 0.1,
 			"output": 0.3
 		},
@@ -33169,9 +33170,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0115,
-			"input": 0.0115,
-			"output": 1.28
+			"cache_read": 0.00105,
+			"input": 0.003825,
+			"output": 1.043574
 		},
 		"limit": {
 			"context": 1048576
@@ -33214,9 +33215,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.29,
-			"input": 1,
-			"output": 11.357
+			"cache_read": 0.8,
+			"input": 0.99,
+			"output": 13
 		},
 		"exactOnly": true,
 		"limit": {
