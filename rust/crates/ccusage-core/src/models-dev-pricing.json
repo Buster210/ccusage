@@ -10191,7 +10191,7 @@
 			"output": 1.14
 		},
 		"limit": {
-			"context": 128000
+			"context": 163840
 		}
 	},
 	"deepseek/deepseek-chat-v3.1": {
@@ -33387,9 +33387,9 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.065,
-			"input": 0.075,
-			"output": 4.4
+			"cache_read": 0.054,
+			"input": 0.06,
+			"output": 8
 		},
 		"exactOnly": true,
 		"limit": {
