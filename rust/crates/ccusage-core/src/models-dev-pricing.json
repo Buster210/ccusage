@@ -18288,6 +18288,16 @@
 			"context": 250000
 		}
 	},
+	"luminal/deepseek-ai/DeepSeek-V4.1-Flash": {
+		"cost": {
+			"cache_read": 0.0027,
+			"input": 0.135,
+			"output": 0.54
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
 	"magibu-11b-v8": {
 		"cost": {
 			"input": 0.1,
@@ -33312,7 +33322,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.6483,
+			"input": 0.6566,
 			"output": 13
 		},
 		"exactOnly": true,
