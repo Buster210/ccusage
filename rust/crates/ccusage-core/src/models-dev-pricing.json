@@ -9111,7 +9111,7 @@
 	},
 	"deepinfra/gemma-4-31b-it": {
 		"cost": {
-			"input": 0.15,
+			"input": 0.2,
 			"output": 0.4
 		},
 		"limit": {
@@ -33288,7 +33288,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.6677,
+			"input": 0.6438,
 			"output": 13
 		},
 		"exactOnly": true,
