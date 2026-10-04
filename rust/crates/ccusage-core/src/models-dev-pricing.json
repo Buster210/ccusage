@@ -10561,6 +10561,16 @@
 			"context": 1000000
 		}
 	},
+	"deepseek/deepseek-v4.1-flash-fast": {
+		"cost": {
+			"cache_read": 0.006,
+			"input": 0.3,
+			"output": 1.2
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"deepseek/deepseek-v4.1-flash:thinking": {
 		"cost": {
 			"cache_read": 0.006,
@@ -11381,6 +11391,17 @@
 		}
 	},
 	"eu.anthropic.claude-sonnet-5": {
+		"cost": {
+			"cache_read": 0.22,
+			"cache_write": 2.75,
+			"input": 2.2,
+			"output": 11
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
+	"eu.anthropic.claude-sonnet-5-5": {
 		"cost": {
 			"cache_read": 0.22,
 			"cache_write": 2.75,
@@ -29532,6 +29553,16 @@
 			"context": 262144
 		}
 	},
+	"umans-glm-5.3": {
+		"cost": {
+			"cache_read": 0.26,
+			"input": 1.4,
+			"output": 4.4
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"umans-glm-5.3-flash": {
 		"cost": {
 			"cache_read": 0.03,
@@ -29918,6 +29949,17 @@
 		}
 	},
 	"us.anthropic.claude-sonnet-5": {
+		"cost": {
+			"cache_read": 0.22,
+			"cache_write": 2.75,
+			"input": 2.2,
+			"output": 11
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
+	"us.anthropic.claude-sonnet-5-5": {
 		"cost": {
 			"cache_read": 0.22,
 			"cache_write": 2.75,
@@ -33179,8 +33221,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.16,
-			"input": 0.176,
+			"cache_read": 0.12,
+			"input": 0.136,
 			"output": 4.2
 		},
 		"exactOnly": true,
@@ -33236,7 +33278,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.3992,
+			"input": 0.576,
 			"output": 13
 		},
 		"exactOnly": true,
@@ -33375,8 +33417,8 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0234,
-			"input": 0.026,
+			"cache_read": 0.0317,
+			"input": 0.0352,
 			"output": 0.5
 		},
 		"exactOnly": true,
@@ -33386,8 +33428,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0528,
-			"input": 0.08,
+			"cache_read": 0.04,
+			"input": 0.05,
 			"output": 4.4
 		},
 		"exactOnly": true,
