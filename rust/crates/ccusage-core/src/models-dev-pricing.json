@@ -11733,6 +11733,16 @@
 			"context": 1048576
 		}
 	},
+	"flexai/Step-3.7-Flash": {
+		"cost": {
+			"cache_read": 0.03,
+			"input": 0.2,
+			"output": 1.15
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"flexai/gpt-oss-120b": {
 		"cost": {
 			"cache_read": 0.0045,
@@ -33221,8 +33231,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.12,
-			"input": 0.136,
+			"cache_read": 0.19,
+			"input": 0.1901,
 			"output": 4.2
 		},
 		"exactOnly": true,
@@ -33232,7 +33242,7 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0137,
+			"cache_read": 0.0152,
 			"input": 0.0152,
 			"output": 1.28
 		},
@@ -33417,7 +33427,7 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0317,
+			"cache_read": 0.0352,
 			"input": 0.0352,
 			"output": 0.5
 		},
@@ -33430,7 +33440,7 @@
 		"cost": {
 			"cache_read": 0.04,
 			"input": 0.05,
-			"output": 4.4
+			"output": 5
 		},
 		"exactOnly": true,
 		"limit": {
