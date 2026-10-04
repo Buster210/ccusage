@@ -33288,7 +33288,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.6438,
+			"input": 0.5964,
 			"output": 13
 		},
 		"exactOnly": true,
