@@ -524,11 +524,7 @@ pub fn format_models_multiline(models: &[String]) -> String {
         .collect::<Vec<_>>();
     models.sort();
     models.dedup();
-    models
-        .into_iter()
-        .map(|model| format!("- {model}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    models.join("\n")
 }
 
 pub fn format_number(value: u64) -> String {
@@ -896,6 +892,10 @@ mod tests {
             "unknown".to_string(),
         ];
 
+        assert_eq!(
+            format_models_multiline(&models),
+            "gpt-5.2-codex\nsonnet-4\nunknown"
+        );
         insta::assert_snapshot!(format_models_multiline(&models));
     }
 

@@ -1456,7 +1456,7 @@ fn all_table_rows_match_main_agent_breakdown_display() {
             true,
             false,
         ),
-        vec!["", "- Codex", "- gpt-5", "100", "20", "$0.01"]
+        vec!["", "Codex", "gpt-5", "100", "20", "$0.01"]
     );
 }
 
@@ -1490,7 +1490,7 @@ fn compact_table_columns_omit_cache_and_total_token_metrics() {
 
     assert_eq!(
         headers,
-        vec!["Date", "Agent", "Models", "Input", "Output", "Cost (USD)"]
+        vec!["Date", "Agent", "Models", "Input", "Output", "Cost($)"]
     );
     assert_eq!(
         aligns,
@@ -1520,7 +1520,7 @@ fn full_table_columns_include_cache_and_total_token_metrics() {
             "Cache Create",
             "Cache Read",
             "Total Tokens",
-            "Cost (USD)",
+            "Cost($)",
         ]
     );
     assert_eq!(headers.len(), aligns.len());

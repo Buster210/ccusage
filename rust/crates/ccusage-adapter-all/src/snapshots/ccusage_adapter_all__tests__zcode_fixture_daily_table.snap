@@ -12,7 +12,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     "Cache Create",
     "Cache Read",
     "Total Tokens",
-    "Cost (USD)"
+    "Cost($)"
   ],
   "rows": [
     {
@@ -32,8 +32,8 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "",
-        "- ZCode",
-        "- GLM-5.2",
+        "ZCode",
+        "GLM-5.2",
         "60",
         "10",
         "15",
@@ -60,8 +60,8 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "",
-        "- ZCode",
-        "- GLM-5.3",
+        "ZCode",
+        "GLM-5.3",
         "130",
         "20",
         "30",
@@ -88,8 +88,8 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "",
-        "- ZCode",
-        "- GLM-5.3",
+        "ZCode",
+        "GLM-5.3",
         "40",
         "5",
         "0",

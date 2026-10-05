@@ -233,10 +233,17 @@ pub(super) fn print_table(
     let (headers, aligns) = all_table_columns(kind, compact, shared.no_cost);
     let mut table = SimpleTable::new(headers, aligns, crate::terminal_style(shared))
         .with_terminal_width(terminal_width)
-        .with_date_compaction(true);
+        .with_date_compaction(true)
+        .with_bold_headers();
 
     for row in rows {
-        table.push(all_table_row(row, compact, false, shared.no_cost));
+        let values = all_table_row(row, compact, false, shared.no_cost);
+        if row.agent_breakdowns.is_some() {
+            table.push_with_cell_alignment(values, 1, Align::Center);
+            table.bold_last_row();
+        } else {
+            table.push(values);
+        }
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
             for breakdown in agent_breakdowns {
                 table.push(all_table_row(breakdown, compact, true, shared.no_cost));
@@ -331,6 +338,7 @@ pub(super) fn print_table(
         }
         table.push(total_row);
     }
+    table.bold_last_row();
     table.print()?;
     crate::print_missing_pricing_warnings(&all_rows_as_usage_summaries(rows), shared.offline);
     if compact {
@@ -420,9 +428,7 @@ pub(super) fn all_table_row(
     } else {
         row.period.clone()
     };
-    let agent = if breakdown {
-        format!("- {}", agent_label(row.agent))
-    } else if row.agent_breakdowns.is_some() {
+    let agent = if !breakdown && row.agent_breakdowns.is_some() {
         "All".to_string()
     } else {
         agent_label(row.agent).to_string()
@@ -531,7 +537,7 @@ pub(super) fn all_table_columns(
                 "Models",
                 "Input",
                 "Output",
-                "Cost (USD)",
+                "Cost($)",
             ],
             vec![
                 Align::Left,
@@ -553,7 +559,7 @@ pub(super) fn all_table_columns(
                 "Cache Create",
                 "Cache Read",
                 "Total Tokens",
-                "Cost (USD)",
+                "Cost($)",
             ],
             vec![
                 Align::Left,

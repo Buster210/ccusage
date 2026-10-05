@@ -3,7 +3,7 @@ source: crates/ccusage-terminal/src/table.rs
 expression: "table.render_lines().join(\"\\n\")"
 ---
 ┌─────────────────────────┬───────────────────┬───────────┬───────────┬─────────────┐
-│ Date                    │ Models            │     Input │    Output │  Cost (USD) │
+│          Date           │      Models       │   Input   │  Output   │ Cost (USD)  │
 ├─────────────────────────┼───────────────────┼───────────┼───────────┼─────────────┤
 │ 2026-05-18              │ - claude-sonnet-4 │     1,234 │        56 │       $0.42 │
 │                         │ - gpt-5.2-codex   │           │           │             │

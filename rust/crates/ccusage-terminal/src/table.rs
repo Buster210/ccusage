@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use crate::{
-    style::{Color, TerminalStyle, color},
+    style::{Color, TerminalStyle, bold, color},
     terminal::DEFAULT_TERMINAL_WIDTH,
     width::{
         ansi_continuation, ensure_ansi_reset, truncate_to_width, visible_width,
@@ -9,20 +9,27 @@ use crate::{
     },
 };
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Align {
     Left,
+    Center,
     Right,
+}
+
+struct TableRow {
+    cells: Vec<String>,
+    cell_alignment: Option<(usize, Align)>,
+    bold: bool,
 }
 
 pub struct SimpleTable {
     headers: Vec<String>,
     aligns: Vec<Align>,
-    rows: Vec<Option<Vec<String>>>,
+    rows: Vec<Option<TableRow>>,
     style: TerminalStyle,
     terminal_width: usize,
     compact_dates: bool,
+    bold_headers: bool,
 }
 
 impl SimpleTable {
@@ -34,6 +41,7 @@ impl SimpleTable {
             style: style.into(),
             terminal_width: DEFAULT_TERMINAL_WIDTH,
             compact_dates: false,
+            bold_headers: false,
         }
     }
 
@@ -47,8 +55,31 @@ impl SimpleTable {
         self
     }
 
+    pub fn with_bold_headers(mut self) -> Self {
+        self.bold_headers = true;
+        self
+    }
+
     pub fn push(&mut self, row: Vec<String>) {
-        self.rows.push(Some(row));
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: None,
+            bold: false,
+        }));
+    }
+
+    pub fn push_with_cell_alignment(&mut self, row: Vec<String>, column: usize, align: Align) {
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: Some((column, align)),
+            bold: false,
+        }));
+    }
+
+    pub fn bold_last_row(&mut self) {
+        if let Some(Some(row)) = self.rows.last_mut() {
+            row.bold = true;
+        }
     }
 
     pub fn separator(&mut self) {
@@ -70,22 +101,42 @@ impl SimpleTable {
 
     fn render_lines(&self) -> Vec<String> {
         let widths = self.column_widths();
+        let header_aligns = vec![Align::Center; widths.len()];
         let mut lines = Vec::new();
         lines.push(border('┌', '┬', '┐', &widths));
         for header_row in expand_multiline_row(&self.headers, self.headers.len(), &widths) {
             let header_row = header_row
                 .iter()
-                .map(|header| color(self.style, header, Color::Blue))
+                .map(|header| {
+                    let header = color(self.style, header, Color::Blue);
+                    if self.bold_headers {
+                        bold(self.style, &header)
+                    } else {
+                        header
+                    }
+                })
                 .collect::<Vec<_>>();
-            lines.push(table_line(&header_row, &self.aligns, &widths));
+            lines.push(table_line(&header_row, &header_aligns, &widths, None));
         }
         lines.push(border('├', '┼', '┤', &widths));
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
                 Some(row) => {
-                    let row = self.compact_date_row(row, &widths);
-                    for physical_row in expand_multiline_row(&row, self.headers.len(), &widths) {
-                        lines.push(table_line(&physical_row, &self.aligns, &widths));
+                    let cells = self.compact_date_row(&row.cells, &widths);
+                    for mut physical_row in
+                        expand_multiline_row(&cells, self.headers.len(), &widths)
+                    {
+                        if row.bold {
+                            for cell in &mut physical_row {
+                                *cell = bold(self.style, cell);
+                            }
+                        }
+                        lines.push(table_line(
+                            &physical_row,
+                            &self.aligns,
+                            &widths,
+                            row.cell_alignment,
+                        ));
                     }
                 }
                 None => lines.push(border('├', '┼', '┤', &widths)),
@@ -109,7 +160,7 @@ impl SimpleTable {
             .collect::<Vec<_>>();
         let mut content_widths = content_widths;
         for row in self.rows.iter().flatten() {
-            for (index, cell) in row.iter().enumerate() {
+            for (index, cell) in row.cells.iter().enumerate() {
                 let cell_width = visible_width_max_line(cell);
                 if let Some(width) = content_widths.get_mut(index) {
                     *width = (*width).max(cell_width);
@@ -330,12 +381,21 @@ fn compact_date_cell(value: &str) -> Option<String> {
     }
 }
 
-fn table_line(cells: &[String], aligns: &[Align], widths: &[usize]) -> String {
+fn table_line(
+    cells: &[String],
+    aligns: &[Align],
+    widths: &[usize],
+    cell_alignment: Option<(usize, Align)>,
+) -> String {
     let mut line = String::from("│");
     for (index, width) in widths.iter().enumerate() {
         let cell = cells.get(index).map(String::as_str).unwrap_or("");
         let align = if index == 0 && cell.starts_with("(assuming ") {
             Align::Right
+        } else if let Some((column, align)) = cell_alignment
+            && column == index
+        {
+            align
         } else {
             aligns.get(index).copied().unwrap_or(Align::Left)
         };
@@ -356,6 +416,10 @@ fn pad_cell(cell: &str, width: usize, align: Align) -> String {
     let padding = width - visible;
     match align {
         Align::Left => format!("{cell}{}", " ".repeat(padding)),
+        Align::Center => {
+            let left = padding / 2;
+            format!("{}{cell}{}", " ".repeat(left), " ".repeat(padding - left))
+        }
         Align::Right => format!("{}{cell}", " ".repeat(padding)),
     }
 }
@@ -377,6 +441,18 @@ fn border(left: char, middle: char, right: char, widths: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn center_alignment_uses_visible_width_and_balanced_padding() {
+        for (cell, width, expected) in [
+            ("All", 9, "   All   "),
+            ("All", 8, "  All   "),
+            ("\x1b[32mAll", 9, "   \x1b[32mAll\x1b[0m   "),
+            ("界", 7, "  界   "),
+        ] {
+            assert_eq!(pad_cell(cell, width, Align::Center), expected);
+        }
+    }
 
     #[test]
     fn compact_date_cell_splits_iso_dates() {
@@ -1090,5 +1166,4 @@ mod tests {
             assert!(!input_cell.contains("\x1b[32m"), "{line:?}");
         }
     }
-
 }
