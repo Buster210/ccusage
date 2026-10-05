@@ -9,13 +9,7 @@ Pi is a third-party Claude coding (agent) CLI that stores usage data in JSONL fo
 ## Focused Views
 
 ```bash
-# Recommended
-bunx ccusage pi --help
-
-# Alternative package runners
-npx ccusage@latest pi --help
-pnpm dlx ccusage pi --help
-pnpx ccusage pi --help
+ccusage pi --help
 ```
 
 ## Data Source
@@ -88,11 +82,7 @@ ccusage pi daily --breakdown
 This view shows daily usage from pi.
 
 ```bash
-# Recommended (fastest)
-bunx ccusage pi daily
-
-# Using npx
-npx ccusage@latest pi daily
+ccusage pi daily
 ```
 
 ### Options
@@ -173,11 +163,7 @@ ccusage pi daily --since 2026-05-16 --until 2026-05-16
 This view shows monthly usage from pi.
 
 ```bash
-# Recommended (fastest)
-bunx ccusage pi monthly
-
-# Using npx
-npx ccusage@latest pi monthly
+ccusage pi monthly
 ```
 
 ### Options
@@ -258,11 +244,7 @@ ccusage pi monthly --since 2026-01-01 --until 2026-03-31
 This view shows usage grouped by individual pi sessions.
 
 ```bash
-# Recommended (fastest)
-bunx ccusage pi session
-
-# Using npx
-npx ccusage@latest pi session
+ccusage pi session
 ```
 
 ### Options

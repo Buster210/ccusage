@@ -36,9 +36,11 @@ ccusage reads the local usage files that coding CLIs already generate and provid
 
 ## Key Features
 
-### 🚀 Direct Execution
+### 🚀 Standalone Binary
 
-You can run ccusage without a global install using `bunx ccusage` (recommended), `pnpm dlx ccusage`, or `npx ccusage@latest`.
+Download the prebuilt binary for your platform from
+[GitHub Releases](https://github.com/ccusage/ccusage/releases) and run it
+directly — no install step or runtime required.
 
 ### 📊 Usage Views
 

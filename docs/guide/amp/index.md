@@ -6,21 +6,9 @@ ccusage can read Amp thread files as one of its supported local data sources, us
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage amp --help
+```bash
+ccusage amp --help
 ```
-
-```bash [npx]
-npx ccusage@latest amp --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage amp --help
-```
-
-:::
 
 ## Data Source
 

@@ -9,37 +9,21 @@ Welcome to ccusage! This guide will help you get up and running with analyzing y
 
 ## Quick Start
 
-The fastest way to try ccusage is to run it directly without installation:
+Download the standalone binary for your platform from
+[GitHub Releases](https://github.com/ccusage/ccusage/releases), put it on
+your `PATH`, and run it — see [Installation](/guide/installation) for details.
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage
+```bash
+ccusage
 ```
 
-```bash [Nix]
+Alternatively, run it without downloading anything via Nix:
+
+```bash
 nix run github:ccusage/ccusage -- daily
 ```
 
-```bash [npx]
-npx ccusage@latest
-```
-
-```bash [pnpm]
-pnpm dlx ccusage
-```
-
-```bash [pkg.pr.new preview]
-bunx -p https://pkg.pr.new/ccusage/ccusage@<pr-number> ccusage --offline
-```
-
-:::
-
 This will show your daily usage report for all detected supported coding CLIs by default.
-
-::: tip Runtime
-[bunx](https://bun.com/docs/pm/bunx) caches the downloaded package, so repeated runs are faster after the first launch.
-:::
 
 Use a data source namespace when you want the same report focused on one source:
 

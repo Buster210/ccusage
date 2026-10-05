@@ -9,13 +9,7 @@ OpenClaw is a third-party coding (agent) CLI (previously known as `clawdbot`, `m
 ## Focused Views
 
 ```bash
-# Recommended
-bunx ccusage openclaw --help
-
-# Alternative package runners
-npx ccusage@latest openclaw --help
-pnpm dlx ccusage openclaw --help
-pnpx ccusage openclaw --help
+ccusage openclaw --help
 ```
 
 ## Data Source
@@ -77,11 +71,7 @@ OpenClaw sessions emit `model_change` and `custom`/`model-snapshot` events that 
 This view shows daily usage from OpenClaw.
 
 ```bash
-# Recommended (fastest)
-bunx ccusage openclaw daily
-
-# Using npx
-npx ccusage@latest openclaw daily
+ccusage openclaw daily
 ```
 
 ### Options

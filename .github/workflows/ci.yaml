@@ -29,7 +29,7 @@ jobs:
   # the flake's pinned package so CI matches the dev shell.
   tirith-scan:
     name: tirith security scan
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     # Read-only: this job executes PR-controlled code (the local action, the PR
     # flake, the installed tirith), so it must hold no write scopes. The SARIF
@@ -139,7 +139,7 @@ jobs:
   # gate can fail fast before any build/test work starts.
   preflight:
     name: security & lint preflight
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -155,7 +155,7 @@ jobs:
   test:
     needs: [changes, tirith-scan, preflight]
     if: needs.changes.outputs.code-changed == 'true'
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -192,33 +192,35 @@ jobs:
       actions: write
       contents: read
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Stock GitHub runners are smaller than Blacksmith, and the fork starts
+    # with a cold Nix cache, so allow headroom on the first runs.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: build-linux-arm64
-            os: blacksmith-32vcpu-ubuntu-2404-arm
+            os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
             binary: result/bin/ccusage
           - name: build-linux-x64
-            os: blacksmith-32vcpu-ubuntu-2404
+            os: ubuntu-latest
             platform: linux
             arch: x64
             binary: result/bin/ccusage
           - name: build-mac-arm64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: arm64
             binary: result/bin/ccusage
           - name: build-mac-x64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: x64
             binary: result/bin/ccusage
           - name: build-windows-x64
-            os: blacksmith-32vcpu-windows-2025
+            os: windows-2025
             platform: win32
             arch: x64
             binary: rust/target/release/ccusage.exe
@@ -252,7 +254,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       urls: ${{ steps.publish.outputs.urls }}
       preview-url: ${{ steps.preview-url.outputs.url }}
@@ -328,13 +330,13 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - blacksmith-32vcpu-ubuntu-2404
-          - blacksmith-32vcpu-ubuntu-2404-arm
-          - blacksmith-12vcpu-macos-26
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-15
           # Intel macOS to exercise the cross-built x86_64 darwin binary on real
           # Intel hardware (the build runner is arm64).
           - macos-15-intel
-          - blacksmith-32vcpu-windows-2025
+          - windows-2025
         # One job per package runner, each installed via its official action.
         # Excluded:
         #   yarn - no official install action (it expects corepack, which we avoid)
@@ -440,7 +442,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false

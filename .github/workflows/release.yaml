@@ -1,78 +1,49 @@
-name: tagpr
+name: release
 
+# Automatic rolling releases: every push to main rebuilds the 6 standalone
+# binaries and recreates the `latest` GitHub release. Manual runs from the
+# Actions tab do the same thing.
 on:
   push:
     branches:
       - main
-  # Toggling tagpr:minor / tagpr:major labels on the release PR should update
-  # its proposed version right away, instead of waiting for the next push to
-  # main to make tagpr recompute it.
-  pull_request:
-    types:
-      - labeled
-      - unlabeled
   workflow_dispatch:
 
-concurrency: tagpr
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
-  tagpr:
-    # Label events only matter on tagpr's own release PR; skip the rest so
-    # ordinary PR labeling doesn't spend runner time.
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'tagpr-from-')
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: read
-    outputs:
-      tag: ${{ steps.tagpr.outputs.tag }}
-    steps:
-      # persist-credentials stays on (default) so tagpr can push the release PR and tag
-      # ref: main because on pull_request events the default checkout is the
-      # PR merge ref, while tagpr always operates on the release branch.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          fetch-depth: 0
-      - id: tagpr
-        uses: Songmu/tagpr@2afc990a4a5a9a340665cc1a484c2102f7de332f # v1.21.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # The release jobs below run in this workflow instead of a tag-triggered one
-  # because tags pushed with GITHUB_TOKEN do not trigger `on: push: tags`
-  # workflows. They run only when tagpr just tagged a release-PR merge, and
-  # check out that tag explicitly. To retry a failed release, re-run only the
-  # failed jobs: a full re-run finds no new tag and skips everything.
   build-native-packages:
     name: ${{ matrix.name }}
-    needs: tagpr
-    if: needs.tagpr.outputs.tag != ''
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Stock GitHub runners are small and the cache starts cold,
+    # so allow headroom on the first runs.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: build-linux-arm64
-            os: blacksmith-32vcpu-ubuntu-2404-arm
+            os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
             binary: result/bin/ccusage
           - name: build-linux-x64
-            os: blacksmith-32vcpu-ubuntu-2404
+            os: ubuntu-latest
             platform: linux
             arch: x64
             binary: result/bin/ccusage
           - name: build-mac-arm64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: arm64
             binary: result/bin/ccusage
           - name: build-mac-x64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: x64
             binary: result/bin/ccusage
@@ -82,7 +53,7 @@ jobs:
             arch: arm64
             binary: rust/target/release/ccusage.exe
           - name: build-windows-x64
-            os: blacksmith-32vcpu-windows-2025
+            os: windows-2025
             platform: win32
             arch: x64
             binary: rust/target/release/ccusage.exe
@@ -90,7 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.tagpr.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/build-linux-native-package
@@ -111,62 +81,43 @@ jobs:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
 
-  npm:
-    needs:
-      - tagpr
-      - build-native-packages
-    if: needs.tagpr.outputs.tag != ''
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+  release:
+    needs: build-native-packages
+    runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.tagpr.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/setup-nix-cache
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          registry-url: 'https://registry.npmjs.org'
-          node-version: lts/*
-          package-manager-cache: false
-      # node comes from setup-node above (needed for the npm registry auth);
-      # Nushell package checks bring Nu through their Nix shebangs. `publint` is
-      # the flake's own pinned build, invoked by every package's prepack script.
-      - run: nix profile install --inputs-from . .#pnpm .#publint
-      - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: ccusage-native-*
           path: ${{ runner.temp }}/native-packages
           merge-multiple: true
-      - name: Restore native package binaries
+      # Repackage the built native binaries as standalone archives so users can
+      # download one file per platform from the GitHub release and run it
+      # without Node.js, Bun, or npm.
+      - name: Package standalone binaries
         run: |
-          for archive in "$RUNNER_TEMP"/native-packages/*.tar; do
-            tar -xf "$archive"
+          cd "${{ runner.temp }}/native-packages"
+          for archive in ccusage-native-*.tar; do tar -xf "$archive"; done
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          TAG="latest"
+          for spec in linux:arm64 linux:x64 darwin:arm64 darwin:x64; do
+            platform="${spec%%:*}"
+            arch="${spec##*:}"
+            tar -czf "$GITHUB_WORKSPACE/dist/ccusage-$TAG-$platform-$arch.tar.gz" \
+              -C "packages/ccusage-$platform-$arch/bin" ccusage
           done
-      - run: pnpm --filter='./apps/ccusage' --filter='./packages/ccusage-*' publish --provenance --no-git-checks --access public
-
-  release:
-    needs:
-      - tagpr
-      - npm
-    if: needs.tagpr.outputs.tag != ''
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    permissions:
-      contents: write
-    steps:
-      # changelogithub resolves the release tag with `git tag --points-at HEAD`,
-      # so checking out the tag is what makes it pick the right release
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.tagpr.outputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-nix-cache
-      - run: nix run .#changelogithub
+          for arch in arm64 x64; do
+            (cd "packages/ccusage-win32-$arch/bin" && \
+              zip "$GITHUB_WORKSPACE/dist/ccusage-$TAG-win32-$arch.zip" ccusage.exe)
+          done
+      - name: Recreate rolling latest release
         env:
-          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/* --title "Latest main build" --notes "Automated rolling build from main at ${{ github.sha }}."

@@ -6,29 +6,9 @@ ccusage can read [OpenCode](https://github.com/opencode-ai/opencode) session log
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage opencode --help
+```bash
+ccusage opencode --help
 ```
-
-```bash [npx]
-npx ccusage@latest opencode --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage opencode --help
-```
-
-```bash [opencode x]
-BUN_BE_BUN=1 opencode x ccusage@latest opencode --help
-```
-
-:::
-
-::: tip opencode x option
-The `opencode x` option requires the native version of OpenCode. If you installed OpenCode via npm, use the `bunx` or `npx` options instead.
-:::
 
 ## Data Source
 

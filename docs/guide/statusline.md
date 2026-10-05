@@ -16,45 +16,19 @@ The `statusline` command provides a compact, real-time view of your Claude Code 
 
 ### Configure settings.json
 
-Add this to your `~/.claude/settings.json` or `~/.config/claude/settings.json`:
+Add this to your `~/.claude/settings.json` or `~/.config/claude/settings.json`
+(requires the `ccusage` binary on your `PATH` — see
+[Installation](/guide/installation)):
 
-::: code-group
-
-```json [bun x (Recommended)]
+```json
 {
 	"statusLine": {
 		"type": "command",
-		"command": "bun x ccusage statusline",
+		"command": "ccusage statusline",
 		"padding": 0
 	}
 }
 ```
-
-```json [claude x]
-{
-	"statusLine": {
-		"type": "command",
-		"command": "BUN_BE_BUN=1 claude x ccusage statusline",
-		"padding": 0
-	}
-}
-```
-
-```json [npx]
-{
-	"statusLine": {
-		"type": "command",
-		"command": "npx -y ccusage statusline",
-		"padding": 0
-	}
-}
-```
-
-:::
-
-::: tip claude x option
-The `claude x` option requires the native version of Claude Code (not the npm version). If you installed Claude Code via npm, use the `bun x` or `npx` options instead.
-:::
 
 By default, statusline uses **offline mode** with cached pricing data for optimal performance.
 
@@ -66,7 +40,7 @@ If you need the latest pricing data from LiteLLM API, you can explicitly enable 
 {
 	"statusLine": {
 		"type": "command",
-		"command": "bun x ccusage statusline --no-offline", // Fetches latest pricing from API
+		"command": "ccusage statusline --no-offline", // Fetches latest pricing from API
 		"padding": 0
 	}
 }
@@ -80,7 +54,7 @@ You can enhance the burn rate display with visual indicators:
 {
 	"statusLine": {
 		"type": "command",
-		"command": "bun x ccusage statusline --visual-burn-rate emoji", // Add emoji indicators
+		"command": "ccusage statusline --visual-burn-rate emoji", // Add emoji indicators
 		"padding": 0
 	}
 }
@@ -96,7 +70,7 @@ You can control how session costs are calculated and displayed:
 {
 	"statusLine": {
 		"type": "command",
-		"command": "bun x ccusage statusline --cost-source both", // Show both CC and ccusage costs
+		"command": "ccusage statusline --cost-source both", // Show both CC and ccusage costs
 		"padding": 0
 	}
 }
@@ -182,16 +156,16 @@ The `--cost-source` option controls how session costs are calculated and display
 
 ```bash
 # Default auto mode
-bun x ccusage statusline
+ccusage statusline
 
 # Always use ccusage calculation
-bun x ccusage statusline --cost-source ccusage
+ccusage statusline --cost-source ccusage
 
 # Always use Claude Code cost
-bun x ccusage statusline --cost-source cc
+ccusage statusline --cost-source cc
 
 # Show both costs for comparison
-bun x ccusage statusline --cost-source both
+ccusage statusline --cost-source both
 ```
 
 **Settings.json configuration:**
@@ -200,7 +174,7 @@ bun x ccusage statusline --cost-source both
 {
 	"statusLine": {
 		"type": "command",
-		"command": "bun x ccusage statusline --cost-source both",
+		"command": "ccusage statusline --cost-source both",
 		"padding": 0
 	}
 }
@@ -236,7 +210,7 @@ You can customize the context usage color thresholds using command-line options 
 **Command-line usage:**
 
 ```bash
-bun x ccusage statusline --context-low-threshold 60 --context-medium-threshold 90
+ccusage statusline --context-low-threshold 60 --context-medium-threshold 90
 ```
 
 **Configuration file usage:**
@@ -252,7 +226,7 @@ With these settings:
 
 ```json
 {
-	"command": "bun x ccusage statusline --context-low-threshold 60 --context-medium-threshold 90",
+	"command": "ccusage statusline --context-low-threshold 60 --context-medium-threshold 90",
 	"timeout": 5000
 }
 ```
@@ -263,7 +237,7 @@ You can enhance the burn rate display with visual status indicators using the `-
 
 ```bash
 # Add to your settings.json command
-bun x ccusage statusline --visual-burn-rate emoji
+ccusage statusline --visual-burn-rate emoji
 ```
 
 **Available options:**
