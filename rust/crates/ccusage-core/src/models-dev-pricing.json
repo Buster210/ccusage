@@ -33333,7 +33333,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.49,
+			"input": 0.6313,
 			"output": 13
 		},
 		"exactOnly": true,
