@@ -16135,16 +16135,6 @@
 			"context": 131072
 		}
 	},
-	"greenference/gpt-oss-20b": {
-		"cost": {
-			"cache_read": 0.0045,
-			"input": 0.009,
-			"output": 0.045
-		},
-		"limit": {
-			"context": 131072
-		}
-	},
 	"greg-1-mini": {
 		"cost": {
 			"cache_read": 0.01,
@@ -33333,8 +33323,8 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.6313,
-			"output": 13
+			"input": 0.6,
+			"output": 15
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33485,7 +33475,7 @@
 		"cost": {
 			"cache_read": 0.03,
 			"input": 0.03,
-			"output": 16
+			"output": 12
 		},
 		"exactOnly": true,
 		"limit": {
