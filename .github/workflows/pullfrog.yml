@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   pullfrog:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read

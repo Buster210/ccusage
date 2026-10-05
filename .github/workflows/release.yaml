@@ -20,7 +20,7 @@ jobs:
     # Label events only matter on tagpr's own release PR; skip the rest so
     # ordinary PR labeling doesn't spend runner time.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'tagpr-from-')
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
@@ -51,28 +51,30 @@ jobs:
     needs: tagpr
     if: needs.tagpr.outputs.tag != ''
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Stock GitHub runners are smaller than Blacksmith, and the fork starts
+    # with a cold Nix cache, so allow headroom on the first runs.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: build-linux-arm64
-            os: blacksmith-32vcpu-ubuntu-2404-arm
+            os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
             binary: result/bin/ccusage
           - name: build-linux-x64
-            os: blacksmith-32vcpu-ubuntu-2404
+            os: ubuntu-latest
             platform: linux
             arch: x64
             binary: result/bin/ccusage
           - name: build-mac-arm64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: arm64
             binary: result/bin/ccusage
           - name: build-mac-x64
-            os: blacksmith-12vcpu-macos-26
+            os: macos-15
             platform: darwin
             arch: x64
             binary: result/bin/ccusage
@@ -82,7 +84,7 @@ jobs:
             arch: arm64
             binary: rust/target/release/ccusage.exe
           - name: build-windows-x64
-            os: blacksmith-32vcpu-windows-2025
+            os: windows-2025
             platform: win32
             arch: x64
             binary: rust/target/release/ccusage.exe
@@ -116,7 +118,7 @@ jobs:
       - tagpr
       - build-native-packages
     if: needs.tagpr.outputs.tag != ''
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
