@@ -185,98 +185,6 @@ pub fn message_to_entry(
     })
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct OpenCodeModelReference {
-    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
-    id: Option<String>,
-    #[serde(
-        rename = "modelID",
-        default,
-        deserialize_with = "jsonl::non_empty_string"
-    )]
-    model_id: Option<String>,
-    #[serde(
-        rename = "providerID",
-        default,
-        deserialize_with = "jsonl::non_empty_string"
-    )]
-    provider_id: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OpenCodeV2Message {
-    #[serde(default, deserialize_with = "jsonl::lenient_object")]
-    model: Option<OpenCodeModelReference>,
-    #[serde(
-        rename = "modelID",
-        default,
-        deserialize_with = "jsonl::non_empty_string"
-    )]
-    model_id: Option<String>,
-    #[serde(
-        rename = "providerID",
-        default,
-        deserialize_with = "jsonl::non_empty_string"
-    )]
-    provider_id: Option<String>,
-    #[serde(default, deserialize_with = "jsonl::lenient_object")]
-    tokens: Option<OpenCodeTokens>,
-    #[serde(default, deserialize_with = "jsonl::lenient_object")]
-    time: Option<OpenCodeTime>,
-    #[serde(default, deserialize_with = "jsonl::lenient_f64")]
-    cost: Option<f64>,
-}
-
-impl OpenCodeV2Message {
-    fn into_legacy_message(self, id: String, session_id: String, created: i64) -> OpenCodeMessage {
-        let model_id = self
-            .model
-            .as_ref()
-            .and_then(|model| model.id.clone().or_else(|| model.model_id.clone()))
-            .or(self.model_id);
-        let provider_id = self
-            .model
-            .and_then(|model| model.provider_id)
-            .or(self.provider_id);
-        let time = Some(OpenCodeTime {
-            created: self.time.and_then(|time| time.created).or(Some(created)),
-        });
-
-        OpenCodeMessage {
-            tokens: self.tokens,
-            model_id,
-            provider_id,
-            model: None,
-            time,
-            id: Some(id),
-            session_id: Some(session_id),
-            cost: self.cost,
-        }
-    }
-}
-
-pub fn message_value_to_entry(
-    value: &OpenCodeMessage,
-    id: Option<String>,
-    session_id: Option<String>,
-    tz: Option<&JiffTimeZone>,
-    mode: CostMode,
-    pricing: Option<&PricingMap>,
-) -> Option<LoadedEntry> {
-    message_value_to_entry_inner(
-        value,
-        id,
-        session_id,
-        tz,
-        mode,
-        pricing,
-        MessageEntryOptions {
-            allow_cost_only: false,
-            pricing_timestamp: open_code_timestamp(value),
-        },
-    )
-}
-
 struct MessageEntryOptions {
     allow_cost_only: bool,
     pricing_timestamp: Option<crate::TimestampMs>,
@@ -395,20 +303,6 @@ pub(crate) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&
     );
     entry.cost = cost;
     entry.missing_pricing_model = missing_pricing_model;
-}
-
-pub(crate) fn session_message_value_to_entry(
-    data: &str,
-    id: String,
-    session_id: String,
-    created: i64,
-    tz: Option<&JiffTimeZone>,
-    mode: CostMode,
-    pricing: Option<&PricingMap>,
-) -> Option<LoadedEntry> {
-    let value = serde_json::from_str::<OpenCodeV2Message>(data).ok()?;
-    let value = value.into_legacy_message(id, session_id, created);
-    message_value_to_entry(&value, None, None, tz, mode, pricing)
 }
 
 pub(crate) struct OpenCodeSessionAggregate {
@@ -625,7 +519,8 @@ mod tests {
 
     use super::{
         OpenCodeCache, OpenCodeMessage, OpenCodeSessionAggregate, OpenCodeTime, OpenCodeTokens,
-        message_to_entry, message_value_to_entry, open_code_model_candidates, session_value_to_entry,
+        MessageEntryOptions, message_to_entry, message_value_to_entry_inner,
+        open_code_model_candidates, open_code_timestamp, session_value_to_entry,
     };
     use crate::{LoadedEntry, PricingMap, cli::CostMode};
 
@@ -1073,20 +968,25 @@ mod tests {
     #[test]
     fn keeps_epoch_for_display_but_omits_missing_message_timestamp_for_pricing() {
         let pricing = deepseek_pricing(0.000009);
-        let entry = message_value_to_entry(
-            &message(json!({
-                "id": "message-a",
-                "sessionID": "session-a",
-                "providerID": "deepseek",
-                "modelID": "deepseek-v4-flash",
-                "tokens": { "input": 1_000_000 },
-                "cost": 0
-            })),
+        let message = message(json!({
+            "id": "message-a",
+            "sessionID": "session-a",
+            "providerID": "deepseek",
+            "modelID": "deepseek-v4-flash",
+            "tokens": { "input": 1_000_000 },
+            "cost": 0
+        }));
+        let entry = message_value_to_entry_inner(
+            &message,
             None,
             None,
             None,
             CostMode::Calculate,
             Some(&pricing),
+            MessageEntryOptions {
+                allow_cost_only: false,
+                pricing_timestamp: open_code_timestamp(&message),
+            },
         )
         .unwrap();
 

@@ -865,53 +865,6 @@ fn is_fork_copy(
     seq.is_some_and(|seq| seq <= *cutoff)
 }
 
-fn prepare_session_message_query(
-    connection: &sqlite::Connection,
-    window: DateWindow,
-) -> Option<sqlite::Statement<'_>> {
-    let columns = table_columns(connection, "session_message");
-    if !["id", "session_id", "type", "data"]
-        .into_iter()
-        .all(|column| columns.contains(column))
-    {
-        return None;
-    }
-    let has_time_created = columns.contains("time_created");
-    let time_created = if has_time_created {
-        "time_created"
-    } else {
-        "NULL"
-    };
-    let sql = if has_time_created {
-        match (window.start, window.end) {
-            (Some(_), Some(_)) => format!(
-                "SELECT id, session_id, type, data, {time_created} FROM session_message \
-                 WHERE time_created >= ?1 AND time_created < ?2"
-            ),
-            (Some(_), None) => format!(
-                "SELECT id, session_id, type, data, {time_created} FROM session_message \
-                 WHERE time_created >= ?1"
-            ),
-            (None, Some(_)) => format!(
-                "SELECT id, session_id, type, data, {time_created} FROM session_message \
-                 WHERE time_created < ?1"
-            ),
-            (None, None) => {
-                format!("SELECT id, session_id, type, data, {time_created} FROM session_message")
-            }
-        }
-    } else {
-        "SELECT id, session_id, type, data, NULL FROM session_message".to_string()
-    };
-    let mut statement = connection.prepare(&sql).ok()?;
-    if has_time_created {
-        for (index, bound) in [window.start, window.end].into_iter().flatten().enumerate() {
-            statement.bind((index + 1, bound)).ok()?;
-        }
-    }
-    Some(statement)
-}
-
 fn prepare_session_aggregate_query<'a>(
     connection: &'a sqlite::Connection,
     table: &str,

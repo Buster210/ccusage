@@ -1,5 +1,5 @@
 use crate::{
-    LoadedEntry, PricingMap, Result, adapter::parse_or_log, calculate_cost_for_usage_at,
+    LoadedEntry, PricingMap, Result, adapter::parse_or_log,
     cli::SharedArgs, collect_files_with_extension, parse_ts_timestamp, parse_tz,
 };
 
