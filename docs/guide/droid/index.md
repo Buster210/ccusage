@@ -6,21 +6,9 @@ ccusage can read local Droid session settings files as one of its supported data
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage droid --help
+```bash
+ccusage droid --help
 ```
-
-```bash [npx]
-npx ccusage@latest droid --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage droid --help
-```
-
-:::
 
 ## Data Source
 

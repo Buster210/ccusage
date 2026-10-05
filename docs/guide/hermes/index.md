@@ -6,21 +6,9 @@ ccusage can read Hermes Agent session usage from its local SQLite state database
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage hermes --help
+```bash
+ccusage hermes --help
 ```
-
-```bash [npx]
-npx ccusage@latest hermes --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage hermes --help
-```
-
-:::
 
 ## Data Source
 

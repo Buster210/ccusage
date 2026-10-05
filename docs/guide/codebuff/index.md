@@ -6,21 +6,9 @@ ccusage can read Codebuff chat history files as one of its supported local data 
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage codebuff --help
+```bash
+ccusage codebuff --help
 ```
-
-```bash [npx]
-npx ccusage@latest codebuff --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage codebuff --help
-```
-
-:::
 
 ## Data Source
 

@@ -6,21 +6,9 @@ ccusage can read Qwen Code chat JSONL files as one of its supported local data s
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage qwen --help
+```bash
+ccusage qwen --help
 ```
-
-```bash [npx]
-npx ccusage@latest qwen --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage qwen --help
-```
-
-:::
 
 ## Data Source
 

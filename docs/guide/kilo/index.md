@@ -5,13 +5,7 @@ ccusage can read Kilo CLI usage data as one of its supported local data sources.
 ## Focused Views
 
 ```bash
-# Recommended
-bunx ccusage kilo --help
-
-# Alternative package runners
-npx ccusage@latest kilo --help
-pnpm dlx ccusage kilo --help
-pnpx ccusage kilo --help
+ccusage kilo --help
 ```
 
 ## Data Source

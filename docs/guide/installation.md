@@ -1,83 +1,38 @@
 # Installation
 
-ccusage can be installed and used in several ways depending on your preferences and use case.
+ccusage ships as a standalone binary. Download the archive for your platform
+from [GitHub Releases](https://github.com/ccusage/ccusage/releases), extract
+it, and put `ccusage` on your `PATH`. No Node.js, Bun, or npm required.
 
-## Why Direct Execution Works Well
+## Standalone Binary (Recommended)
 
-You do not need to install ccusage globally before trying it. Direct package runners work well for ad hoc usage:
-
-- ✅ No global package to manage
-- ✅ Easy access to the latest published version
-- ✅ Cached package downloads after the first run
-
-## Quick Start (Recommended)
-
-The fastest way to use ccusage is to run it directly:
+Each release provides archives for Linux (arm64/x64), macOS (arm64/x64), and
+Windows (arm64/x64):
 
 ::: code-group
 
-```bash [bunx (Recommended)]
-bunx ccusage
+```bash [Linux / macOS]
+# Download ccusage-<version>-<platform>-<arch>.tar.gz from GitHub Releases,
+# then extract it and move the binary onto your PATH
+tar -xzf ccusage-*.tar.gz
+chmod +x ccusage
+sudo mv ccusage /usr/local/bin/
 ```
 
-```bash [pnpm]
-pnpm dlx ccusage
-```
-
-```bash [npx]
-npx ccusage@latest
-```
-
-```bash [pkg.pr.new preview]
-bunx -p https://pkg.pr.new/ccusage/ccusage@<pr-number> ccusage --offline
-```
-
-:::
-
-::: tip Speed Recommendation
-We recommend [bunx](https://bun.com/docs/pm/bunx) for everyday use. It caches the downloaded package, so repeated runs are faster after the first launch.
-:::
-
-### Performance Comparison
-
-Here's why runtime choice matters:
-
-| Runtime  | First Run | Subsequent Runs | Notes                        |
-| -------- | --------- | --------------- | ---------------------------- |
-| bunx     | Fast      | **Instant**     | Recommended for everyday use |
-| pnpm dlx | Fast      | Fast            | Good alternative             |
-| npx      | Slow      | Moderate        | Widely available             |
-
-## Global Installation (Optional)
-
-You can install ccusage globally if you prefer a persistent command:
-
-::: code-group
-
-```bash [npm]
-npm install -g ccusage
-```
-
-```bash [bun]
-bun install -g ccusage
-```
-
-```bash [yarn]
-yarn global add ccusage
-```
-
-```bash [pnpm]
-pnpm add -g ccusage
+```powershell [Windows]
+# Download ccusage-<version>-win32-<arch>.zip from GitHub Releases,
+# extract it, and move ccusage.exe somewhere on your PATH
+ccusage.exe daily
 ```
 
 :::
 
-After global installation, run commands directly:
+## Nix (Alternative)
+
+If you use Nix, run ccusage without downloading anything:
 
 ```bash
-ccusage daily
-ccusage monthly --breakdown
-ccusage blocks --live
+nix run github:ccusage/ccusage -- daily
 ```
 
 ## Development Installation
@@ -109,25 +64,11 @@ just check
 just build
 ```
 
-You can also run the package directly from source:
+You can also build the binary from source with Cargo:
 
 ```bash
-pnpm --filter ccusage start daily
-pnpm --filter ccusage start monthly --json
+cargo build --manifest-path rust/Cargo.toml --release
 ```
-
-## Runtime Requirements
-
-### Node.js
-
-- Needed when using Node-based package runners or npm-style global installs
-- Use Bun for direct execution when available
-
-### Bun
-
-- **Minimum**: Bun 1.3+
-- **Recommended**: Latest stable release
-- Recommended for `bunx ccusage` and for the fastest warm startup
 
 ## Verification
 
@@ -146,21 +87,8 @@ ccusage daily
 
 ## Updating
 
-### Direct Execution (npx/bunx)
-
-Always gets the latest version automatically.
-
-### Global Installation
-
-```bash
-# Update with npm
-npm update -g ccusage
-
-# Update with bun
-bun update -g ccusage
-```
-
-### Check Current Version
+Download the archive for the new release and replace the binary on your
+`PATH`:
 
 ```bash
 ccusage --version
@@ -168,88 +96,12 @@ ccusage --version
 
 ## Uninstalling
 
-### Global Installation
-
-::: code-group
-
-```bash [npm]
-npm uninstall -g ccusage
-```
-
-```bash [bun]
-bun remove -g ccusage
-```
-
-```bash [yarn]
-yarn global remove ccusage
-```
-
-```bash [pnpm]
-pnpm remove -g ccusage
-```
-
-:::
-
-### Development Installation
-
 ```bash
-# Remove cloned repository
+# Remove the binary from your PATH
+sudo rm /usr/local/bin/ccusage
+
+# Or remove the cloned repository for development installs
 rm -rf ccusage/
-```
-
-## Troubleshooting Installation
-
-### Permission Errors
-
-If you get permission errors during global installation:
-
-::: code-group
-
-```bash [npm]
-# Use npx instead of global install
-npx ccusage@latest
-
-# Or configure npm to use a different directory
-npm config set prefix ~/.npm-global
-export PATH=~/.npm-global/bin:$PATH
-```
-
-```bash [Node Version Managers]
-# Use nvm
-nvm install 22
-npm install -g ccusage
-
-# Or use fnm
-fnm install 22
-npm install -g ccusage
-```
-
-:::
-
-### Network Issues
-
-If installation fails due to network issues:
-
-```bash
-# Try with different registry
-npm install -g ccusage --registry https://registry.npmjs.org
-
-# Or use bunx for offline-capable runs
-bunx ccusage
-```
-
-### Version Conflicts
-
-If you have multiple versions installed:
-
-```bash
-# Check which version is being used
-which ccusage
-ccusage --version
-
-# Uninstall and reinstall
-npm uninstall -g ccusage
-npm install -g ccusage@latest
 ```
 
 ## Next Steps

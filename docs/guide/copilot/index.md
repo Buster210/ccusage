@@ -6,21 +6,9 @@ ccusage can read GitHub Copilot CLI session-state and OpenTelemetry files as sup
 
 ## Focused Views
 
-::: code-group
-
-```bash [bunx (Recommended)]
-bunx ccusage copilot --help
+```bash
+ccusage copilot --help
 ```
-
-```bash [npx]
-npx ccusage@latest copilot --help
-```
-
-```bash [pnpm]
-pnpm dlx ccusage copilot --help
-```
-
-:::
 
 ## Data Source
 

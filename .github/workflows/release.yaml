@@ -111,49 +111,10 @@ jobs:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
 
-  npm:
-    needs:
-      - tagpr
-      - build-native-packages
-    if: needs.tagpr.outputs.tag != ''
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.tagpr.outputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-nix-cache
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          registry-url: 'https://registry.npmjs.org'
-          node-version: lts/*
-          package-manager-cache: false
-      # node comes from setup-node above (needed for the npm registry auth);
-      # Nushell package checks bring Nu through their Nix shebangs. `publint` is
-      # the flake's own pinned build, invoked by every package's prepack script.
-      - run: nix profile install --inputs-from . .#pnpm .#publint
-      - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: ccusage-native-*
-          path: ${{ runner.temp }}/native-packages
-          merge-multiple: true
-      - name: Restore native package binaries
-        run: |
-          for archive in "$RUNNER_TEMP"/native-packages/*.tar; do
-            tar -xf "$archive"
-          done
-      - run: pnpm --filter='./apps/ccusage' --filter='./packages/ccusage-*' publish --provenance --no-git-checks --access public
-
   release:
     needs:
       - tagpr
-      - npm
+      - build-native-packages
     if: needs.tagpr.outputs.tag != ''
     runs-on: blacksmith-32vcpu-ubuntu-2404
     permissions:
@@ -170,3 +131,31 @@ jobs:
       - run: nix run .#changelogithub
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ccusage-native-*
+          path: ${{ runner.temp }}/native-packages
+          merge-multiple: true
+      # Repackage the built native binaries as standalone archives so users can
+      # download one file per platform from the GitHub release and run it
+      # without Node.js, Bun, or npm.
+      - name: Package standalone binaries
+        run: |
+          cd "${{ runner.temp }}/native-packages"
+          for archive in ccusage-native-*.tar; do tar -xf "$archive"; done
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          TAG="${{ needs.tagpr.outputs.tag }}"
+          for spec in linux:arm64 linux:x64 darwin:arm64 darwin:x64; do
+            platform="${spec%%:*}"
+            arch="${spec##*:}"
+            tar -czf "$GITHUB_WORKSPACE/dist/ccusage-$TAG-$platform-$arch.tar.gz" \
+              -C "packages/ccusage-$platform-$arch/bin" ccusage
+          done
+          for arch in arm64 x64; do
+            (cd "packages/ccusage-win32-$arch/bin" && \
+              zip "$GITHUB_WORKSPACE/dist/ccusage-$TAG-win32-$arch.zip" ccusage.exe)
+          done
+      - name: Upload standalone binaries to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.tagpr.outputs.tag }}" dist/* --clobber
