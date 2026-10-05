@@ -32479,6 +32479,26 @@
 			"context": 1000000
 		}
 	},
+	"z-ai/glm-5.3-flash-apex": {
+		"cost": {
+			"cache_read": 0.075,
+			"input": 0.15,
+			"output": 0.5
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
+	"z-ai/glm-5.3-flash-apex-abliterated": {
+		"cost": {
+			"cache_read": 0.075,
+			"input": 0.15,
+			"output": 0.5
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"z-ai/glm-5.3-flash-cybersecurity": {
 		"cost": {
 			"cache_read": 0.075,
@@ -33322,9 +33342,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.45,
-			"input": 0.66,
-			"output": 13
+			"cache_read": 0.3,
+			"input": 0.3,
+			"output": 20
 		},
 		"exactOnly": true,
 		"limit": {
