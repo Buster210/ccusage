@@ -33322,7 +33322,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.45,
-			"input": 0.66,
+			"input": 0.54,
 			"output": 13
 		},
 		"exactOnly": true,
@@ -33461,8 +33461,8 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0232,
-			"input": 0.0352,
+			"cache_read": 0.0238,
+			"input": 0.036,
 			"output": 0.5
 		},
 		"exactOnly": true,
@@ -33472,9 +33472,9 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.07,
-			"input": 0.08,
-			"output": 5
+			"cache_read": 0.06,
+			"input": 0.06,
+			"output": 4.4
 		},
 		"exactOnly": true,
 		"limit": {
