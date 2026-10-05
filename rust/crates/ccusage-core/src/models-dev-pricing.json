@@ -18289,7 +18289,7 @@
 			"context": 250000
 		}
 	},
-	"luminal/deepseek-ai/DeepSeek-V4.1-Flash": {
+	"luminal/deepseek-v4.1-flash": {
 		"cost": {
 			"cache_read": 0.0027,
 			"input": 0.135,
