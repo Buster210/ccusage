@@ -1,16 +1,16 @@
 name: release
 
-# Automatic rolling releases: every push to main rebuilds the 6 standalone
+# Automatic rolling releases: every push to master rebuilds the 6 standalone
 # binaries and recreates the `latest` GitHub release. Manual runs from the
 # Actions tab do the same thing.
 on:
   push:
     branches:
-      - main
+      - master
   workflow_dispatch:
 
 concurrency:
-  group: release-main
+  group: release-master
   cancel-in-progress: false
 
 permissions:
@@ -96,28 +96,30 @@ jobs:
           pattern: ccusage-native-*
           path: ${{ runner.temp }}/native-packages
           merge-multiple: true
-      # Repackage the built native binaries as standalone archives so users can
-      # download one file per platform from the GitHub release and run it
-      # without Node.js, Bun, or npm.
-      - name: Package standalone binaries
+      # Ship the built binaries directly — each native package holds exactly
+      # one file, so archives add nothing. Filenames stay stable (no version)
+      # so download URLs never change; the release title carries the version.
+      - name: Collect standalone binaries
         run: |
           cd "${{ runner.temp }}/native-packages"
           for archive in ccusage-native-*.tar; do tar -xf "$archive"; done
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          TAG="latest"
           for spec in linux:arm64 linux:x64 darwin:arm64 darwin:x64; do
             platform="${spec%%:*}"
             arch="${spec##*:}"
-            tar -czf "$GITHUB_WORKSPACE/dist/ccusage-$TAG-$platform-$arch.tar.gz" \
-              -C "packages/ccusage-$platform-$arch/bin" ccusage
+            cp "packages/ccusage-$platform-$arch/bin/ccusage" \
+              "$GITHUB_WORKSPACE/dist/ccusage-$platform-$arch"
           done
           for arch in arm64 x64; do
-            (cd "packages/ccusage-win32-$arch/bin" && \
-              zip "$GITHUB_WORKSPACE/dist/ccusage-$TAG-win32-$arch.zip" ccusage.exe)
+            cp "packages/ccusage-win32-$arch/bin/ccusage.exe" \
+              "$GITHUB_WORKSPACE/dist/ccusage-win32-$arch.exe"
           done
+      - name: Read package version
+        id: version
+        run: echo "value=$(jq -r .version apps/ccusage/package.json)" >> "$GITHUB_OUTPUT"
       - name: Recreate rolling latest release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/* --title "Latest main build" --notes "Automated rolling build from main at ${{ github.sha }}."
+          gh release create latest dist/* --title "ccusage v${{ steps.version.outputs.value }}" --notes "Automated rolling build from master at ${{ github.sha }}."

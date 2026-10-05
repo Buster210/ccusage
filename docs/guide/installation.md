@@ -1,27 +1,26 @@
 # Installation
 
-ccusage ships as a standalone binary. Download the archive for your platform
-from [GitHub Releases](https://github.com/ccusage/ccusage/releases), extract
-it, and put `ccusage` on your `PATH`. No Node.js, Bun, or npm required.
+ccusage ships as a standalone binary. Download the file for your platform
+from [GitHub Releases](https://github.com/ccusage/ccusage/releases) and put
+`ccusage` on your `PATH`. No Node.js, Bun, or npm required.
 
 ## Standalone Binary (Recommended)
 
-Each release provides archives for Linux (arm64/x64), macOS (arm64/x64), and
+Each release provides binaries for Linux (arm64/x64), macOS (arm64/x64), and
 Windows (arm64/x64):
 
 ::: code-group
 
 ```bash [Linux / macOS]
-# Download ccusage-<version>-<platform>-<arch>.tar.gz from GitHub Releases,
-# then extract it and move the binary onto your PATH
-tar -xzf ccusage-*.tar.gz
-chmod +x ccusage
-sudo mv ccusage /usr/local/bin/
+# Download ccusage-<platform>-<arch> from GitHub Releases,
+# then make it executable and move it onto your PATH
+chmod +x ccusage-*
+sudo mv ccusage-* /usr/local/bin/ccusage
 ```
 
 ```powershell [Windows]
-# Download ccusage-<version>-win32-<arch>.zip from GitHub Releases,
-# extract it, and move ccusage.exe somewhere on your PATH
+# Download ccusage-win32-<arch>.exe from GitHub Releases,
+# rename it and move it somewhere on your PATH
 ccusage.exe daily
 ```
 
@@ -87,7 +86,7 @@ ccusage daily
 
 ## Updating
 
-Download the archive for the new release and replace the binary on your
+Download the binary for the new release and replace the one on your
 `PATH`:
 
 ```bash
