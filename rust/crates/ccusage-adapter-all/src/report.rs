@@ -13,7 +13,8 @@ use crate::{
     Align, Color, ModelBreakdown, Result, SimpleTable, UsageSummary, attach_unpriced_models,
     cli::{AgentReportKind, SharedArgs, SortOrder},
     cli_error, color, format_breakdown_model_label, format_currency, format_models_multiline,
-    format_number, json_float,
+    format_number,
+    json_float,
     output::strip_cost_json,
     print_box_title, should_use_compact_layout, unpriced_models,
 };
@@ -234,6 +235,7 @@ pub(super) fn print_table(
     let mut table = SimpleTable::new(headers, aligns, crate::terminal_style(shared))
         .with_terminal_width(terminal_width)
         .with_date_compaction(true)
+        .with_tight_numeric_columns()
         .with_bold_headers();
 
     for row in rows {
@@ -439,21 +441,6 @@ pub(super) fn all_table_row(
         format_models_multiline(&row.models_used)
     };
 
-    if compact {
-        let mut values = vec![
-            period,
-            agent,
-            models,
-            format_number(row.input_tokens),
-            format_number(row.output_tokens),
-            format_currency(row.total_cost),
-        ];
-        if no_cost {
-            values.pop();
-        }
-        return values;
-    }
-
     let mut values = vec![
         period,
         agent,
@@ -463,12 +450,19 @@ pub(super) fn all_table_row(
         format_number(row.cache_creation_tokens),
         format_number(row.cache_read_tokens),
         format_number(row.total_tokens),
-        format_currency(row.total_cost),
+        format_table_cost(row.total_cost),
     ];
+    if compact {
+        values.drain(5..8);
+    }
     if no_cost {
         values.pop();
     }
     values
+}
+
+fn format_table_cost(value: f64) -> String {
+    format!("{value:.2}")
 }
 
 fn component_total_tokens(row: &AllRow) -> u64 {
@@ -498,7 +492,7 @@ fn push_model_breakdown_rows(
                 model,
                 color(shared, format_number(b.input_tokens), Color::Grey),
                 color(shared, format_number(b.output_tokens), Color::Grey),
-                color(shared, format_currency(b.cost), Color::Grey),
+                color(shared, format_table_cost(b.cost), Color::Grey),
             ];
             if shared.no_cost {
                 row.pop();
@@ -514,7 +508,7 @@ fn push_model_breakdown_rows(
                 color(shared, format_number(b.cache_creation_tokens), Color::Grey),
                 color(shared, format_number(b.cache_read_tokens), Color::Grey),
                 color(shared, format_number(total), Color::Grey),
-                color(shared, format_currency(b.cost), Color::Grey),
+                color(shared, format_table_cost(b.cost), Color::Grey),
             ];
             if shared.no_cost {
                 row.pop();

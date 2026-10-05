@@ -66,10 +66,10 @@ When you run ccusage for the first time, you'll see a table showing detected cod
 ╰──────────────────────────────────────────╯
 
 ┌────────────┬────────┬────────────────┬────────┬────────┬────────────┐
-│ Date       │ Agent  │ Models         │ Input  │ Output │ Cost (USD) │
+│ Date       │ Agent  │ Models         │ Input  │ Output │    Cost($) │
 ├────────────┼────────┼────────────────┼────────┼────────┼────────────┤
-│ 2026-05-16 │ Claude │ • sonnet-4-5   │  1,234 │ 15,678 │     $12.34 │
-│ 2026-05-16 │ Codex  │ • gpt-5.5      │    890 │ 12,345 │     $18.92 │
+│ 2026-05-16 │ Claude │ • sonnet-4-5   │  1,234 │ 15,678 │      12.34 │
+│ 2026-05-16 │ Codex  │ • gpt-5.5      │    890 │ 12,345 │      18.92 │
 └────────────┴────────┴────────────────┴────────┴────────┴────────────┘
 ```
 
@@ -82,7 +82,7 @@ When you run ccusage for the first time, you'll see a table showing detected cod
 - **Models**: Which models were used
 - **Input**: Number of input tokens sent to the agent/model
 - **Output**: Number of output tokens received from the agent/model
-- **Cost (USD)**: Estimated cost based on model pricing
+- **Cost($)**: Estimated cost in USD based on model pricing. Values use two decimal places without repeating the dollar sign.
 
 ### Cache Tokens
 

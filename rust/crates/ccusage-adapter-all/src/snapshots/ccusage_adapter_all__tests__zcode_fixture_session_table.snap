@@ -25,7 +25,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&session.rows,\nAgentR
         "45",
         "65",
         "330",
-        "$0.00"
+        "0.00"
       ],
       "kind": "row"
     },
@@ -39,7 +39,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&session.rows,\nAgentR
         "0",
         "10",
         "55",
-        "$0.00"
+        "0.00"
       ],
       "kind": "row"
     },

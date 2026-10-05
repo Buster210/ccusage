@@ -1006,6 +1006,9 @@ fn table_snapshot(
     let mut total_cells = all_table_row(&total_row, false, false, false);
     total_cells[1].clear();
     total_cells[2].clear();
+    if let Some(cost_cell) = total_cells.last_mut() {
+        *cost_cell = format!("${:.2}", total_row.total_cost);
+    }
     rendered_rows.push(json!({
         "kind": "total",
         "cells": total_cells,
@@ -1447,7 +1450,7 @@ fn all_table_rows_match_main_agent_breakdown_display() {
 
     assert_eq!(
         all_table_row(&row, true, false, false),
-        vec!["2026-01-02", "All", "", "100", "20", "$0.01"]
+        vec!["2026-01-02", "All", "", "100", "20", "0.01"]
     );
     assert_eq!(
         all_table_row(
@@ -1456,7 +1459,7 @@ fn all_table_rows_match_main_agent_breakdown_display() {
             true,
             false,
         ),
-        vec!["", "Codex", "gpt-5", "100", "20", "$0.01"]
+        vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
     );
 }
 

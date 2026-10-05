@@ -29,6 +29,7 @@ pub struct SimpleTable {
     style: TerminalStyle,
     terminal_width: usize,
     compact_dates: bool,
+    tight_numeric_columns: bool,
     bold_headers: bool,
 }
 
@@ -41,6 +42,7 @@ impl SimpleTable {
             style: style.into(),
             terminal_width: DEFAULT_TERMINAL_WIDTH,
             compact_dates: false,
+            tight_numeric_columns: false,
             bold_headers: false,
         }
     }
@@ -52,6 +54,11 @@ impl SimpleTable {
 
     pub fn with_date_compaction(mut self, compact_dates: bool) -> Self {
         self.compact_dates = compact_dates;
+        self
+    }
+
+    pub fn with_tight_numeric_columns(mut self) -> Self {
+        self.tight_numeric_columns = true;
         self
     }
 
@@ -153,26 +160,45 @@ impl SimpleTable {
     }
 
     fn column_widths(&self) -> Vec<usize> {
-        let content_widths = self
+        let mut content_widths = self
             .headers
             .iter()
             .map(|header| visible_width_max_line(header))
             .collect::<Vec<_>>();
-        let mut content_widths = content_widths;
+        let mut data_widths = vec![0; self.headers.len()];
         for row in self.rows.iter().flatten() {
             for (index, cell) in row.cells.iter().enumerate() {
                 let cell_width = visible_width_max_line(cell);
                 if let Some(width) = content_widths.get_mut(index) {
                     *width = (*width).max(cell_width);
+                    data_widths[index] = data_widths[index].max(cell_width);
                 }
             }
         }
+        let numeric_minimums = self.tight_numeric_columns.then(|| {
+            self.headers
+                .iter()
+                .enumerate()
+                .map(|(index, header)| {
+                    let word_width = header
+                        .split_whitespace()
+                        .map(visible_width)
+                        .max()
+                        .unwrap_or(0);
+                    data_widths[index].max(word_width) + 2
+                })
+                .collect::<Vec<_>>()
+        });
         let widths = content_widths
             .iter()
             .enumerate()
             .map(|(index, width)| {
                 if self.aligns.get(index) == Some(&Align::Right) {
-                    (width + 3).max(11)
+                    if self.tight_numeric_columns {
+                        width + 2
+                    } else {
+                        (width + 3).max(11)
+                    }
                 } else if index == 1 {
                     (width + 2).max(15)
                 } else {
@@ -180,13 +206,13 @@ impl SimpleTable {
                 }
             })
             .collect::<Vec<_>>();
-        let total_required = cli_table_required_width(&widths);
-        let first_column_min = if self.compact_dates && total_required <= self.terminal_width {
-            12
-        } else {
-            10
-        };
-        fit_widths_to_terminal(widths, &self.aligns, self.terminal_width, first_column_min)
+        fit_widths_to_terminal(
+            widths,
+            &self.aligns,
+            self.terminal_width,
+            10,
+            numeric_minimums.as_deref(),
+        )
     }
 
     fn compact_date_row(&self, row: &[String], widths: &[usize]) -> Vec<String> {
@@ -228,14 +254,33 @@ fn expand_multiline_row(row: &[String], column_count: usize, widths: &[usize]) -
         .collect()
 }
 
+fn expand_widths_to_terminal(mut widths: Vec<usize>, terminal_width: usize) -> Vec<usize> {
+    let required = cli_table_required_width(&widths);
+    if required >= terminal_width || widths.is_empty() {
+        return widths;
+    }
+    let slack = terminal_width - required;
+    let extra = slack / widths.len();
+    let mut remainder = slack % widths.len();
+    for width in &mut widths {
+        *width += extra;
+        if remainder > 0 {
+            *width += 1;
+            remainder -= 1;
+        }
+    }
+    widths
+}
+
 fn fit_widths_to_terminal(
     mut widths: Vec<usize>,
     aligns: &[Align],
     terminal_width: usize,
     first_column_min: usize,
+    numeric_minimums: Option<&[usize]>,
 ) -> Vec<usize> {
     if cli_table_required_width(&widths) <= terminal_width {
-        return widths;
+        return expand_widths_to_terminal(widths, terminal_width);
     }
 
     let minimums = widths
@@ -243,7 +288,7 @@ fn fit_widths_to_terminal(
         .enumerate()
         .map(|(index, _)| {
             if aligns.get(index) == Some(&Align::Right) {
-                10
+                numeric_minimums.map_or(10, |minimums| minimums[index].min(10))
             } else if index == 0 {
                 first_column_min
             } else if index == 1 {
@@ -470,9 +515,41 @@ mod tests {
             &[Align::Left, Align::Left, Align::Right, Align::Right],
             60,
             12,
+            None,
         );
 
         assert!(cli_table_required_width(&widths) <= 60);
+    }
+
+    #[test]
+    fn tight_numeric_columns_expand_evenly_from_content_width() {
+        for (input, expected_widths) in [
+            ("100", vec![20, 23, 15, 17]),
+            ("123,456,789", vec![19, 22, 19, 15]),
+        ] {
+            let mut table = SimpleTable::new(
+                vec!["Date", "Models", "Input", "Cost($)"],
+                vec![Align::Left, Align::Left, Align::Right, Align::Right],
+                TerminalStyle {
+                    no_color: true,
+                    ..TerminalStyle::default()
+                },
+            )
+            .with_terminal_width(80)
+            .with_tight_numeric_columns();
+            table.push(vec![
+                "2026-05-18".to_string(),
+                "gpt-5.2-codex".to_string(),
+                input.to_string(),
+                "12.34".to_string(),
+            ]);
+
+            let widths = table.column_widths();
+            assert_eq!(widths, expected_widths);
+            let rendered = table.render_lines().join("\n");
+            assert!(rendered.contains("gpt-5.2-codex"));
+            assert!(rendered.contains(input));
+        }
     }
 
     #[test]
@@ -482,6 +559,7 @@ mod tests {
             &[Align::Left, Align::Left, Align::Right, Align::Right],
             49,
             12,
+            None,
         );
 
         assert_eq!(widths[2], 10);
@@ -561,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn column_widths_uses_max_line_not_sum_for_multiline_cells() {
+    fn column_widths_use_max_line_and_fill_terminal_slack() {
         let mut table = SimpleTable::new(
             vec!["Date", "Models", "Input", "Output", "Cost (USD)"],
             vec![
@@ -589,21 +667,20 @@ mod tests {
         let models_width = widths[1];
         let cell = "- claude-sonnet-4-20250514 (self-serve)\n- claude-opus-4-5\n- gpt-5.2-codex\n- gemini-3.0-pro-wildly-long\n- claude-haiku-3-5-sonnet";
         let widest_line = visible_width_max_line(cell);
-        let sum_of_lines = cell.lines().map(visible_width).sum::<usize>();
-        // If visible_width_sum were still used, models_width would be ~180
-        // With visible_width_max_line, it should be ~widest_line + padding
+        assert_eq!(cli_table_required_width(&widths), 200);
+        assert_eq!(widths[0], 34);
+        assert_eq!(&widths[2..], &[32, 32, 34]);
         assert!(
-            models_width < sum_of_lines,
-            "Models column width ({models_width}) should be based on widest line ({widest_line}), not sum of all lines ({sum_of_lines})"
+            models_width > widest_line,
+            "Models column ({models_width}) should exceed the widest line ({widest_line})"
         );
-        assert!(
-            models_width <= widest_line + 3,
-            "Models width ({models_width}) should be close to widest line width ({widest_line}), not {sum_of_lines}"
-        );
+        let rendered = table.render_lines().join("\n");
+        assert!(rendered.lines().all(|line| visible_width(line) == 200));
+        assert!(rendered.contains("- claude-sonnet-4-20250514 (self-serve)"));
     }
 
     #[test]
-    fn expands_wide_models_column_when_space_allows() {
+    fn expands_all_columns_evenly_when_space_allows() {
         let mut table = SimpleTable::new(
             vec!["Date", "Models", "Input", "Output", "Total Tokens"],
             vec![
@@ -636,9 +713,11 @@ mod tests {
         ]);
 
         let widths = table.column_widths();
-        assert_eq!(widths[1], 51);
+        assert_eq!(widths, vec![14, 53, 15, 15, 17]);
+        assert_eq!(cli_table_required_width(&widths), 120);
 
         let rendered = table.render_lines().join("\n");
+        assert!(rendered.lines().all(|line| visible_width(line) == 120));
         assert!(rendered.contains("- provider/this-is-a-deliberately-wide-model-name"));
         assert!(rendered.contains("99,999,999"));
         assert!(rendered.contains("88,888,888"));
@@ -983,10 +1062,11 @@ mod tests {
         ]);
 
         let widths = table.column_widths();
-        assert_eq!(widths[1], 32);
+        assert_eq!(widths, vec![33, 52, 31]);
+        assert_eq!(cli_table_required_width(&widths), 120);
 
         let rendered = table.render_lines().join("\n");
-        assert!(rendered.lines().all(|line| visible_width(line) <= 120));
+        assert!(rendered.lines().all(|line| visible_width(line) == 120));
     }
 
     #[test]
