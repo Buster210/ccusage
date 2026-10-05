@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use unicode_width::UnicodeWidthChar;
 
 /// Index of the first byte after the escape sequence starting at `index`.
@@ -72,11 +74,11 @@ pub(crate) fn ansi_continuation(value: &str) -> String {
     continuation
 }
 
-pub(crate) fn ensure_ansi_reset(value: &str) -> String {
+pub(crate) fn ensure_ansi_reset(value: &str) -> Cow<'_, str> {
     if !contains_ansi(value) || value.ends_with("\x1b[0m") {
-        return value.to_string();
+        return Cow::Borrowed(value);
     }
-    format!("{value}\x1b[0m")
+    Cow::Owned(format!("{value}\x1b[0m"))
 }
 
 /// Shorten `value` to at most `width` display columns, marking the cut with `…`.
