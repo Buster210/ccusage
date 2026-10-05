@@ -1,7 +1,10 @@
-use std::io::{self, Write};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+};
 
 use crate::{
-    style::{Color, TerminalStyle, color},
+    style::{Color, TerminalStyle, bold, color},
     terminal::DEFAULT_TERMINAL_WIDTH,
     width::{
         ansi_continuation, ensure_ansi_reset, truncate_to_width, visible_width,
@@ -9,20 +12,28 @@ use crate::{
     },
 };
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Align {
     Left,
+    Center,
     Right,
+}
+
+struct TableRow {
+    cells: Vec<String>,
+    cell_alignment: Option<(usize, Align)>,
+    bold: bool,
 }
 
 pub struct SimpleTable {
     headers: Vec<String>,
     aligns: Vec<Align>,
-    rows: Vec<Option<Vec<String>>>,
+    rows: Vec<Option<TableRow>>,
     style: TerminalStyle,
     terminal_width: usize,
     compact_dates: bool,
+    tight_numeric_columns: bool,
+    bold_headers: bool,
 }
 
 impl SimpleTable {
@@ -34,6 +45,8 @@ impl SimpleTable {
             style: style.into(),
             terminal_width: DEFAULT_TERMINAL_WIDTH,
             compact_dates: false,
+            tight_numeric_columns: false,
+            bold_headers: false,
         }
     }
 
@@ -47,8 +60,36 @@ impl SimpleTable {
         self
     }
 
+    pub fn with_tight_numeric_columns(mut self) -> Self {
+        self.tight_numeric_columns = true;
+        self
+    }
+
+    pub fn with_bold_headers(mut self) -> Self {
+        self.bold_headers = true;
+        self
+    }
+
     pub fn push(&mut self, row: Vec<String>) {
-        self.rows.push(Some(row));
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: None,
+            bold: false,
+        }));
+    }
+
+    pub fn push_with_cell_alignment(&mut self, row: Vec<String>, column: usize, align: Align) {
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: Some((column, align)),
+            bold: false,
+        }));
+    }
+
+    pub fn bold_last_row(&mut self) {
+        if let Some(Some(row)) = self.rows.last_mut() {
+            row.bold = true;
+        }
     }
 
     pub fn separator(&mut self) {
@@ -70,31 +111,52 @@ impl SimpleTable {
 
     fn render_lines(&self) -> Vec<String> {
         let widths = self.column_widths();
+        let separator = border('├', '┼', '┤', &widths);
+        let header_aligns = vec![Align::Center; widths.len()];
         let mut lines = Vec::new();
         lines.push(border('┌', '┬', '┐', &widths));
         for header_row in expand_multiline_row(&self.headers, self.headers.len(), &widths) {
             let header_row = header_row
                 .iter()
-                .map(|header| color(self.style, header, Color::Blue))
+                .map(|header| {
+                    let header = color(self.style, header, Color::Blue);
+                    if self.bold_headers {
+                        bold(self.style, &header)
+                    } else {
+                        header
+                    }
+                })
                 .collect::<Vec<_>>();
-            lines.push(table_line(&header_row, &self.aligns, &widths));
+            lines.push(table_line(&header_row, &header_aligns, &widths, None));
         }
-        lines.push(border('├', '┼', '┤', &widths));
+        lines.push(separator.clone());
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
                 Some(row) => {
-                    let row = self.compact_date_row(row, &widths);
-                    for physical_row in expand_multiline_row(&row, self.headers.len(), &widths) {
-                        lines.push(table_line(&physical_row, &self.aligns, &widths));
+                    let cells = self.compact_date_row(&row.cells, &widths);
+                    for mut physical_row in
+                        expand_multiline_row(&cells, self.headers.len(), &widths)
+                    {
+                        if row.bold {
+                            for cell in &mut physical_row {
+                                *cell = bold(self.style, cell);
+                            }
+                        }
+                        lines.push(table_line(
+                            &physical_row,
+                            &self.aligns,
+                            &widths,
+                            row.cell_alignment,
+                        ));
                     }
                 }
-                None => lines.push(border('├', '┼', '┤', &widths)),
+                None => lines.push(separator.clone()),
             }
             if row.is_some()
                 && row_index + 1 < self.rows.len()
                 && !matches!(self.rows.get(row_index + 1), Some(None))
             {
-                lines.push(border('├', '┼', '┤', &widths));
+                lines.push(separator.clone());
             }
         }
         lines.push(border('└', '┴', '┘', &widths));
@@ -102,26 +164,45 @@ impl SimpleTable {
     }
 
     fn column_widths(&self) -> Vec<usize> {
-        let content_widths = self
+        let mut content_widths = self
             .headers
             .iter()
             .map(|header| visible_width_max_line(header))
             .collect::<Vec<_>>();
-        let mut content_widths = content_widths;
+        let mut data_widths = vec![0; self.headers.len()];
         for row in self.rows.iter().flatten() {
-            for (index, cell) in row.iter().enumerate() {
+            for (index, cell) in row.cells.iter().enumerate() {
                 let cell_width = visible_width_max_line(cell);
                 if let Some(width) = content_widths.get_mut(index) {
                     *width = (*width).max(cell_width);
+                    data_widths[index] = data_widths[index].max(cell_width);
                 }
             }
         }
+        let numeric_minimums = self.tight_numeric_columns.then(|| {
+            self.headers
+                .iter()
+                .enumerate()
+                .map(|(index, header)| {
+                    let word_width = header
+                        .split_whitespace()
+                        .map(visible_width)
+                        .max()
+                        .unwrap_or(0);
+                    data_widths[index].max(word_width) + 2
+                })
+                .collect::<Vec<_>>()
+        });
         let widths = content_widths
             .iter()
             .enumerate()
             .map(|(index, width)| {
                 if self.aligns.get(index) == Some(&Align::Right) {
-                    (width + 3).max(11)
+                    if self.tight_numeric_columns {
+                        width + 2
+                    } else {
+                        (width + 3).max(11)
+                    }
                 } else if index == 1 {
                     (width + 2).max(15)
                 } else {
@@ -129,18 +210,18 @@ impl SimpleTable {
                 }
             })
             .collect::<Vec<_>>();
-        let total_required = cli_table_required_width(&widths);
-        let first_column_min = if self.compact_dates && total_required <= self.terminal_width {
-            12
-        } else {
-            10
-        };
-        fit_widths_to_terminal(widths, &self.aligns, self.terminal_width, first_column_min)
+        fit_widths_to_terminal(
+            widths,
+            &self.aligns,
+            self.terminal_width,
+            10,
+            numeric_minimums.as_deref(),
+        )
     }
 
-    fn compact_date_row(&self, row: &[String], widths: &[usize]) -> Vec<String> {
+    fn compact_date_row<'a>(&self, row: &'a [String], widths: &[usize]) -> Cow<'a, [String]> {
         if !self.compact_dates || widths.first().copied().unwrap_or_default() >= 12 {
-            return row.to_vec();
+            return Cow::Borrowed(row);
         }
         let mut row = row.to_vec();
         if let Some(first) = row.first_mut()
@@ -148,7 +229,7 @@ impl SimpleTable {
         {
             *first = compact;
         }
-        row
+        Cow::Owned(row)
     }
 }
 
@@ -177,14 +258,33 @@ fn expand_multiline_row(row: &[String], column_count: usize, widths: &[usize]) -
         .collect()
 }
 
+fn expand_widths_to_terminal(mut widths: Vec<usize>, terminal_width: usize) -> Vec<usize> {
+    let required = cli_table_required_width(&widths);
+    if required >= terminal_width || widths.is_empty() {
+        return widths;
+    }
+    let slack = terminal_width - required;
+    let extra = slack / widths.len();
+    let mut remainder = slack % widths.len();
+    for width in &mut widths {
+        *width += extra;
+        if remainder > 0 {
+            *width += 1;
+            remainder -= 1;
+        }
+    }
+    widths
+}
+
 fn fit_widths_to_terminal(
     mut widths: Vec<usize>,
     aligns: &[Align],
     terminal_width: usize,
     first_column_min: usize,
+    numeric_minimums: Option<&[usize]>,
 ) -> Vec<usize> {
     if cli_table_required_width(&widths) <= terminal_width {
-        return widths;
+        return expand_widths_to_terminal(widths, terminal_width);
     }
 
     let minimums = widths
@@ -192,7 +292,7 @@ fn fit_widths_to_terminal(
         .enumerate()
         .map(|(index, _)| {
             if aligns.get(index) == Some(&Align::Right) {
-                10
+                numeric_minimums.map_or(10, |minimums| minimums[index].min(10))
             } else if index == 0 {
                 first_column_min
             } else if index == 1 {
@@ -204,27 +304,87 @@ fn fit_widths_to_terminal(
         .collect::<Vec<_>>();
 
     // Smart shrink: keep Date (index 0) intact as long as possible.
-    while cli_table_required_width(&widths) > terminal_width {
-        let candidate = widths
-            .iter()
-            .enumerate()
-            .filter(|(idx, w)| **w > minimums[*idx] && *idx != 0)
-            .max_by_key(|(_, w)| **w)
-            .map(|(idx, _)| idx)
-            .or_else(|| {
-                widths
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, w)| **w > minimums[*idx])
-                    .max_by_key(|(_, w)| **w)
-                    .map(|(idx, _)| idx)
-            });
-        let Some(index) = candidate else {
-            break;
-        };
-        widths[index] -= 1;
+    let mut overflow = cli_table_required_width(&widths).saturating_sub(terminal_width);
+    if overflow > 0 {
+        if let Some(numeric) = numeric_minimums {
+            let shrinkable: Vec<(usize, usize)> = widths
+                .iter()
+                .enumerate()
+                .filter(|(index, width)| {
+                    aligns.get(*index) == Some(&Align::Right) && **width > numeric[*index]
+                })
+                .map(|(index, _)| (index, numeric[index]))
+                .collect();
+            overflow = absorb_overflow(&mut widths, &shrinkable, overflow);
+        }
+        for include_first in [false, true] {
+            if overflow == 0 {
+                break;
+            }
+            let shrinkable: Vec<(usize, usize)> = widths
+                .iter()
+                .enumerate()
+                .filter(|(index, width)| {
+                    (include_first || *index != 0) && **width > minimums[*index]
+                })
+                .map(|(index, _)| (index, minimums[index]))
+                .collect();
+            overflow = absorb_overflow(&mut widths, &shrinkable, overflow);
+        }
     }
     widths
+}
+
+fn absorb_overflow(widths: &mut [usize], shrinkable: &[(usize, usize)], overflow: usize) -> usize {
+    let capacity: usize = shrinkable
+        .iter()
+        .map(|(index, floor)| widths[*index].saturating_sub(*floor))
+        .sum();
+    let take = overflow.min(capacity);
+    if take == 0 {
+        return overflow;
+    }
+    let peak = shrinkable
+        .iter()
+        .map(|(index, _)| widths[*index])
+        .max()
+        .unwrap_or(0);
+    let base = shrinkable
+        .iter()
+        .map(|(_, floor)| *floor)
+        .min()
+        .unwrap_or(0);
+    let mut low = base;
+    let mut high = peak;
+    while low < high {
+        let mid = (low + high) / 2;
+        if shrink_reduction(widths, shrinkable, mid) <= take {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    let mut rest = take - shrink_reduction(widths, shrinkable, low);
+    for (index, floor) in shrinkable {
+        widths[*index] = (*floor).max(low).min(widths[*index]);
+    }
+    for (index, floor) in shrinkable.iter().rev() {
+        if rest == 0 {
+            break;
+        }
+        if widths[*index] == low && widths[*index] > *floor {
+            widths[*index] -= 1;
+            rest -= 1;
+        }
+    }
+    overflow - take
+}
+
+fn shrink_reduction(widths: &[usize], shrinkable: &[(usize, usize)], level: usize) -> usize {
+    shrinkable
+        .iter()
+        .map(|(index, floor)| widths[*index].saturating_sub((*floor).max(level)))
+        .sum()
 }
 
 fn cli_table_required_width(widths: &[usize]) -> usize {
@@ -267,16 +427,21 @@ fn wrap_cell_line(line: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_source = String::new();
+    let mut current_width = 0;
     for word in words {
+        let word_width = visible_width(&word);
         let candidate_width = if current.is_empty() {
-            visible_width(&word)
+            word_width
         } else {
-            visible_width(&current) + 1 + visible_width(&word)
+            current_width + 1 + word_width
         };
         if candidate_width <= width {
             if !current.is_empty() {
                 current.push(' ');
                 current_source.push(' ');
+                current_width += 1;
+            } else {
+                current_width = word_width;
             }
             current.push_str(&word);
             current_source.push_str(&word);
@@ -284,12 +449,14 @@ fn wrap_cell_line(line: &str, width: usize) -> Vec<String> {
             if !current.is_empty() {
                 lines.push((current, current_source));
             }
-            if visible_width(&word) > width {
+            if word_width > width {
                 current = truncate_to_width(&word, width);
+                current_width = visible_width(&current);
                 current_source = word;
             } else {
                 current_source = word.clone();
                 current = word;
+                current_width = word_width;
             }
         }
     }
@@ -330,12 +497,21 @@ fn compact_date_cell(value: &str) -> Option<String> {
     }
 }
 
-fn table_line(cells: &[String], aligns: &[Align], widths: &[usize]) -> String {
+fn table_line(
+    cells: &[String],
+    aligns: &[Align],
+    widths: &[usize],
+    cell_alignment: Option<(usize, Align)>,
+) -> String {
     let mut line = String::from("│");
     for (index, width) in widths.iter().enumerate() {
         let cell = cells.get(index).map(String::as_str).unwrap_or("");
         let align = if index == 0 && cell.starts_with("(assuming ") {
             Align::Right
+        } else if let Some((column, align)) = cell_alignment
+            && column == index
+        {
+            align
         } else {
             aligns.get(index).copied().unwrap_or(Align::Left)
         };
@@ -351,11 +527,15 @@ fn pad_cell(cell: &str, width: usize, align: Align) -> String {
     let cell = ensure_ansi_reset(cell);
     let visible = visible_width(&cell);
     if visible >= width {
-        return cell;
+        return cell.into_owned();
     }
     let padding = width - visible;
     match align {
         Align::Left => format!("{cell}{}", " ".repeat(padding)),
+        Align::Center => {
+            let left = padding / 2;
+            format!("{}{cell}{}", " ".repeat(left), " ".repeat(padding - left))
+        }
         Align::Right => format!("{}{cell}", " ".repeat(padding)),
     }
 }
@@ -379,6 +559,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn center_alignment_uses_visible_width_and_balanced_padding() {
+        for (cell, width, expected) in [
+            ("All", 9, "   All   "),
+            ("All", 8, "  All   "),
+            ("\x1b[32mAll", 9, "   \x1b[32mAll\x1b[0m   "),
+            ("界", 7, "  界   "),
+        ] {
+            assert_eq!(pad_cell(cell, width, Align::Center), expected);
+        }
+    }
+
+    #[test]
     fn compact_date_cell_splits_iso_dates() {
         assert_eq!(
             compact_date_cell("2026-05-18"),
@@ -394,9 +586,41 @@ mod tests {
             &[Align::Left, Align::Left, Align::Right, Align::Right],
             60,
             12,
+            None,
         );
 
         assert!(cli_table_required_width(&widths) <= 60);
+    }
+
+    #[test]
+    fn tight_numeric_columns_expand_evenly_from_content_width() {
+        for (input, expected_widths) in [
+            ("100", vec![20, 23, 15, 17]),
+            ("123,456,789", vec![19, 22, 19, 15]),
+        ] {
+            let mut table = SimpleTable::new(
+                vec!["Date", "Models", "Input", "Cost($)"],
+                vec![Align::Left, Align::Left, Align::Right, Align::Right],
+                TerminalStyle {
+                    no_color: true,
+                    ..TerminalStyle::default()
+                },
+            )
+            .with_terminal_width(80)
+            .with_tight_numeric_columns();
+            table.push(vec![
+                "2026-05-18".to_string(),
+                "gpt-5.2-codex".to_string(),
+                input.to_string(),
+                "12.34".to_string(),
+            ]);
+
+            let widths = table.column_widths();
+            assert_eq!(widths, expected_widths);
+            let rendered = table.render_lines().join("\n");
+            assert!(rendered.contains("gpt-5.2-codex"));
+            assert!(rendered.contains(input));
+        }
     }
 
     #[test]
@@ -406,6 +630,7 @@ mod tests {
             &[Align::Left, Align::Left, Align::Right, Align::Right],
             49,
             12,
+            None,
         );
 
         assert_eq!(widths[2], 10);
@@ -485,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn column_widths_uses_max_line_not_sum_for_multiline_cells() {
+    fn column_widths_use_max_line_and_fill_terminal_slack() {
         let mut table = SimpleTable::new(
             vec!["Date", "Models", "Input", "Output", "Cost (USD)"],
             vec![
@@ -513,21 +738,20 @@ mod tests {
         let models_width = widths[1];
         let cell = "- claude-sonnet-4-20250514 (self-serve)\n- claude-opus-4-5\n- gpt-5.2-codex\n- gemini-3.0-pro-wildly-long\n- claude-haiku-3-5-sonnet";
         let widest_line = visible_width_max_line(cell);
-        let sum_of_lines = cell.lines().map(visible_width).sum::<usize>();
-        // If visible_width_sum were still used, models_width would be ~180
-        // With visible_width_max_line, it should be ~widest_line + padding
+        assert_eq!(cli_table_required_width(&widths), 200);
+        assert_eq!(widths[0], 34);
+        assert_eq!(&widths[2..], &[32, 32, 34]);
         assert!(
-            models_width < sum_of_lines,
-            "Models column width ({models_width}) should be based on widest line ({widest_line}), not sum of all lines ({sum_of_lines})"
+            models_width > widest_line,
+            "Models column ({models_width}) should exceed the widest line ({widest_line})"
         );
-        assert!(
-            models_width <= widest_line + 3,
-            "Models width ({models_width}) should be close to widest line width ({widest_line}), not {sum_of_lines}"
-        );
+        let rendered = table.render_lines().join("\n");
+        assert!(rendered.lines().all(|line| visible_width(line) == 200));
+        assert!(rendered.contains("- claude-sonnet-4-20250514 (self-serve)"));
     }
 
     #[test]
-    fn expands_wide_models_column_when_space_allows() {
+    fn expands_all_columns_evenly_when_space_allows() {
         let mut table = SimpleTable::new(
             vec!["Date", "Models", "Input", "Output", "Total Tokens"],
             vec![
@@ -560,9 +784,11 @@ mod tests {
         ]);
 
         let widths = table.column_widths();
-        assert_eq!(widths[1], 51);
+        assert_eq!(widths, vec![14, 53, 15, 15, 17]);
+        assert_eq!(cli_table_required_width(&widths), 120);
 
         let rendered = table.render_lines().join("\n");
+        assert!(rendered.lines().all(|line| visible_width(line) == 120));
         assert!(rendered.contains("- provider/this-is-a-deliberately-wide-model-name"));
         assert!(rendered.contains("99,999,999"));
         assert!(rendered.contains("88,888,888"));
@@ -907,10 +1133,11 @@ mod tests {
         ]);
 
         let widths = table.column_widths();
-        assert_eq!(widths[1], 32);
+        assert_eq!(widths, vec![33, 52, 31]);
+        assert_eq!(cli_table_required_width(&widths), 120);
 
         let rendered = table.render_lines().join("\n");
-        assert!(rendered.lines().all(|line| visible_width(line) <= 120));
+        assert!(rendered.lines().all(|line| visible_width(line) == 120));
     }
 
     #[test]
@@ -1090,5 +1317,4 @@ mod tests {
             assert!(!input_cell.contains("\x1b[32m"), "{line:?}");
         }
     }
-
 }

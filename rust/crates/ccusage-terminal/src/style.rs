@@ -35,16 +35,38 @@ pub fn color(style: impl Into<TerminalStyle>, value: impl AsRef<str>, color: Col
     format!("\x1b[{code}m{value}\x1b[0m")
 }
 
+pub(crate) fn bold(style: TerminalStyle, value: &str) -> String {
+    if value.is_empty() || !use_terminal_style(&style) {
+        return value.to_string();
+    }
+    format!("\x1b[1m{value}\x1b[0m")
+}
+
 fn use_color(style: &TerminalStyle) -> bool {
     if style.no_color || env::var_os("NO_COLOR").is_some() {
         return false;
     }
+    use_terminal_style(style)
+}
+
+fn use_terminal_style(style: &TerminalStyle) -> bool {
     style.color || env::var_os("FORCE_COLOR").is_some() || io::stdout().is_terminal()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bold_remains_enabled_when_colors_are_disabled() {
+        let style = TerminalStyle {
+            color: true,
+            no_color: true,
+            ..TerminalStyle::default()
+        };
+
+        assert_eq!(bold(style, "Total"), "\x1b[1mTotal\x1b[0m");
+    }
 
     #[test]
     fn color_respects_explicit_no_color() {

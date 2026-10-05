@@ -42,7 +42,9 @@ ccusage detects local usage files from Claude Code, Codex, OpenCode, Amp, Droid,
 | Focused | `ccusage codex daily`  | One source using the same report shape  |
 | Focused | `ccusage claude daily` | One source with source-specific options |
 
-Unified tables include an **Agent** column so you can compare sources in one view. Focused views remove that comparison layer and show the selected source in more detail where applicable.
+Unified tables include an **Agent** column so you can compare sources in one view. Their **Cost($)** column shows USD amounts to two decimal places without repeating the dollar sign in each data or breakdown row; the final **Total** row keeps the dollar sign. Focused views retain their existing cost formatting and remove the agent comparison layer.
+
+Unified tables use content-sized numeric columns to leave more room for model names. Column headers and the `All` and final `Total` rows are bold when terminal styling is enabled; individual agent and model-breakdown rows keep their existing styling. Bold emphasis is preserved when `--no-color` or `NO_COLOR` disables colors. Piped output remains unstyled unless styling is explicitly forced.
 
 ## Supported Sources
 

@@ -182,7 +182,7 @@ bunx ccusage monthly --compact  # Compact monthly report
 - 🎨 **Beautiful Output**: Colorful table-formatted display with automatic responsive layout
 - 📱 **Smart Tables**: Automatic compact mode for narrow terminals (< 100 characters) with essential columns
 - 📸 **Compact Mode**: Use `--compact` flag to force compact table layout, perfect for screenshots and sharing
-- 📋 **Enhanced Model Display**: Model names shown as bulleted lists for better readability
+- 📋 **Enhanced Model Display**: Model names shown one per line for better readability
 - 📄 **JSON Output**: Export data in structured JSON format with `--json`
 - 💰 **Cost Tracking**: Shows costs in USD for each day/month/session
 - 🔒 **Cost Hiding**: Remove cost columns and JSON cost fields with `--no-cost`

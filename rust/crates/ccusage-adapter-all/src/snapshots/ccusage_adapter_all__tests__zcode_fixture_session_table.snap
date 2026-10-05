@@ -12,20 +12,20 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&session.rows,\nAgentR
     "Cache Create",
     "Cache Read",
     "Total Tokens",
-    "Cost (USD)"
+    "Cost($)"
   ],
   "rows": [
     {
       "cells": [
         "session-a",
         "ZCode",
-        "- GLM-5.2\n- GLM-5.3",
+        "GLM-5.2\nGLM-5.3",
         "190",
         "30",
         "45",
         "65",
         "330",
-        "$0.00"
+        "0.00"
       ],
       "kind": "row"
     },
@@ -33,13 +33,13 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&session.rows,\nAgentR
       "cells": [
         "session-b",
         "ZCode",
-        "- GLM-5.3",
+        "GLM-5.3",
         "40",
         "5",
         "0",
         "10",
         "55",
-        "$0.00"
+        "0.00"
       ],
       "kind": "row"
     },
