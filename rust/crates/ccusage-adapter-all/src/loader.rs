@@ -477,7 +477,7 @@ pub(super) fn load_agent_rows_parallel(
                     // A panicking loader fails just its own spec; the worker
                     // keeps draining the queue.
                     let result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || load()));
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(load));
                     let result = match result {
                         Ok(result) => result,
                         Err(_) => Err(crate::cli_error("agent loader panicked")),

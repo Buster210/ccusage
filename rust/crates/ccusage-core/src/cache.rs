@@ -7,7 +7,8 @@
 //! # Layout
 //!
 //! One SQLite database, `cache.db`, under [`cache_dir`] (`$XDG_CACHE_HOME/ccusage`,
-//! falling back to `~/.cache/ccusage`). Three tables:
+//! falling back to `~/.cache/ccusage`; on Windows `$LOCALAPPDATA/ccusage`, falling
+//! back to the home profile's `.cache/ccusage`). Three tables:
 //!
 //! - `files` — one row per source file: freshness fingerprint (mtime, size, cost
 //!   fingerprint) and a postcard-encoded `Vec<CachedEntry>` blob.
@@ -270,13 +271,36 @@ pub fn cache_dir() -> Option<PathBuf> {
 }
 
 fn dirs_cache_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+    // `LOCALAPPDATA` is only honored on Windows (see `is_windows` below), so
+    // reading it unconditionally is harmless and keeps this call cfg-free.
+    dirs_cache_dir_from_env(
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("LOCALAPPDATA"),
+        crate::home::home_dir(),
+        cfg!(windows),
+    )
+}
+
+/// Pure cache-base resolver behind [`dirs_cache_dir`], so the Windows
+/// `LOCALAPPDATA` branch is unit-testable on any host. `XDG_CACHE_HOME` wins
+/// everywhere; on Windows `LOCALAPPDATA` is next and the home profile's
+/// `.cache` is the last resort, matching the Unix fallback.
+fn dirs_cache_dir_from_env(
+    xdg_cache_home: Option<std::ffi::OsString>,
+    local_app_data: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+    is_windows: bool,
+) -> Option<PathBuf> {
+    if let Some(dir) = xdg_cache_home {
         return Some(PathBuf::from(dir));
     }
-    if let Some(dir) = std::env::var_os("HOME") {
-        return Some(PathBuf::from(dir).join(".cache"));
+    if is_windows
+        && let Some(dir) = local_app_data
+        && !dir.is_empty()
+    {
+        return Some(PathBuf::from(dir));
     }
-    None
+    Some(home?.join(".cache"))
 }
 
 /// Stable cache key derived from the source file path. Used as a compact
@@ -1507,20 +1531,18 @@ fn merge_ledger_with(
     // Blobs load under raw keys, so normalization stays at comparison time.
     let mut seen: FxHashSet<String>;
     let owned_raw: Vec<String>;
-    let stored_raw: &[String];
     match precomputed {
         Some((live_keys, raw)) => {
             seen = live_keys;
             owned_raw = raw;
-            stored_raw = &owned_raw;
         }
         None => {
             seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
             seen.extend(live.iter().map(entry_ledger_key));
             owned_raw = Vec::new();
-            stored_raw = &owned_raw;
         }
     }
+    let stored_raw: &[String] = &owned_raw;
     let mut out = live;
 
     if !live_only {
@@ -1893,6 +1915,52 @@ pub(crate) mod tests {
         let cold = sample_entry();
         let warm: LoadedEntry = CachedEntry::from(&cold).into();
         assert_eq!(warm.data.timestamp, cold.data.timestamp);
+    }
+
+    #[test]
+    fn prefers_xdg_cache_home_on_any_platform() {
+        let dir = dirs_cache_dir_from_env(
+            Some(std::ffi::OsString::from("/tmp/xdg")),
+            Some(std::ffi::OsString::from("C:\\Users\\u\\AppData\\Local")),
+            Some(PathBuf::from("/home/u")),
+            true,
+        );
+        assert_eq!(dir, Some(PathBuf::from("/tmp/xdg")));
+    }
+
+    #[test]
+    fn windows_uses_localappdata_without_xdg() {
+        let dir = dirs_cache_dir_from_env(
+            None,
+            Some(std::ffi::OsString::from("C:\\Users\\u\\AppData\\Local")),
+            Some(PathBuf::from("C:\\Users\\u")),
+            true,
+        );
+        assert_eq!(dir, Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")));
+    }
+
+    #[test]
+    fn windows_falls_back_to_home_dot_cache_without_localappdata() {
+        let home = PathBuf::from("C:\\Users\\u");
+        let dir = dirs_cache_dir_from_env(None, None, Some(home.clone()), true);
+        assert_eq!(dir, Some(home.join(".cache")));
+    }
+
+    #[test]
+    fn unix_ignores_localappdata() {
+        let dir = dirs_cache_dir_from_env(
+            None,
+            Some(std::ffi::OsString::from("C:\\Users\\u\\AppData\\Local")),
+            Some(PathBuf::from("/home/u")),
+            false,
+        );
+        assert_eq!(dir, Some(PathBuf::from("/home/u/.cache")));
+    }
+
+    #[test]
+    fn returns_none_without_any_cache_base() {
+        assert_eq!(dirs_cache_dir_from_env(None, None, None, false), None);
+        assert_eq!(dirs_cache_dir_from_env(None, None, None, true), None);
     }
 
     fn write_source(name: &str, contents: &str) -> PathBuf {

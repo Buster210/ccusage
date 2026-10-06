@@ -228,7 +228,8 @@ LOG_LEVEL=4 ccusage daily --debug
 
 Controls where `ccusage` stores its on-disk cache. The cache lives under
 `$XDG_CACHE_HOME/ccusage`; when `XDG_CACHE_HOME` is not set, it falls back to
-`~/.cache/ccusage`. The cache directory contains a SQLite database (`cache.db`)
+`~/.cache/ccusage` (on Windows, `%LOCALAPPDATA%\ccusage`, falling back to the
+home profile's `.cache/ccusage`). The cache directory contains a SQLite database (`cache.db`)
 and its WAL sidecar files (`cache.db-wal`, `cache.db-shm`).
 
 See [Clear Cache](/guide/clear-cache) for how to remove the cache.

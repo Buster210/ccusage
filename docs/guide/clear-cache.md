@@ -36,7 +36,8 @@ cache yet, in which case the command reports nothing to clear.
 A single SQLite database, `cache.db`, under:
 
 - `$XDG_CACHE_HOME/ccusage` when `XDG_CACHE_HOME` is set, otherwise
-- `~/.cache/ccusage`
+- `~/.cache/ccusage` (on Windows, `%LOCALAPPDATA%\ccusage`, falling back to
+  the home profile's `.cache/ccusage`)
 
 Two WAL sidecar files (`cache.db-wal`, `cache.db-shm`) sit alongside it.
 

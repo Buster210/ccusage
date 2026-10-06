@@ -234,7 +234,7 @@ ccusage daily --instances --project "My App"
 ### Persistent Cache
 
 `ccusage` keeps a small SQLite cache (`cache.db`) under `$XDG_CACHE_HOME/ccusage`
-(falling back to `~/.cache/ccusage`) so repeat runs are fast. The cache stores
+(falling back to `~/.cache/ccusage`; on Windows `%LOCALAPPDATA%\ccusage`) so repeat runs are fast. The cache stores
 parsed usage entries, OpenCode database rows, LiteLLM model pricing, and a spend
 ledger. Everything except the ledger is rebuilt from source logs on the next run.
 
@@ -371,7 +371,7 @@ If configuration issues persist:
 1. Run with debug mode: `ccusage daily --debug`
 2. Check verbose logs: `LOG_LEVEL=5 ccusage daily`
 3. Validate JSON config: `jq . < ccusage.json`
-4. Report issues on [GitHub](https://github.com/ccusage/ccusage/issues)
+4. Report issues on [GitHub](https://github.com/Buster210/ccusage/issues)
 
 ## Next Steps
 
