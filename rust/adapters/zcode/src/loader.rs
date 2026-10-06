@@ -3,8 +3,7 @@ use std::path::Path;
 use jiff::tz::TimeZone as JiffTimeZone;
 
 use crate::{
-    LoadedEntry, PricingMap, Result, cli::SharedArgs, debug_log,
-    fast::FxHashSet, parse_tz,
+    LoadedEntry, PricingMap, Result, cli::SharedArgs, debug_log, fast::FxHashSet, parse_tz,
 };
 
 use super::{
@@ -70,7 +69,14 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
             live_only: shared.live_only,
         },
         crate::cache::Freshness::FileStat,
-        |db_path| Ok(load_entries_from_database(db_path, tz.as_ref(), shared, pricing)),
+        |db_path| {
+            Ok(load_entries_from_database(
+                db_path,
+                tz.as_ref(),
+                shared,
+                pricing,
+            ))
+        },
         |e| {
             // Mirror the parse-time cost exactly (provider-aware resolution +
             // z.ai reshaping); the generic helper would reprice to a different
@@ -284,7 +290,10 @@ fn read_schema(
     })
 }
 
-fn table_columns(connection: &sqlite::Connection, table: &str) -> sqlite::Result<FxHashSet<String>> {
+fn table_columns(
+    connection: &sqlite::Connection,
+    table: &str,
+) -> sqlite::Result<FxHashSet<String>> {
     // LIMIT 0 obtains column metadata without materializing any row values,
     // including prompt or content fields that may be present in future schemas.
     let query = format!("SELECT * FROM \"{table}\" LIMIT 0");

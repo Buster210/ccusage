@@ -8,8 +8,8 @@ use jiff::tz::TimeZone as JiffTimeZone;
 
 use super::{
     parser::{
-        OpenCodeMessage, OpenCodeSessionAggregate, message_to_entry,
-        reprice, session_value_to_entry,
+        OpenCodeMessage, OpenCodeSessionAggregate, message_to_entry, reprice,
+        session_value_to_entry,
     },
     paths::paths,
 };
@@ -554,7 +554,7 @@ fn scan_message_table(
         match statement.next() {
             Ok(sqlite::State::Row) => {
                 let Some((id, session_id, data)) = read_id_session_data(&statement) else {
-                        continue;
+                    continue;
                 };
                 // Fork-copied history rows are inherited, not generated:
                 // drop them before the window check and the row cache so
@@ -853,11 +853,7 @@ fn last_parent_seq_before(
 /// differs: this scan selects `seq` at index 3 and only for
 /// `session_message`, so the caller passes the already-read value instead
 /// of the statement.
-fn is_fork_copy(
-    fork_copies: &FxHashMap<String, i64>,
-    session_id: &str,
-    seq: Option<i64>,
-) -> bool {
+fn is_fork_copy(fork_copies: &FxHashMap<String, i64>, session_id: &str, seq: Option<i64>) -> bool {
     let Some(cutoff) = fork_copies.get(session_id) else {
         return false;
     };

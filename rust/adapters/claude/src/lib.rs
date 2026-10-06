@@ -20,8 +20,7 @@ use smallvec::SmallVec;
 
 use crate::{
     LoadedEntry, LoadedFile, PricingMap, Result, Speed, TimestampMs, TokenUsageRaw, UsageEntry,
-    UsageMessage, UsageSummary, calculate_cost,
-    calculate_cost_for_usage_at,
+    UsageMessage, UsageSummary, calculate_cost, calculate_cost_for_usage_at,
     cli::{CostMode, SharedArgs},
     debug_log,
     fast::{FxHashMap, byte_lines, suffix_string},
@@ -69,9 +68,7 @@ pub fn load_daily_summaries(
     project_filter: Option<&str>,
     group_by_project: bool,
 ) -> Result<Vec<UsageSummary>> {
-    Ok(
-        load_daily_summaries_with_detection(shared, project_filter, group_by_project)?.summaries,
-    )
+    Ok(load_daily_summaries_with_detection(shared, project_filter, group_by_project)?.summaries)
 }
 
 /// Daily Claude summaries plus whether any Claude usage exists at all.
@@ -113,14 +110,18 @@ fn file_has_entry(file: &Path, project_filter: Option<&str>) -> bool {
     let tz = parse_tz(None);
     read_usage_file(file, tz.as_ref(), CostMode::Display, None)
         .map(|loaded| {
-            loaded.entries.iter().any(|entry| {
-                project_filter.is_none_or(|filter| entry.project.as_ref() == filter)
-            })
+            loaded
+                .entries
+                .iter()
+                .any(|entry| project_filter.is_none_or(|filter| entry.project.as_ref() == filter))
         })
         .unwrap_or(false)
 }
 
-fn summarize_loaded_entries(entries: Vec<LoadedEntry>, group_by_project: bool) -> Result<Vec<UsageSummary>> {
+fn summarize_loaded_entries(
+    entries: Vec<LoadedEntry>,
+    group_by_project: bool,
+) -> Result<Vec<UsageSummary>> {
     // Daily/monthly/weekly summaries share the cached, deduped entry path with
     // session and blocks so every Claude report mode warms (and is served by)
     // the on-disk cache and ledger. `summarize_by_key` reproduces the former
@@ -1049,8 +1050,7 @@ mod tests {
     use crate::fast::FxHashMap;
     use crate::{
         DedupeIndexVec, LoadedEntry, PricingMap, TimestampMs, TokenUsageRaw, UsageEntry,
-        UsageMessage,
-        cli::CostMode,
+        UsageMessage, cli::CostMode,
     };
     use ccusage_test_support::fs_fixture;
 
@@ -1251,7 +1251,8 @@ mod tests {
             None,
             CostMode::Calculate,
             Some(&PricingMap::default()),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].model.as_deref(), Some("claude-fable-5-1"));
@@ -1290,7 +1291,6 @@ mod tests {
         assert_eq!(loaded.entries[1].model.as_deref(), Some("advisor-model"));
         assert_eq!(loaded.entries[1].cost, 26.0);
     }
-
 
     #[test]
     fn keeps_gateway_usage_from_distinct_sessions_with_reused_message_id() {
@@ -1338,7 +1338,8 @@ mod tests {
             None,
             CostMode::Display,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         for entry in loaded.entries {
             push_deduped_entry(entry, &mut deduped_indexes, &mut deduped, false);
         }
@@ -1420,7 +1421,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
         push_deduped_entry(
             loaded_usage_entry(UsageEntryFixture {
@@ -1432,7 +1433,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
 
         assert_eq!(deduped.len(), 1);
@@ -1466,7 +1467,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
 
         let mut copied_session_replay = loaded_usage_entry(UsageEntryFixture {
@@ -1478,7 +1479,12 @@ mod tests {
         });
         copied_session_replay.data.session_id = Some("session-b".to_string());
         copied_session_replay.session_id = Arc::from("session-b");
-        push_deduped_entry(copied_session_replay, &mut deduped_indexes, &mut deduped, false);
+        push_deduped_entry(
+            copied_session_replay,
+            &mut deduped_indexes,
+            &mut deduped,
+            false,
+        );
 
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].data.request_id.as_deref(), Some("req-parent"));
@@ -1554,7 +1560,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
         push_deduped_entry(
             loaded_usage_entry(UsageEntryFixture {
@@ -1566,7 +1572,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
         push_deduped_entry(
             loaded_usage_entry(UsageEntryFixture {
@@ -1578,7 +1584,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
 
         assert_eq!(deduped.len(), 2);
@@ -1607,7 +1613,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
         push_deduped_entry(
             loaded_usage_entry(UsageEntryFixture {
@@ -1619,7 +1625,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
         push_deduped_entry(
             loaded_usage_entry(UsageEntryFixture {
@@ -1631,7 +1637,7 @@ mod tests {
             }),
             &mut deduped_indexes,
             &mut deduped,
-            false
+            false,
         );
 
         assert_eq!(deduped.len(), 1);

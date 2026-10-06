@@ -13,8 +13,7 @@ use crate::{
     Align, Color, ModelBreakdown, Result, SimpleTable, UsageSummary, attach_unpriced_models,
     cli::{AgentReportKind, SharedArgs, SortOrder},
     cli_error, color, format_breakdown_model_label, format_currency, format_models_multiline,
-    format_number,
-    json_float,
+    format_number, json_float,
     output::strip_cost_json,
     print_box_title, should_use_compact_layout, unpriced_models,
 };

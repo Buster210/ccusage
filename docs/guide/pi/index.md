@@ -16,9 +16,9 @@ ccusage pi --help
 
 The CLI reads usage data from pi:
 
-| Source   | Default path            | Override                      |
-| -------- | ----------------------- | ----------------------------- |
-| pi       | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
+| Source | Default path            | Override                      |
+| ------ | ----------------------- | ----------------------------- |
+| pi     | `~/.pi/agent/sessions/` | `PI_AGENT_DIR` or `--pi-path` |
 
 Both `PI_AGENT_DIR` and `--pi-path` can be one sessions directory or a comma-separated list of sessions directories.
 
@@ -72,10 +72,10 @@ ccusage pi daily --breakdown
 
 ## Environment Variables
 
-| Variable       | Description                                                             |
-| -------------- | ----------------------------------------------------------------------- |
+| Variable       | Description                                                       |
+| -------------- | ----------------------------------------------------------------- |
 | `PI_AGENT_DIR` | Custom path, or comma-separated paths, to pi sessions directories |
-| `LOG_LEVEL`    | Adjust logging verbosity (0 silent … 5 trace)                           |
+| `LOG_LEVEL`    | Adjust logging verbosity (0 silent … 5 trace)                     |
 
 ## Daily View
 
@@ -87,15 +87,15 @@ ccusage pi daily
 
 ### Options
 
-| Flag          | Short | Description                                                             |
-| ------------- | ----- | ----------------------------------------------------------------------- |
-| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                              |
-| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                                |
-| `--timezone`  | `-z`  | Override timezone for date grouping                                     |
-| `--json`      |       | Emit structured JSON instead of a table                                 |
-| `--breakdown` | `-b`  | Show per-model token breakdown                                          |
+| Flag          | Short | Description                                                       |
+| ------------- | ----- | ----------------------------------------------------------------- |
+| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                        |
+| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                          |
+| `--timezone`  | `-z`  | Override timezone for date grouping                               |
+| `--json`      |       | Emit structured JSON instead of a table                           |
+| `--breakdown` | `-b`  | Show per-model token breakdown                                    |
 | `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
-| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
+| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                     |
 
 ### Example Output
 
@@ -168,15 +168,15 @@ ccusage pi monthly
 
 ### Options
 
-| Flag          | Short | Description                                                             |
-| ------------- | ----- | ----------------------------------------------------------------------- |
-| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                              |
-| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                                |
-| `--timezone`  | `-z`  | Override timezone for date grouping                                     |
-| `--json`      |       | Emit structured JSON instead of a table                                 |
-| `--breakdown` | `-b`  | Show per-model token breakdown                                          |
+| Flag          | Short | Description                                                       |
+| ------------- | ----- | ----------------------------------------------------------------- |
+| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                        |
+| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                          |
+| `--timezone`  | `-z`  | Override timezone for date grouping                               |
+| `--json`      |       | Emit structured JSON instead of a table                           |
+| `--breakdown` | `-b`  | Show per-model token breakdown                                    |
 | `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
-| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
+| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                     |
 
 ### Example Output
 
@@ -249,15 +249,15 @@ ccusage pi session
 
 ### Options
 
-| Flag          | Short | Description                                                             |
-| ------------- | ----- | ----------------------------------------------------------------------- |
-| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                              |
-| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                                |
-| `--timezone`  | `-z`  | Override timezone for date grouping                                     |
-| `--json`      |       | Emit structured JSON instead of a table                                 |
-| `--breakdown` | `-b`  | Show per-model token breakdown                                          |
+| Flag          | Short | Description                                                       |
+| ------------- | ----- | ----------------------------------------------------------------- |
+| `--since`     |       | Start date filter (YYYY-MM-DD or YYYYMMDD)                        |
+| `--until`     |       | End date filter (YYYY-MM-DD or YYYYMMDD)                          |
+| `--timezone`  | `-z`  | Override timezone for date grouping                               |
+| `--json`      |       | Emit structured JSON instead of a table                           |
+| `--breakdown` | `-b`  | Show per-model token breakdown                                    |
 | `--pi-path`   |       | Custom path, or comma-separated paths, to pi sessions directories |
-| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                           |
+| `--order`     |       | Sort order: `asc` or `desc` (default: `desc`)                     |
 
 ### Example Output
 

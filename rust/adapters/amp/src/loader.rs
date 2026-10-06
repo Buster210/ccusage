@@ -1,6 +1,6 @@
 use crate::{
-    LoadedEntry, PricingMap, Result, adapter::parse_or_log,
-    cli::SharedArgs, collect_files_with_extension, parse_ts_timestamp, parse_tz,
+    LoadedEntry, PricingMap, Result, adapter::parse_or_log, cli::SharedArgs,
+    collect_files_with_extension, parse_ts_timestamp, parse_tz,
 };
 
 use super::{parser, paths};
@@ -50,7 +50,12 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
             // time-versioned schedules agree between cold and warm runs.
             let timestamp = parse_ts_timestamp(&e.data.timestamp);
             e.cost = crate::calculate_cost_for_usage_at(
-                model, cost_usage, None, timestamp, mode, Some(pricing),
+                model,
+                cost_usage,
+                None,
+                timestamp,
+                mode,
+                Some(pricing),
             );
             e.missing_pricing_model = crate::missing_pricing_model_for_usage(
                 model,

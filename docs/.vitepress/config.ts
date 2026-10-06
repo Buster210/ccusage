@@ -103,9 +103,7 @@ export default defineConfig({
 			],
 		},
 
-		socialLinks: [
-			{ icon: 'github', link: 'https://github.com/Buster210/ccusage' },
-		],
+		socialLinks: [{ icon: 'github', link: 'https://github.com/Buster210/ccusage' }],
 
 		footer: {
 			message: 'Released under the MIT License.',
@@ -117,7 +115,7 @@ export default defineConfig({
 		},
 
 		editLink: {
-			pattern: 'https://github.com/Buster210/ccusage/edit/main/docs/:path',
+			pattern: 'https://github.com/Buster210/ccusage/edit/master/docs/:path',
 			text: 'Edit this page on GitHub',
 		},
 
@@ -136,10 +134,7 @@ export default defineConfig({
 	},
 
 	vite: {
-		plugins: [
-			groupIconVitePlugin(),
-			...llmstxt(),
-		],
+		plugins: [groupIconVitePlugin(), ...llmstxt()],
 	},
 
 	markdown: {

@@ -61,6 +61,8 @@ mod tests {
     #[test]
     fn empty_usage_message_links_to_copilot_docs() {
         let message = empty_usage_message();
-        assert!(message.contains("https://github.com/Buster210/ccusage/blob/main/docs/guide/copilot/index.md"));
+        assert!(message.contains(
+            "https://github.com/Buster210/ccusage/blob/main/docs/guide/copilot/index.md"
+        ));
     }
 }

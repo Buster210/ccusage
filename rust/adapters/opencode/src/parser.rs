@@ -114,7 +114,8 @@ pub fn message_to_entry(
         speed: None,
         cache_creation: None,
     };
-    let (usage, extra_total_tokens) = apply_total_token_fallback(usage, tokens.reasoning, tokens.total);
+    let (usage, extra_total_tokens) =
+        apply_total_token_fallback(usage, tokens.reasoning, tokens.total);
     if usage.input_tokens == 0
         && usage.output_tokens == 0
         && usage.cache_creation_input_tokens == 0
@@ -277,7 +278,6 @@ fn message_value_to_entry_inner(
     })
 }
 
-
 /// Reprice a cached entry from stored tokens (fallback rules match [`open_code_cost_and_missing`]).
 pub(crate) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&PricingMap>) {
     let model = entry.data.message.model.clone().unwrap_or_default();
@@ -367,7 +367,6 @@ pub(crate) fn session_value_to_entry(
         },
     )
 }
-
 
 fn open_code_timestamp(value: &OpenCodeMessage) -> Option<crate::TimestampMs> {
     value
@@ -518,8 +517,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        OpenCodeCache, OpenCodeMessage, OpenCodeSessionAggregate, OpenCodeTime, OpenCodeTokens,
-        MessageEntryOptions, message_to_entry, message_value_to_entry_inner,
+        MessageEntryOptions, OpenCodeCache, OpenCodeMessage, OpenCodeSessionAggregate,
+        OpenCodeTime, OpenCodeTokens, message_to_entry, message_value_to_entry_inner,
         open_code_model_candidates, open_code_timestamp, session_value_to_entry,
     };
     use crate::{LoadedEntry, PricingMap, cli::CostMode};

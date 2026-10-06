@@ -736,7 +736,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -822,7 +822,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -902,7 +902,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -988,7 +988,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -1068,7 +1068,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -1154,7 +1154,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -1237,7 +1237,7 @@
 									"description": "Number of sample discrepancies to show in debug output.",
 									"format": "uint",
 									"markdownDescription": "Number of sample discrepancies to show in debug output.",
-									"minimum": 0.0,
+									"minimum": 0,
 									"type": "integer"
 								},
 								"jq": {
@@ -1323,7 +1323,7 @@
 											},
 											"maxInputTokens": {
 												"format": "uint64",
-												"minimum": 0.0,
+												"minimum": 0,
 												"type": "integer"
 											},
 											"outputCostPerToken": {
@@ -2147,7 +2147,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -4718,7 +4718,7 @@
 											},
 											"maxInputTokens": {
 												"format": "uint64",
-												"minimum": 0.0,
+												"minimum": 0,
 												"type": "integer"
 											},
 											"outputCostPerToken": {
@@ -13396,7 +13396,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -13482,7 +13482,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -13562,7 +13562,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -13648,7 +13648,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -13728,7 +13728,7 @@
 											"description": "Number of sample discrepancies to show in debug output.",
 											"format": "uint",
 											"markdownDescription": "Number of sample discrepancies to show in debug output.",
-											"minimum": 0.0,
+											"minimum": 0,
 											"type": "integer"
 										},
 										"jq": {
@@ -13814,7 +13814,7 @@
 													},
 													"maxInputTokens": {
 														"format": "uint64",
-														"minimum": 0.0,
+														"minimum": 0,
 														"type": "integer"
 													},
 													"outputCostPerToken": {
@@ -13897,7 +13897,7 @@
 									"description": "Number of sample discrepancies to show in debug output.",
 									"format": "uint",
 									"markdownDescription": "Number of sample discrepancies to show in debug output.",
-									"minimum": 0.0,
+									"minimum": 0,
 									"type": "integer"
 								},
 								"jq": {
@@ -13983,7 +13983,7 @@
 											},
 											"maxInputTokens": {
 												"format": "uint64",
-												"minimum": 0.0,
+												"minimum": 0,
 												"type": "integer"
 											},
 											"outputCostPerToken": {

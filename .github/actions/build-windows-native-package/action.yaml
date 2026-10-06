@@ -14,6 +14,16 @@ runs:
       with:
         platform: win32
 
+    - name: Install fork-pinned Rust toolchain
+      shell: bash
+      # Nix cannot target Windows, so this job uses the runner's rustup.
+      # Install the exact channel from rust-toolchain.toml (read here, not
+      # duplicated) so this build uses the same compiler as the dev shell
+      # and the Nix CI jobs instead of the runner's floating default.
+      run: |
+        TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)
+        rustup toolchain install "$TOOLCHAIN" --profile minimal
+
     - name: Build Cargo native binary
       shell: bash
       # Nix cannot target Windows, so this is the one build that downloads the

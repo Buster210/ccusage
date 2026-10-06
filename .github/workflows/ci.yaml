@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 permissions: read-all
@@ -242,7 +242,6 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
-
 
   # Single check for main's branch ruleset to require. Most jobs above are gated
   # on `changes` and are skipped on docs-only pull requests, so requiring them

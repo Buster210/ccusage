@@ -181,9 +181,7 @@ fn load_entries_from_paths(
                 continue;
             };
             lineage.insert(index);
-            if let Some(parent_index) =
-                resolve_parent_index(parent, &flat[index], &files_by_path)
-            {
+            if let Some(parent_index) = resolve_parent_index(parent, &flat[index], &files_by_path) {
                 lineage.insert(parent_index);
             }
         }
@@ -198,10 +196,11 @@ fn load_entries_from_paths(
         entry.cost = cost;
         entry.missing_pricing_model = missing_pricing_model;
     };
-    let mut loaded: Vec<Option<parser::PiSessionData>> =
-        (0..flat.len()).map(|_| None).collect();
+    let mut loaded: Vec<Option<parser::PiSessionData>> = (0..flat.len()).map(|_| None).collect();
     let mut entries_by_index: HashMap<usize, Vec<LoadedEntry>> = HashMap::new();
-    let parse_started = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+    let parse_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(std::time::Instant::now);
     for unit in &units {
         let lineage_paths: Vec<&PathBuf> = unit
             .files
@@ -216,15 +215,13 @@ fn load_entries_from_paths(
                     PiLoadScope::Default => {
                         parser::read_session_file_data(file, tz.as_ref(), shared.mode, pricing)
                     }
-                    PiLoadScope::Named { .. } => {
-                        parser::read_session_file_data_for_store(
-                            file,
-                            &unit.root,
-                            tz.as_ref(),
-                            shared.mode,
-                            pricing,
-                        )
-                    }
+                    PiLoadScope::Named { .. } => parser::read_session_file_data_for_store(
+                        file,
+                        &unit.root,
+                        tz.as_ref(),
+                        shared.mode,
+                        pricing,
+                    ),
                 };
                 match result {
                     Ok(data) => Some(data),
@@ -272,27 +269,21 @@ fn load_entries_from_paths(
         if plain.is_empty() {
             continue;
         }
-        let plain_paths: Vec<PathBuf> =
-            plain.iter().map(|(_, file)| file.clone()).collect();
+        let plain_paths: Vec<PathBuf> = plain.iter().map(|(_, file)| file.clone()).collect();
         let parse_cached = |file: &Path| -> Result<Vec<LoadedEntry>> {
             let result = match scope {
-                PiLoadScope::Default => parser::read_session_file_data_lean(
+                PiLoadScope::Default => {
+                    parser::read_session_file_data_lean(file, tz.as_ref(), shared.mode, pricing)
+                        .map(|data| data.entries)
+                }
+                PiLoadScope::Named { .. } => parser::read_session_file_data_for_store_lean(
                     file,
+                    &unit.root,
                     tz.as_ref(),
                     shared.mode,
                     pricing,
                 )
                 .map(|data| data.entries),
-                PiLoadScope::Named { .. } => {
-                    parser::read_session_file_data_for_store_lean(
-                        file,
-                        &unit.root,
-                        tz.as_ref(),
-                        shared.mode,
-                        pricing,
-                    )
-                    .map(|data| data.entries)
-                }
             };
             Ok(result.unwrap_or_else(|error| {
                 match scope {
@@ -330,7 +321,9 @@ fn load_entries_from_paths(
     if let Some(parse_started) = parse_started {
         eprintln!("[timing] pi: parse {:?}", parse_started.elapsed());
     }
-    let tail_started = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+    let tail_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(std::time::Instant::now);
     let replay_plan = PiReplayPlan::new(&flat, &loaded, &files_by_path);
     for (index, data) in loaded.into_iter().enumerate() {
         let Some(data) = data else {
@@ -357,7 +350,9 @@ fn load_entries_from_paths(
         per_unit[*unit_no].extend(entries);
     }
     let mut live: Vec<LoadedEntry> = Vec::new();
-    let ledger_started = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+    let ledger_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+        .is_some()
+        .then(std::time::Instant::now);
     for (unit, entries) in units.iter().zip(per_unit) {
         live.extend(crate::cache::retain_via_ledger(
             &unit.namespace,
@@ -382,7 +377,10 @@ fn load_entries_from_paths(
     }
     entries.sort_by_key(|entry| entry.timestamp);
     if let Some(tail_started) = tail_started {
-        eprintln!("[timing] pi: dedup_ledger_sort {:?}", tail_started.elapsed());
+        eprintln!(
+            "[timing] pi: dedup_ledger_sort {:?}",
+            tail_started.elapsed()
+        );
     }
     Ok(entries)
 }
@@ -1822,7 +1820,10 @@ mod tests {
             PiLoadScope::Default,
         )
         .unwrap();
-        assert!(entries.is_empty(), "live_only must not re-emit deleted spend");
+        assert!(
+            entries.is_empty(),
+            "live_only must not re-emit deleted spend"
+        );
     }
 
     #[test]

@@ -6,9 +6,10 @@ use serde_json::{Map, Value};
 
 use crate::{
     LoadedEntry, PricingMap, Result, TimestampMs, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost_for_usage_at, cli::CostMode,
-    fast::{FxHashMap, FxHashSet}, format_date_tz,
-    missing_pricing_model_for_candidates, non_empty_json_string,
+    apply_total_token_fallback, calculate_cost_for_usage_at,
+    cli::CostMode,
+    fast::{FxHashMap, FxHashSet},
+    format_date_tz, missing_pricing_model_for_candidates, non_empty_json_string,
 };
 use ccusage_adapter_common::jsonl;
 
@@ -557,8 +558,7 @@ pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: &Pricing
     entry.cost = calculate_gemini_cost(
         &model,
         cost_usage,
-        crate::parse_ts_timestamp(&entry.data.timestamp)
-            .unwrap_or(crate::TimestampMs::UNIX_EPOCH),
+        crate::parse_ts_timestamp(&entry.data.timestamp).unwrap_or(crate::TimestampMs::UNIX_EPOCH),
         mode,
         pricing,
     );

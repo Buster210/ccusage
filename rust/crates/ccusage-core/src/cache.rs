@@ -1579,13 +1579,12 @@ fn merge_ledger_with(
         // Rust-side date check via the blob so legacy rows don't leak outside the window.
         // A windowed filter always re-scans so date/NULL semantics stay in SQL.
         let scanned;
-        let stored_keys: &[String] =
-            if date_filter.is_none() && !stored_raw.is_empty() {
-                stored_raw
-            } else {
-                scanned = load_ledger_keys(conn, namespace, date_filter);
-                &scanned
-            };
+        let stored_keys: &[String] = if date_filter.is_none() && !stored_raw.is_empty() {
+            stored_raw
+        } else {
+            scanned = load_ledger_keys(conn, namespace, date_filter);
+            &scanned
+        };
         let deleted_keys: Vec<String> = stored_keys
             .iter()
             .filter(|k| !seen.contains(normalize_ledger_key(k).as_ref()))
@@ -1726,11 +1725,11 @@ pub fn retain_via_ledger(
 ) -> Vec<LoadedEntry> {
     match open_db() {
         Some(conn) => {
-            let cover_started =
-                std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+            let cover_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+                .is_some()
+                .then(std::time::Instant::now);
             let sets = load_ledger_key_sets(&conn, namespace);
-            let mut seen =
-                FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
+            let mut seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
             let mut missing = Vec::new();
             for (index, entry) in live.iter().enumerate() {
                 let key = entry_ledger_key(entry);
@@ -1746,12 +1745,12 @@ pub fn retain_via_ledger(
                     missing.len()
                 );
             }
-            let append_started =
-                std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some().then(std::time::Instant::now);
+            let append_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
+                .is_some()
+                .then(std::time::Instant::now);
             if !missing.is_empty() && conn.execute("BEGIN IMMEDIATE").is_ok() {
                 // No per-file cache here, so append in our own transaction.
-                let ok = append_missing_ledger_entries(&conn, namespace, &live, &missing)
-                    .is_some();
+                let ok = append_missing_ledger_entries(&conn, namespace, &live, &missing).is_some();
                 let _ = conn.execute(if ok { "COMMIT" } else { "ROLLBACK" });
             }
             if let Some(append_started) = append_started {
@@ -1787,8 +1786,11 @@ fn load_ledger_key_sets(conn: &sqlite::Connection, namespace: &str) -> LedgerKey
     let stored_raw = load_ledger_keys(conn, namespace, None);
     let mut stored_normalized =
         FxHashSet::with_capacity_and_hasher(stored_raw.len(), Default::default());
-    stored_normalized
-        .extend(stored_raw.iter().map(|key| normalize_ledger_key(key).into_owned()));
+    stored_normalized.extend(
+        stored_raw
+            .iter()
+            .map(|key| normalize_ledger_key(key).into_owned()),
+    );
     LedgerKeySets {
         stored_raw,
         stored_normalized,
@@ -2346,10 +2348,7 @@ pub(crate) mod tests {
         let live = vec![sample_entry()];
         let first = retain_via_ledger("test-ns-covered", live.clone(), false, None);
         assert_eq!(first.len(), 1);
-        let sets = load_ledger_key_sets(
-            &open_db().expect("cache db must open"),
-            "test-ns-covered",
-        );
+        let sets = load_ledger_key_sets(&open_db().expect("cache db must open"), "test-ns-covered");
         assert_eq!(sets.stored_raw.len(), 1);
         let second = retain_via_ledger("test-ns-covered", live, false, None);
         assert_eq!(second.len(), 1);

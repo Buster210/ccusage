@@ -10,7 +10,9 @@ use serde::Deserialize;
 use crate::{
     LoadedEntry, Pricing, PricingMap, Result, TokenUsageRaw, UsageEntry, UsageMessage,
     apply_total_token_fallback, calculate_cost_for_usage_at, calculate_cost_from_pricing,
-    cli::CostMode, fast::{FxHashMap, FxHashSet, LinePrefilter}, format_date_tz, missing_pricing_model_for_usage,
+    cli::CostMode,
+    fast::{FxHashMap, FxHashSet, LinePrefilter},
+    format_date_tz, missing_pricing_model_for_usage,
 };
 use ccusage_adapter_common::jsonl;
 
@@ -345,25 +347,17 @@ fn read_session_file_data_with_context(
     // (and their capacity reservation) entirely.
     let mut usage_records = Vec::with_capacity(if collect_usage { line_hint } else { 0 });
     // Single-pass link collection, byte-for-byte identical to the old two-pass set.
-    let mut links: Vec<PiEntryLink> = Vec::with_capacity(if collect_usage {
-        line_hint
-    } else {
-        0
-    });
+    let mut links: Vec<PiEntryLink> = Vec::with_capacity(if collect_usage { line_hint } else { 0 });
 
     for line in crate::fast::byte_lines(&content) {
         if !prefilter.matches(line) {
-            if collect_usage
-                && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line)
-            {
+            if collect_usage && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line) {
                 links.push(link);
             }
             continue;
         }
         let Ok(record) = serde_json::from_slice::<PiLine>(line) else {
-            if collect_usage
-                && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line)
-            {
+            if collect_usage && let Ok(link) = serde_json::from_slice::<PiEntryLink>(line) {
                 links.push(link);
             }
             continue;
@@ -1113,10 +1107,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].model.as_deref(), Some("gpt-5"));
-        assert_eq!(
-            entries[0].data.message.model.as_deref(),
-            Some("gpt-5")
-        );
+        assert_eq!(entries[0].data.message.model.as_deref(), Some("gpt-5"));
     }
 
     #[test]
@@ -1187,7 +1178,9 @@ mod tests {
         let expected_cost = 0.018000000000000002;
         let contexts = [
             PiStoreContext::Default,
-            PiStoreContext::Named { root: Path::new(".") },
+            PiStoreContext::Named {
+                root: Path::new("."),
+            },
         ];
 
         for context in contexts {

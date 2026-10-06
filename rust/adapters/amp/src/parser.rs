@@ -6,9 +6,8 @@ use serde_json::Value;
 
 use crate::{
     LoadedEntry, PricingMap, Result, TokenUsageRaw, UsageEntry, UsageMessage,
-    apply_total_token_fallback, calculate_cost, cli::CostMode, format_date_tz,
-    fast::FxHashMap, json_value_u64,
-    missing_pricing_model_for_usage, non_empty_json_string,
+    apply_total_token_fallback, calculate_cost, cli::CostMode, fast::FxHashMap, format_date_tz,
+    json_value_u64, missing_pricing_model_for_usage, non_empty_json_string,
 };
 
 /// A single Amp thread file: one JSON object holding the thread id, the chat

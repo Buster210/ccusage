@@ -325,7 +325,10 @@ mod tests {
         let _cleanup = EnvVarGuard::set(super::super::paths::KILO_DATA_DIR_ENV, fixture.root());
         let shared = SharedArgs::default();
         let entries = load_entries(&shared, &PricingMap::load_embedded()).unwrap();
-        assert!(entries.is_empty(), "missing message table must fail open to empty");
+        assert!(
+            entries.is_empty(),
+            "missing message table must fail open to empty"
+        );
     }
 
     #[test]

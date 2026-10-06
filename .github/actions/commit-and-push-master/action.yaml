@@ -1,7 +1,7 @@
-name: Commit and push to main
+name: Commit and push to master
 description: >
-  Commit the given paths as github-actions[bot] and push them to main, rebasing
-  onto whatever main has become while the caller was validating. Callers must
+  Commit the given paths as github-actions[bot] and push them to master, rebasing
+  onto whatever master has become while the caller was validating. Callers must
   check out with fetch-depth: 0, because a shallow clone has no merge base to
   rebase onto, and must only run this when the paths actually changed.
 inputs:
@@ -14,7 +14,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Commit and push to main
+    - name: Commit and push to master
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -29,10 +29,10 @@ runs:
         # shellcheck disable=SC2086
         git commit --message "$MESSAGE" -- $PATHS
 
-        git fetch origin main
-        if ! git rebase origin/main; then
+        git fetch origin master
+        if ! git rebase origin/master; then
           git rebase --abort
-          echo 'main moved with a conflicting change; the next run will retry.'
+          echo 'master moved with a conflicting change; the next run will retry.'
           exit 1
         fi
-        git push origin HEAD:main
+        git push origin HEAD:master

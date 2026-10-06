@@ -3269,7 +3269,6 @@ mod tests {
         assert!((kimi_k27_code.output * 1e6 - 4.0).abs() < 1e-9);
     }
 
-
     #[test]
     fn a_separator_spelling_of_an_exact_only_id_is_priced_as_that_id() {
         // `pricing_key_matches` reads `@`, `.` and `-` as one separator, so
@@ -3325,7 +3324,6 @@ mod tests {
         assert!(dotted.input > base.input);
         assert_eq!(pricing.context_limit("claude-opus-5-fast"), Some(765432));
     }
-
 
     #[test]
     fn exact_fallback_lookup_resolves_separator_spellings_of_exact_only_ids() {
@@ -3468,7 +3466,6 @@ mod tests {
         assert_eq!(turbo.output, 17e-6);
         assert_eq!(pricing.context_limit("claude-opus-5-turbo"), Some(765432));
     }
-
 
     #[test]
     fn offline_prices_kimi_k3_from_embedded_models_dev() {

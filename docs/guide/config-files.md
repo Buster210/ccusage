@@ -432,11 +432,11 @@ ccusage looks up token costs from a LiteLLM pricing snapshot embedded in the bin
 
 Keys in `pricingOverrides` are matched against the model label reported by ccusage first (check the `model` field in `ccusage <agent> daily --json`), then the raw model id; configured aliases and legacy `[prefix]` spellings also resolve:
 
-| Adapter                                | Prefix    | Example key                    |
-| -------------------------------------- | --------- | ------------------------------ |
-| Pi                                     | none      | `gpt-5.4`                      |
-| Named Pi store                         | none      | `gpt-5.4`                      |
-| Others (Claude, Codex, OpenCode, etc.) | none      | `claude-sonnet-4-5`, `gpt-5.5` |
+| Adapter                                | Prefix | Example key                    |
+| -------------------------------------- | ------ | ------------------------------ |
+| Pi                                     | none   | `gpt-5.4`                      |
+| Named Pi store                         | none   | `gpt-5.4`                      |
+| Others (Claude, Codex, OpenCode, etc.) | none   | `claude-sonnet-4-5`, `gpt-5.5` |
 
 To find the exact name, run `ccusage <agent> daily --json` and look at the `model` field in the per-row breakdown.
 Pi also accepts a bare model name as an override key; that key applies to the default store and any named Pi store using the same model. Use the prefixed label to price one store separately.

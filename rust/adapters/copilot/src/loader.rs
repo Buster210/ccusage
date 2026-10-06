@@ -129,10 +129,7 @@ fn load_entries_inner(
         .collect::<HashMap<_, _>>();
     otel_entries.retain(|entry| {
         latest_shutdown_timestamps
-            .get(&(
-                &*entry.session_id,
-                entry.model.as_deref().unwrap_or(""),
-            ))
+            .get(&(&*entry.session_id, entry.model.as_deref().unwrap_or("")))
             .is_none_or(|shutdown_timestamp| entry.timestamp > *shutdown_timestamp)
     });
 

@@ -2,12 +2,12 @@ name: update pricing
 
 on:
   schedule:
-    - cron: '30 12 * * *' # 6pm IST daily
+    - cron: '30 12 * * *' # 6pm India time daily
   workflow_dispatch:
 
 permissions: {}
 
-# Both legs push to main, so a manual dispatch landing on top of the daily
+# Both legs push to master, so a manual dispatch landing on top of the daily
 # schedule would otherwise race the other run's push.
 concurrency:
   group: update-pricing
@@ -71,7 +71,7 @@ jobs:
             run: |
               git diff --quiet && exit 0
               apps/ccusage/scripts/compare-pr-performance_test.clj
-      - uses: ./.github/actions/commit-and-push-main
+      - uses: ./.github/actions/commit-and-push-master
         if: steps.update.outputs.changed == 'true'
         with:
           message: ${{ matrix.message }}

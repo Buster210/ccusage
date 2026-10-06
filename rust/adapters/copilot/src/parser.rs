@@ -1,14 +1,11 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::{
-    Result, TimestampMs, TokenUsageRaw, apply_total_token_fallback, fast::{FxHashMap, FxHashSet, LinePrefilter},
+    Result, TimestampMs, TokenUsageRaw, apply_total_token_fallback,
+    fast::{FxHashMap, FxHashSet, LinePrefilter},
     parse_ts_timestamp,
 };
 use ccusage_adapter_common::jsonl;

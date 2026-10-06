@@ -234,8 +234,7 @@ pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&
     entry.cost = calculate_qwen_cost(
         &model,
         billable_usage,
-        crate::parse_ts_timestamp(&entry.data.timestamp)
-            .unwrap_or(crate::TimestampMs::UNIX_EPOCH),
+        crate::parse_ts_timestamp(&entry.data.timestamp).unwrap_or(crate::TimestampMs::UNIX_EPOCH),
         mode,
         pricing,
     );

@@ -21,8 +21,8 @@ Time release builds only:
 direnv exec . cargo build --manifest-path rust/Cargo.toml --release --bin ccusage
 ```
 
-Build main in a separate worktree so the checkout you are editing stays put
-(`git wt`, or `git worktree add /tmp/ccusage-main origin/main`) and build it the
+Build master in a separate worktree so the checkout you are editing stays put
+(`git wt`, or `git worktree add /tmp/ccusage-master origin/master`) and build it the
 same way; the binaries land at `<worktree>/rust/target/release/ccusage`.
 
 Every measured command carries the same prefix. Without it, progress output,

@@ -141,7 +141,10 @@ craneLib.buildPackage (
     meta = {
       inherit (cliPackageJson) description homepage;
       license = lib.getLicenseFromSpdxId cliPackageJson.license;
-      mainProgram = builtins.head (builtins.attrNames cliPackageJson.bin);
+      # The npm `bin` map is gone (GitHub-Releases-only distribution), and the
+      # binary name is stable: crane builds `-p ccusage --bin ccusage` and the
+      # release pipeline hardcodes `ccusage` filenames, so pin it literally.
+      mainProgram = "ccusage";
     };
   }
 )

@@ -245,8 +245,7 @@ pub(super) fn reprice(entry: &mut LoadedEntry, pricing: &PricingMap) {
         &provider_id,
         entry.data.message.usage,
         reasoning_tokens,
-        crate::parse_ts_timestamp(&entry.data.timestamp)
-            .unwrap_or(crate::TimestampMs::UNIX_EPOCH),
+        crate::parse_ts_timestamp(&entry.data.timestamp).unwrap_or(crate::TimestampMs::UNIX_EPOCH),
         pricing,
     );
     let missing_pricing_model = missing_goose_pricing(

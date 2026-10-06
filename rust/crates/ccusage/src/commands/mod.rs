@@ -13,9 +13,9 @@ use serde_json::json;
 use crate::blocks::SessionBlock;
 use crate::pricing::PricingMap;
 use crate::{
-    BucketKind, Color, Context, DEFAULT_RECENT_DAYS, DEFAULT_SESSION_DURATION_HOURS,
-    LoadedEntry, MILLIS_PER_DAY, MILLIS_PER_HOUR, MILLIS_PER_MINUTE, Result, SessionAccumulator,
-    TimestampMs, UsageSummary, block_json, calculate_burn_rate,
+    BucketKind, Color, Context, DEFAULT_RECENT_DAYS, DEFAULT_SESSION_DURATION_HOURS, LoadedEntry,
+    MILLIS_PER_DAY, MILLIS_PER_HOUR, MILLIS_PER_MINUTE, Result, SessionAccumulator, TimestampMs,
+    UsageSummary, block_json, calculate_burn_rate,
     cli::{
         BlocksArgs, CostSource, DailyArgs, SessionArgs, SharedArgs, SortOrder, StatuslineArgs,
         VisualBurnRate, WeekDay, WeeklyArgs,
@@ -24,10 +24,10 @@ use crate::{
     fast::FxHashMap,
     filter_and_sort_summaries, filter_blocks_by_date, format_currency, format_date, format_number,
     format_remaining_time, format_rfc3339_millis, group_project_output, identify_session_blocks,
-    load_daily_summaries, load_entries, load_entries_since, print_active_block_detail, print_blocks_table,
-    print_json_or_jq, print_usage_table, session_summary_json, sort_blocks, sort_summaries,
-    summarize_by_key, summarize_summaries_by_bucket, summary_json, total_usage_tokens, totals_json,
-    utc_now, wants_json,
+    load_daily_summaries, load_entries, load_entries_since, print_active_block_detail,
+    print_blocks_table, print_json_or_jq, print_usage_table, session_summary_json, sort_blocks,
+    sort_summaries, summarize_by_key, summarize_summaries_by_bucket, summary_json,
+    total_usage_tokens, totals_json, utc_now, wants_json,
 };
 
 pub(crate) fn run_daily(args: DailyArgs) -> Result<()> {

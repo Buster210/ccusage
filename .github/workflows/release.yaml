@@ -1,24 +1,25 @@
 name: release
 
-# Automatic rolling releases: every push to master rebuilds the 6 standalone
-# binaries and recreates the `latest` GitHub release. Manual runs from the
-# Actions tab do the same thing.
+# Tagged releases: pushing a tag like `v20.0.27` builds the 6 standalone
+# binaries and publishes them as the GitHub release for that tag.
+# The tag must match the version in apps/ccusage/package.json (`v` prefix).
+# To ship: bump the version, commit, then `git tag v<version> && git push origin v<version>`.
 on:
   push:
-    branches:
-      - master
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 concurrency:
-  group: release-master
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   build-native-packages:
     name: ${{ matrix.name }}
+    permissions:
+      contents: read
     runs-on: ${{ matrix.os }}
     # Stock GitHub runners are small and the cache starts cold,
     # so allow headroom on the first runs.
@@ -96,7 +97,7 @@ jobs:
           pattern: ccusage-native-*
           path: ${{ runner.temp }}/native-packages
           merge-multiple: true
-      # Ship the built binaries directly — each native package holds exactly
+      # Ship the built binaries directly — each staging tarball holds exactly
       # one file, so archives add nothing. Filenames stay stable (no version)
       # so download URLs never change; the release title carries the version.
       - name: Collect standalone binaries
@@ -117,9 +118,19 @@ jobs:
       - name: Read package version
         id: version
         run: echo "value=$(jq -r .version apps/ccusage/package.json)" >> "$GITHUB_OUTPUT"
-      - name: Recreate rolling latest release
+      - name: Check tag matches package version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          PKG_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          if [ "$REF_NAME" != "v$PKG_VERSION" ]; then
+            echo "::error::tag $REF_NAME does not match package version v$PKG_VERSION"
+            exit 1
+          fi
+      - name: Publish tagged release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/* --title "ccusage v${{ steps.version.outputs.value }}" --notes "Automated rolling build from master at ${{ github.sha }}."
+          gh release create "$REF_NAME" dist/* --title "ccusage $REF_NAME" --notes "Release $REF_NAME built from $HEAD_SHA."

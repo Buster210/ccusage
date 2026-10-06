@@ -832,7 +832,8 @@
 			"usage": "ccusage clear-cache [AGENT]",
 			"options": "clear_cache_options"
 		},
-		{			"path": ["zcode"],
+		{
+			"path": ["zcode"],
 			"description": "Usage reports for ZCode.",
 			"usage": "ccusage zcode <COMMANDS>",
 			"commands": [
