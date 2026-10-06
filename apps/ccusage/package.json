@@ -2,39 +2,19 @@
 	"name": "ccusage",
 	"version": "20.0.26",
 	"description": "Analyze coding (agent) CLI token usage and costs from local data",
-	"homepage": "https://github.com/ccusage/ccusage#readme",
+	"homepage": "https://github.com/Buster210/ccusage#readme",
 	"bugs": {
-		"url": "https://github.com/ccusage/ccusage/issues"
+		"url": "https://github.com/Buster210/ccusage/issues"
 	},
 	"license": "MIT",
-	"author": "ryoppippi",
+	"author": "Ritesh Kumar Pal (Buster210)",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/ccusage/ccusage.git",
+		"url": "git+https://github.com/Buster210/ccusage.git",
 		"directory": "apps/ccusage"
 	},
-	"funding": "https://github.com/sponsors/ryoppippi",
-	"bin": {
-		"ccusage": "./src/cli.js"
-	},
-	"files": [
-		"config-schema.json",
-		"src/cli.js"
-	],
 	"type": "module",
-	"scripts": {
-		"build": "scripts/ensure-native-binary.nu && publint",
-		"prepack": "pnpm run build"
-	},
 	"devDependencies": {
 		"@types/node": "catalog:types"
-	},
-	"optionalDependencies": {
-		"@ccusage/ccusage-darwin-arm64": "workspace:*",
-		"@ccusage/ccusage-darwin-x64": "workspace:*",
-		"@ccusage/ccusage-linux-arm64": "workspace:*",
-		"@ccusage/ccusage-linux-x64": "workspace:*",
-		"@ccusage/ccusage-win32-arm64": "workspace:*",
-		"@ccusage/ccusage-win32-x64": "workspace:*"
 	}
 }

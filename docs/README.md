@@ -2,7 +2,7 @@
 
 This directory contains the VitePress documentation website for ccusage.
 
-The public site is hosted on Cloudflare at https://ccusage.com.
+This fork has no hosted docs site; preview locally with `just docs::dev` and build with `just docs::build`.
 
 ## Structure
 

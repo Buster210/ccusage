@@ -1,25 +1,12 @@
-# Recipes for the published `ccusage` npm package. Run from the repo root as
+# Recipes for the local `ccusage` source package. Run from the repo root as
 # `just ccusage::<recipe>`, or from this directory as `just <recipe>`.
 
 [private]
 default:
     @just --list
 
-# Verify native binary glue for the published package.
-build: build-package
-
-build-package:
-    just ensure-native-binary
-    publint
-
-prepack:
-    just build-package
-
 build-rust:
     cargo build --manifest-path ../../rust/Cargo.toml --release --bin ccusage
-
-ensure-native-binary:
-    scripts/ensure-native-binary.nu
 
 generate-schema:
     cargo run --quiet --manifest-path ../../rust/Cargo.toml -p ccusage-config --bin generate-config-schema -- config-schema.json

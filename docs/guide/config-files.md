@@ -121,11 +121,11 @@ Add the `$schema` property to get IntelliSense and validation in your IDE:
 }
 ```
 
-You can also reference a local schema file after installing ccusage:
+You can also reference a local schema file from a repo checkout:
 
 ```json
 {
-	"$schema": "./node_modules/ccusage/config-schema.json"
+	"$schema": "./apps/ccusage/config-schema.json"
 }
 ```
 

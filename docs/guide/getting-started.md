@@ -5,25 +5,23 @@ Welcome to ccusage! This guide will help you get up and running with analyzing y
 ## Prerequisites
 
 - At least one supported coding CLI installed and used
-- Bun 1.3+ recommended for direct execution
+- `curl` for the one-line Linux/macOS quick run; no Node.js, Bun, npm, or Nix required for the standalone binary
 
 ## Quick Start
 
-Download the standalone binary for your platform from
-[GitHub Releases](https://github.com/ccusage/ccusage/releases), put it on
-your `PATH`, and run it — see [Installation](/guide/installation) for details.
+Run without installing:
 
 ```bash
-ccusage
+# Linux/macOS direct binary in /tmp
+OS=$(uname -s | tr A-Z a-z); ARCH=$(uname -m | sed -e 's/x86_64/x64/' -e 's/aarch64/arm64/'); curl -fsSL -o /tmp/ccusage "https://github.com/Buster210/ccusage/releases/latest/download/ccusage-${OS}-${ARCH}" && chmod +x /tmp/ccusage && /tmp/ccusage daily
 ```
 
-Alternatively, run it without downloading anything via Nix:
-
-```bash
-nix run github:ccusage/ccusage -- daily
+```powershell
+# Windows direct binary in TEMP
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }; Invoke-WebRequest -Uri "https://github.com/Buster210/ccusage/releases/latest/download/ccusage-win32-$arch.exe" -OutFile "$env:TEMP\ccusage.exe"; & "$env:TEMP\ccusage.exe" daily
 ```
 
-This will show your daily usage report for all detected supported coding CLIs by default.
+This will show your daily usage report for all detected supported coding CLIs by default. After a permanent install, use `ccusage` instead of the temporary binary path in the examples below — see [Installation](/guide/installation) for details.
 
 Use a data source namespace when you want the same report focused on one source:
 
@@ -223,5 +221,5 @@ export ZCODE_HOME="/path/to/zcode,/archive/zcode"
 ## Getting Help
 
 - Use `ccusage --help` for command options
-- Visit our [GitHub repository](https://github.com/ccusage/ccusage) for issues
+- Visit our [GitHub repository](https://github.com/Buster210/ccusage) for issues
 - Use [JSON Output](/guide/json-output) for programmatic usage

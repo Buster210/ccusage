@@ -1,5 +1,5 @@
 # Rust workspace test run as a Nix derivation so it shares the crane
-# `cargoArtifacts` cache (warm on the per-job Blacksmith sticky disk) instead of
+# `cargoArtifacts` cache instead of
 # recompiling into an uncached `rust/target` on every CI run. Built by the CI
 # test job via `nix build .#ccusage-tests`; the derivation succeeds only when
 # `cargo test --workspace` passes.

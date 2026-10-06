@@ -44,7 +44,6 @@ in
         inherit bunNodeModules;
         modelsDevSrc = inputs.models-dev;
       };
-      publint = pkgs.callPackage ../nix/tools/publint { inherit bunCli; };
     in
     {
       apps = {
@@ -65,7 +64,6 @@ in
           ccusage
           changelogithub
           models-dev-pricing
-          publint
           ;
       };
     };

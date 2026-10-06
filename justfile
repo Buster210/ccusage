@@ -36,8 +36,8 @@ install:
     # changes nothing leaves those directory mtimes untouched.
     touch node_modules/.install-stamp
 
-# Build every workspace package
-build: ccusage::build docs::build
+# Build the native binary and docs
+build: ccusage::build-rust docs::build
 
 # Type-check and lint TypeScript with oxlint's type-aware checker
 typecheck:

@@ -97,7 +97,7 @@ ccusage codex session --json
 
 Session JSON includes per-model breakdowns, cached token counts, `lastActivity`, and `isFallback` flags for events that required either the legacy `gpt-5` pricing fallback or the manually curated `codex-auto-review` timeline.
 
-Have feedback or ideas? [Open an issue](https://github.com/ccusage/ccusage/issues/new) so we can improve Codex support.
+Have feedback or ideas? [Open an issue](https://github.com/Buster210/ccusage/issues/new) so we can improve Codex support.
 
 ## Troubleshooting
 

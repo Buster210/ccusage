@@ -33,7 +33,6 @@ in
             inputs.bun2nix.packages.${system}.default
             nushell
             config.packages.cargo-hawk
-            config.packages.publint
 
             rustToolchain
             cargo-edit
@@ -54,7 +53,6 @@ in
             just
             prek
             gitleaks
-            renovate
             jq
             git
             git-wt

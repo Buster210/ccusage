@@ -9,20 +9,19 @@ Root `AGENTS.md` holds the repository shape and the standing policies. This
 skill is about working in the tree: the npm packaging seam, the recipes, and
 validation.
 
-## The npm Packaging Seam
+## The Release Staging Seam
 
-`apps/ccusage` is the npm shell around the Rust binary — package metadata,
-`config-schema.json`, and the packaging and benchmark scripts. Its
-`src/cli.js` launcher resolves the platform binary from the matching
-`@ccusage/ccusage-<platform>-<arch>` optional dependency and spawns it; those
-packages live in `packages/ccusage-<platform>-<arch>` and ship nothing but
-`bin/ccusage`.
+`apps/ccusage` is the local source package around the Rust binary — the
+release version in `package.json`, `config-schema.json`, and the staging and
+benchmark scripts. Distribution is GitHub Releases only: CI builds the Rust
+binary per platform, `stage-native-package.nu` fills a per-platform staging
+directory, and `release.yaml` collects the raw binaries from the staging
+tarballs. There is no npm publishing surface.
 
 The Nushell scripts in `apps/ccusage/scripts/` own the binary side and share
-`native-binary.nu`: `ensure-native-binary.nu` puts a usable, portable binary in
-place for a local build, `stage-native-package.nu` fills one platform package,
-and `verify-native-package.nu` runs from each platform package's `prepack`. A
-packaging change usually touches the launcher and those scripts together.
+`native-binary.nu`: `stage-native-package.nu` fills one platform staging
+directory for CI. A staging change usually touches that script, the build
+actions under `.github/actions`, and `release.yaml` together.
 
 ## Gotchas
 

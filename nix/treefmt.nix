@@ -227,8 +227,8 @@ in
         program = lib.getExe schemaGen;
       };
       # `nix run .#generate-bun-nix` derives every committed bun.nix from its
-      # sibling bun.lock. Renovate uses this before committing dependency
-      # updates, while contributors can use `just gen-bun-nix` when a manifest
+      # sibling bun.lock. Bump tooling with `just gen-bun-nix` before committing
+      # dependency updates, while contributors can use it when a manifest
       # also needs Bun to resolve a new lockfile.
       apps.generate-bun-nix = {
         type = "app";

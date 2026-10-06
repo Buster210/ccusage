@@ -1,4 +1,3 @@
-import { cloudflareRedirect } from '@ryoppippi/vite-plugin-cloudflare-redirect';
 import { defineConfig } from 'vitepress';
 import { groupIconMdPlugin, groupIconVitePlugin } from 'vitepress-plugin-group-icons';
 import llmstxt from 'vitepress-plugin-llms';
@@ -21,10 +20,10 @@ export default defineConfig({
 			'meta',
 			{
 				property: 'og:image',
-				content: 'https://cdn.jsdelivr.net/gh/ryoppippi/ccusage@main/docs/public/logo.png',
+				content: 'https://cdn.jsdelivr.net/gh/Buster210/ccusage@main/docs/public/logo.png',
 			},
 		],
-		['meta', { property: 'og:url', content: 'https://github.com/ryoppippi/ccusage' }],
+		['meta', { property: 'og:url', content: 'https://github.com/Buster210/ccusage' }],
 	],
 
 	themeConfig: {
@@ -35,10 +34,9 @@ export default defineConfig({
 			{
 				text: 'Links',
 				items: [
-					{ text: 'GitHub', link: 'https://github.com/ryoppippi/ccusage' },
-					{ text: 'Changelog', link: 'https://github.com/ryoppippi/ccusage/releases' },
-					{ text: 'DeepWiki', link: 'https://deepwiki.com/ryoppippi/ccusage' },
-					{ text: 'Sponsor', link: 'https://github.com/sponsors/ryoppippi' },
+					{ text: 'GitHub', link: 'https://github.com/Buster210/ccusage' },
+					{ text: 'Changelog', link: 'https://github.com/Buster210/ccusage/releases' },
+					{ text: 'DeepWiki', link: 'https://deepwiki.com/Buster210/ccusage' },
 				],
 			},
 		],
@@ -102,24 +100,16 @@ export default defineConfig({
 					text: 'Integration',
 					items: [{ text: 'JSON Output', link: '/guide/json-output' }],
 				},
-				{
-					text: 'Community',
-					items: [
-						{ text: 'Community Projects', link: '/guide/community-projects' },
-						{ text: 'Sponsors', link: '/guide/sponsors' },
-					],
-				},
 			],
 		},
 
 		socialLinks: [
-			{ icon: 'github', link: 'https://github.com/ryoppippi/ccusage' },
-			{ icon: 'twitter', link: 'https://x.com/cc_usage' },
+			{ icon: 'github', link: 'https://github.com/Buster210/ccusage' },
 		],
 
 		footer: {
 			message: 'Released under the MIT License.',
-			copyright: 'Copyright © 2025 ryoppippi',
+			copyright: 'Copyright © 2025 ryoppippi (original) and © 2026 Buster210 (this fork)',
 		},
 
 		search: {
@@ -127,7 +117,7 @@ export default defineConfig({
 		},
 
 		editLink: {
-			pattern: 'https://github.com/ryoppippi/ccusage/edit/main/docs/:path',
+			pattern: 'https://github.com/Buster210/ccusage/edit/main/docs/:path',
 			text: 'Edit this page on GitHub',
 		},
 
@@ -147,18 +137,6 @@ export default defineConfig({
 
 	vite: {
 		plugins: [
-			cloudflareRedirect({
-				mode: 'generate',
-				entries: [
-					{ from: '/raycast', to: 'https://www.raycast.com/nyatinte/ccusage', status: 302 },
-					{ from: '/gh', to: 'https://github.com/ryoppippi/ccusage', status: 302 },
-					{ from: '/deepwiki', to: 'https://deepwiki.com/ryoppippi/ccusage', status: 302 },
-					{ from: '/sponsor', to: 'https://github.com/sponsors/ryoppippi', status: 302 },
-					{ from: '/guide/custom-paths', to: '/guide/claude/', status: 301 },
-					{ from: '/guide/directory-detection', to: '/guide/claude/', status: 301 },
-					{ from: '/guide/related-projects', to: '/guide/community-projects', status: 301 },
-				],
-			}) as any,
 			groupIconVitePlugin(),
 			...llmstxt(),
 		],

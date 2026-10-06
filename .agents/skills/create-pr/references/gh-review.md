@@ -13,7 +13,7 @@ opened needs the REST replies endpoint with that comment's id (from
 
 ```sh
 gh api -X POST repos/:owner/:repo/pulls/<pr-number>/comments/<comment-id>/replies \
-  -f body='@coderabbitai Fixed in <commit-sha>. Validation: just typecheck, just test.'
+  -f body='Fixed in <commit-sha>. Validation: just typecheck, just test.'
 ```
 
 ## Thread resolution state

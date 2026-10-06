@@ -1,5 +1,5 @@
-# Shared helpers for the scripts that stage and validate the Rust binary
-# shipped inside packages/ccusage-<platform>-<arch>.
+# Shared helpers for the scripts that stage the Rust binary into the
+# per-platform release staging directories.
 
 # The file name npm expects for a Node platform identifier.
 export def binary-name [platform: string]: nothing -> string {

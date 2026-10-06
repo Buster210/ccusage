@@ -6,9 +6,6 @@ settings:
 
 catalogs:
   docs:
-    '@ryoppippi/vite-plugin-cloudflare-redirect':
-      specifier: 1.1.3
-      version: 1.1.3
     vitepress:
       specifier: 2.0.0-alpha.20
       version: 2.0.0-alpha.20
@@ -35,31 +32,9 @@ importers:
       '@types/node':
         specifier: catalog:types
         version: 26.6.4
-    optionalDependencies:
-      '@ccusage/ccusage-darwin-arm64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-darwin-arm64
-      '@ccusage/ccusage-darwin-x64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-darwin-x64
-      '@ccusage/ccusage-linux-arm64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-linux-arm64
-      '@ccusage/ccusage-linux-x64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-linux-x64
-      '@ccusage/ccusage-win32-arm64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-win32-arm64
-      '@ccusage/ccusage-win32-x64':
-        specifier: workspace:*
-        version: link:../../packages/ccusage-win32-x64
 
   docs:
     devDependencies:
-      '@ryoppippi/vite-plugin-cloudflare-redirect':
-        specifier: catalog:docs
-        version: 1.1.3(vite@8.3.2(@types/node@26.6.4))
       '@types/node':
         specifier: catalog:types
         version: 26.6.4
@@ -75,18 +50,6 @@ importers:
       vitepress-plugin-llms:
         specifier: catalog:docs
         version: 1.14.0
-
-  packages/ccusage-darwin-arm64: {}
-
-  packages/ccusage-darwin-x64: {}
-
-  packages/ccusage-linux-arm64: {}
-
-  packages/ccusage-linux-x64: {}
-
-  packages/ccusage-win32-arm64: {}
-
-  packages/ccusage-win32-x64: {}
 
 packages:
 
@@ -242,11 +205,6 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
-
-  '@ryoppippi/vite-plugin-cloudflare-redirect@1.1.3':
-    resolution: {integrity: sha512-gi0lfkBiOWIhp9BZJF/ZrTlBr2exh790qkXzMuE++08G1dF35oL010JcEQXzSxsVPXIC72Tkx4cWMOdcZe5Quw==}
-    peerDependencies:
-      vite: ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
 
   '@shikijs/core@4.5.0':
     resolution: {integrity: sha512-6CIgwq+bt2JZ3OSjb/nBkkwEf/CfpHcbam+Mg5Pllco7HAGRQ2/EFhZrrJtbyNTgKwknfVS+llsXGygiDGwJWw==}
@@ -458,9 +416,6 @@ packages:
     resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
     engines: {node: '>=12'}
 
-  cloudflare-redirect-parser@1.0.0:
-    resolution: {integrity: sha512-puEB3wmP47RICu/CboTHd237Up/r3Nagsr622mJxWgvEVfRxNlKceNfpPieMYDe/E1nYJsf6iempsrkitgQZVw==}
-
   color-convert@2.0.1:
     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
     engines: {node: '>=7.0.0'}
@@ -485,9 +440,6 @@ packages:
 
   decode-named-character-reference@1.3.0:
     resolution: {integrity: sha512-GtpQYB283KrPp6nRw50q3U9/VfOutZOe103qlN7BPP6Ad27xYnOIWv4lPzo8HCAL+mMZofJ9KEy30fq6MfaK6Q==}
-
-  defu@6.1.7:
-    resolution: {integrity: sha512-7z22QmUWiQ/2d0KkdYmANbRUVABpZ9SNYyH5vx6PZ+nE5bcC0l7uFvEfHlyld/HcGBFTL536ClDt3DEcSlEJAQ==}
 
   dequal@2.0.3:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
@@ -1137,12 +1089,6 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@ryoppippi/vite-plugin-cloudflare-redirect@1.1.3(vite@8.3.2(@types/node@26.6.4))':
-    dependencies:
-      cloudflare-redirect-parser: 1.0.0
-      defu: 6.1.7
-      vite: 8.3.2(@types/node@26.6.4)
-
   '@shikijs/core@4.5.0':
     dependencies:
       '@shikijs/primitive': 4.5.0
@@ -1351,8 +1297,6 @@ snapshots:
       strip-ansi: 6.0.1
       wrap-ansi: 7.0.0
 
-  cloudflare-redirect-parser@1.0.0: {}
-
   color-convert@2.0.1:
     dependencies:
       color-name: 1.1.4
@@ -1370,8 +1314,6 @@ snapshots:
   decode-named-character-reference@1.3.0:
     dependencies:
       character-entities: 2.0.2
-
-  defu@6.1.7: {}
 
   dequal@2.0.3: {}
 

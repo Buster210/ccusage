@@ -16,5 +16,4 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-public/_redirects
 public/config-schema.json

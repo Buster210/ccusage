@@ -39,7 +39,7 @@ ccusage reads the local usage files that coding CLIs already generate and provid
 ### 🚀 Standalone Binary
 
 Download the prebuilt binary for your platform from
-[GitHub Releases](https://github.com/ccusage/ccusage/releases) and run it
+[GitHub Releases](https://github.com/Buster210/ccusage/releases) and run it
 directly — no install step or runtime required.
 
 ### 📊 Usage Views

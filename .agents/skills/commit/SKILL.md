@@ -34,7 +34,7 @@ PR branches are squash-merged, so review fixes stack as follow-up commits. Amend
 
 ## Messages
 
-The subject names the artifact or behavior changed and reads sensibly alone in a commit list; reviewer context goes in the body. Prefer `docs(skills): clarify reference routing` with a body citing the CodeRabbit feedback over `chore: address review feedback`. The body wraps at 72 columns and covers problem, rationale, decisions, and impact.
+The subject names the artifact or behavior changed and reads sensibly alone in a commit list; reviewer context goes in the body. Prefer `docs(skills): clarify reference routing` with a body citing the review thread over `chore: address review feedback`. The body wraps at 72 columns and covers problem, rationale, decisions, and impact.
 
 The `commit-msg` hook runs `scripts/validate-commit-scope.nu`: when staged paths live under `rust/adapters/<agent>/`, the scope must be that agent (`fix(kimi)`), one of the cross-cutting scopes, or — for a change spanning several agents — a workspace scope. `rust/adapters/common/` derives `adapter`, not `common`. Read the script for the current lists; no other part of the tree derives a scope.
 

@@ -2,12 +2,12 @@ name: update pricing
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '30 12 * * *' # 6pm IST daily
   workflow_dispatch:
 
 permissions: {}
 
-# Both legs push to main, so a manual dispatch landing on top of the hourly
+# Both legs push to main, so a manual dispatch landing on top of the daily
 # schedule would otherwise race the other run's push.
 concurrency:
   group: update-pricing

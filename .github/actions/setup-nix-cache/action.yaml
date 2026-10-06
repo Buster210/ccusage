@@ -5,7 +5,6 @@ description: >
   deps, not the cache.nixos.org toolchain). Linux jobs root the current Crane
   artifacts after building; garbage collection then removes superseded
   generations before saving so restored caches do not grow on every commit.
-  Blacksmith evicts stale entries, so no purge step is needed.
 inputs:
   cache-scope:
     description: >
@@ -45,8 +44,8 @@ runs:
         # cache-nix-action skips saving on an exact primary-key hit, so a key that
         # only depended on the deps hash would persist the first run's store
         # forever. restore-prefixes-first-match (without the sha) then restores
-        # the newest prior entry to warm the deps. Blacksmith handles stale cache
-        # eviction without the GitHub REST API used by this action's purge mode.
+        # the newest prior entry to warm the deps. Stale entries expire under the
+        # cache service's own retention; the action's purge mode stays disabled.
         # package.json only supplies the final binary version. It is excluded
         # because release bumps do not change the deps-only Crane derivation.
         # Likewise, checks and developer-tooling modules do not affect Cargo

@@ -51,7 +51,7 @@ pub fn run(args: AgentCommandArgs) -> Result<()> {
 }
 
 fn empty_usage_message() -> &'static str {
-    "No GitHub Copilot CLI usage data found.\nSession-state events are read from ${COPILOT_HOME:-~/.copilot}/session-state/<session-id>/events.jsonl; OpenTelemetry file export remains supported.\nSee https://ccusage.com/guide/copilot/#data-source"
+    "No GitHub Copilot CLI usage data found.\nSession-state events are read from ${COPILOT_HOME:-~/.copilot}/session-state/<session-id>/events.jsonl; OpenTelemetry file export remains supported.\nSee https://github.com/Buster210/ccusage/blob/main/docs/guide/copilot/index.md#data-source"
 }
 
 #[cfg(test)]
@@ -61,6 +61,6 @@ mod tests {
     #[test]
     fn empty_usage_message_links_to_copilot_docs() {
         let message = empty_usage_message();
-        assert!(message.contains("https://ccusage.com/guide/copilot/#data-source"));
+        assert!(message.contains("https://github.com/Buster210/ccusage/blob/main/docs/guide/copilot/index.md"));
     }
 }

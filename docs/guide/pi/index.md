@@ -334,5 +334,5 @@ ccusage pi session --since 2026-05-09
 
 ## Related
 
-- [ccusage](https://github.com/ccusage/ccusage) - Main usage analysis tool for coding (agent) CLIs
+- [ccusage](https://github.com/Buster210/ccusage) - Main usage analysis tool for coding (agent) CLIs
 - [pi](https://github.com/badlogic/pi-mono) - Alternative Claude coding (agent) CLI

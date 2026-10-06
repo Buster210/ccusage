@@ -42,8 +42,8 @@ ccusage-config = { path = "crates/ccusage-config" }
 ccusage-core = { path = "crates/ccusage-core" }
 ccusage-terminal = { path = "crates/ccusage-terminal" }
 ccusage-test-support = { path = "crates/ccusage-test-support" }
-# Exact `=` pins, not carets: every version move lands as a reviewable Renovate
-# bump instead of arriving silently the next time the lock is regenerated.
+# Exact `=` pins, not carets: every version move lands as a reviewable
+# manual bump instead of arriving silently the next time the lock is regenerated.
 assert_fs = "=1.1.4"
 compact_str = "=0.10.0"
 insta = { version = "=1.49.0", features = ["json"] }

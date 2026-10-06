@@ -6,10 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Before you start:** Read [CONTRIBUTING.md](https://github.com/ccusage/ccusage/blob/main/CONTRIBUTING.md).
-
-        Issues from new contributors are assessed by an automated gate. Clear, actionable reports remain
-        open; spam, duplicates, invalid reports, and clearly out-of-scope reports may be closed.
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/Buster210/ccusage/blob/main/CONTRIBUTING.md).
 
         Keep this short, concrete, and written in your own voice.
 

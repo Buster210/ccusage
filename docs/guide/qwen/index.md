@@ -57,5 +57,5 @@ Ensure the data directory exists at `~/.qwen/projects/{project}/chats/`. Set `QW
 :::
 
 ::: details Costs showing as $0.00
-If a model is not in LiteLLM's database, the cost will be $0.00. [Open an issue](https://github.com/ccusage/ccusage/issues/new) to request alias support.
+If a model is not in LiteLLM's database, the cost will be $0.00. [Open an issue](https://github.com/Buster210/ccusage/issues/new) to request alias support.
 :::
