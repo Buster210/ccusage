@@ -33954,9 +33954,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.000696,
-			"input": 0.0348,
-			"output": 0.1392
+			"cache_read": 0.029,
+			"input": 0.03,
+			"output": 0.99
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33976,8 +33976,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0143,
-			"input": 0.0143,
+			"cache_read": 0.0161,
+			"input": 0.0161,
 			"output": 0.64
 		},
 		"limit": {
@@ -34182,8 +34182,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.038,
-			"input": 0.039,
+			"cache_read": 0.05,
+			"input": 0.07,
 			"output": 4.8
 		},
 		"exactOnly": true,
