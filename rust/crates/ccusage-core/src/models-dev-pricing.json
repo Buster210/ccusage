@@ -12109,9 +12109,9 @@
 	},
 	"flexai/DeepSeek-V4-Flash-0731": {
 		"cost": {
-			"cache_read": 0.009,
-			"input": 0.06,
-			"output": 0.18
+			"cache_read": 0.0029,
+			"input": 0.0192,
+			"output": 0.27
 		},
 		"limit": {
 			"context": 1048576
@@ -12119,12 +12119,22 @@
 	},
 	"flexai/DeepSeek-V4.1-Flash": {
 		"cost": {
-			"cache_read": 0.021,
-			"input": 0.14,
-			"output": 0.42
+			"cache_read": 0.0135,
+			"input": 0.09,
+			"output": 0.18
 		},
 		"limit": {
 			"context": 1048576
+		}
+	},
+	"flexai/Muse-Glimmer-30B": {
+		"cost": {
+			"cache_read": 0.0525,
+			"input": 0.35,
+			"output": 1.5
+		},
+		"limit": {
+			"context": 131072
 		}
 	},
 	"flexai/Step-3.7-Flash": {
