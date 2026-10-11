@@ -33976,8 +33976,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0175,
-			"input": 0.0175,
+			"cache_read": 0.018,
+			"input": 0.018,
 			"output": 0.64
 		},
 		"limit": {
