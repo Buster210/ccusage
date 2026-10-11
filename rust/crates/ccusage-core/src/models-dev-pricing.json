@@ -8067,9 +8067,9 @@
 	},
 	"claw-high": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -8078,10 +8078,10 @@
 	},
 	"claw-low": {
 		"cost": {
-			"cache_read": 0.06,
+			"cache_read": 0.2,
 			"cache_write": 0.08333,
-			"input": 0.3,
-			"output": 2.2
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -8090,9 +8090,9 @@
 	},
 	"claw-medium": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17191,9 +17191,9 @@
 	},
 	"hermes-high": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17202,10 +17202,10 @@
 	},
 	"hermes-low": {
 		"cost": {
-			"cache_read": 0.06,
+			"cache_read": 0.2,
 			"cache_write": 0.08333,
-			"input": 0.3,
-			"output": 2.2
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17214,9 +17214,9 @@
 	},
 	"hermes-medium": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33219,9 +33219,9 @@
 	},
 	"z-ai/glm-5.3:thinking": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"limit": {
 			"context": 1048576
@@ -33270,9 +33270,9 @@
 	},
 	"z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.3,
-			"output": 2.2
+			"cache_read": 0.2,
+			"input": 0.6,
+			"output": 1.1
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33976,9 +33976,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0142,
-			"input": 0.0142,
-			"output": 1.28
+			"cache_read": 0.0154,
+			"input": 0.0154,
+			"output": 0.64
 		},
 		"limit": {
 			"context": 1048576
