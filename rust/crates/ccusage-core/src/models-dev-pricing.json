@@ -8367,6 +8367,36 @@
 			"context": 131072
 		}
 	},
+	"cloudflare/clef": {
+		"cost": {
+			"input": 0.24,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
+	"cloudflare/clef-flash": {
+		"cost": {
+			"input": 0.038,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
+	"cloudflare/clef-omni": {
+		"cost": {
+			"input": 0.15,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
 	"codestral-2": {
 		"cost": {
 			"input": 0.3,
@@ -10499,7 +10529,7 @@
 		"cost": {
 			"cache_read": 0,
 			"cache_write": 0.09,
-			"input": 0.3,
+			"input": 0.01,
 			"output": 1.2
 		},
 		"exactOnly": true,
@@ -10511,7 +10541,7 @@
 		"cost": {
 			"cache_read": 0,
 			"cache_write": 0.09,
-			"input": 0.3,
+			"input": 0.01,
 			"output": 1.2
 		},
 		"exactOnly": true,
@@ -17559,6 +17589,17 @@
 			"context": 32000
 		}
 	},
+	"inception/mercury-decide": {
+		"cost": {
+			"cache_read": 0,
+			"input": 0.02,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 65536
+		}
+	},
 	"inclusionAI/Ling-flash-2.0": {
 		"cost": {
 			"input": 0.14,
@@ -17843,6 +17884,15 @@
 		"exactOnly": true,
 		"limit": {
 			"context": 256000
+		}
+	},
+	"jaredpalmer/kev-4b": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"limit": {
+			"context": 8192
 		}
 	},
 	"jev": {
@@ -21641,6 +21691,15 @@
 			"context": 1048576
 		}
 	},
+	"nace-ai/drex-v1.5": {
+		"cost": {
+			"input": 0.04,
+			"output": 0
+		},
+		"limit": {
+			"context": 131072
+		}
+	},
 	"nanogpt/coding-router": {
 		"cost": {
 			"cache_read": 0.11,
@@ -24826,6 +24885,17 @@
 			"context": 1050000
 		}
 	},
+	"openai/gpt-6-luna-decisions": {
+		"cost": {
+			"cache_read": 0,
+			"cache_write": 0,
+			"input": 0.1,
+			"output": 0
+		},
+		"limit": {
+			"context": 1050000
+		}
+	},
 	"openai/gpt-6-luna-fast": {
 		"cost": {
 			"cache_read": 0.02,
@@ -25409,6 +25479,15 @@
 		},
 		"limit": {
 			"context": 36864
+		}
+	},
+	"perplexity/pplx-decider-v1.1-27b": {
+		"cost": {
+			"input": 0.02,
+			"output": 0
+		},
+		"limit": {
+			"context": 262144
 		}
 	},
 	"perplexity/sonar": {
@@ -28078,6 +28157,15 @@
 			"context": 256000
 		}
 	},
+	"respan/span-01": {
+		"cost": {
+			"input": 0.02,
+			"output": 0
+		},
+		"limit": {
+			"context": 0
+		}
+	},
 	"ring-2.6-1t": {
 		"cost": {
 			"input": 0.3,
@@ -30065,6 +30153,15 @@
 			"context": 524288
 		}
 	},
+	"togethercomputer/tev1-4b-experimental": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"limit": {
+			"context": 32768
+		}
+	},
 	"tongyi-intent-detect-v3": {
 		"cost": {
 			"input": 0.058,
@@ -30112,6 +30209,15 @@
 			"output": 0
 		},
 		"exactOnly": true,
+		"limit": {
+			"context": 32000
+		}
+	},
+	"typesafe/jev-1.13": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
 		"limit": {
 			"context": 32000
 		}
@@ -30278,6 +30384,28 @@
 		},
 		"limit": {
 			"context": 128000
+		}
+	},
+	"upstage/solar-decide": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 0.05,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 524288
+		}
+	},
+	"upstage/solar-decide-flash": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 0.05,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 524288
 		}
 	},
 	"upstage/solar-mini4": {
@@ -33848,8 +33976,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0126,
-			"input": 0.0126,
+			"cache_read": 0.0142,
+			"input": 0.0142,
 			"output": 1.28
 		},
 		"limit": {
@@ -34007,6 +34135,16 @@
 		"exactOnly": true,
 		"limit": {
 			"context": 1050000
+		}
+	},
+	"~typesafe/jev-latest": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 64000
 		}
 	},
 	"~x-ai/grok-latest": {
