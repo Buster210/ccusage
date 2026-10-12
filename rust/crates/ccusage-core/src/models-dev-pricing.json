@@ -7976,7 +7976,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -7988,7 +7988,7 @@
 			"cache_read": 0.2,
 			"cache_write": 0.08333,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -7999,7 +7999,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17100,7 +17100,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17112,7 +17112,7 @@
 			"cache_read": 0.2,
 			"cache_write": 0.08333,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -17123,7 +17123,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
@@ -33128,7 +33128,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"limit": {
 			"context": 1048576
@@ -33179,7 +33179,7 @@
 		"cost": {
 			"cache_read": 0.2,
 			"input": 0.6,
-			"output": 1.1
+			"output": 0.6248
 		},
 		"exactOnly": true,
 		"limit": {
