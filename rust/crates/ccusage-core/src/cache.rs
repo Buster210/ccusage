@@ -380,6 +380,10 @@ fn open_db() -> Option<sqlite::Connection> {
         // SQLite treats mmap_size as a hint; if it fails we still have a usable
         // connection, so ignore the error rather than discarding the DB.
         let _ = conn.execute("PRAGMA mmap_size=268435456;");
+        // 64 MB page cache: the 2 MB default re-reads a 377 MB database
+        // constantly on warm runs. Pinned small enough to never matter
+        // next to the 256 MB mmap region above.
+        let _ = conn.execute("PRAGMA cache_size=-65536;");
         // Switch to WAL so readers run while one writer commits (NORMAL stays durable
         // under WAL). The switch needs a lock upgrade that busy_timeout cannot cover,
         // so it carries its own bounded retry and never discards the connection.
@@ -634,9 +638,39 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
     }
     // FUTURE: migration logic — when a table's on-disk layout changes
     // incompatibly, bump its constant above and add per-table migration here.
+    // Gated `PRAGMA optimize`: planner statistics decay as the database grows,
+    // but re-analyzing on every open (~50x per run) costs more than it saves.
+    // The stamp lives in `schema_meta` alongside the table versions; a legacy
+    // database simply has no row and optimizes once. Failures are ignored:
+    // statistics are an optimization, never correctness.
+    let today = today_day_number();
+    if read_schema_version(conn, "optimize_day") != Some(today) {
+        let _ = conn.execute("PRAGMA optimize;");
+        if let Ok(mut st) =
+            conn.prepare("INSERT OR IGNORE INTO schema_meta(name, version) VALUES (?, ?)")
+        {
+            let _ = st.bind((1, "optimize_day"));
+            let _ = st.bind((2, today));
+            let _ = st.next();
+        }
+        if let Ok(mut st) =
+            conn.prepare("UPDATE schema_meta SET version = ? WHERE name = 'optimize_day'")
+        {
+            let _ = st.bind((1, today));
+            let _ = st.next();
+        }
+    }
     Some(())
 }
 
+/// Whole UTC days since the Unix epoch, used to rate-limit `PRAGMA optimize`
+/// to at most one re-analysis per day.
+fn today_day_number() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| (elapsed.as_secs() / 86400) as i64)
+        .unwrap_or(0)
+}
 /// Read a table's stored schema version, or `None` if unstamped/unreadable.
 fn read_schema_version(conn: &sqlite::Connection, name: &str) -> Option<i64> {
     let mut st = conn
@@ -3288,8 +3322,43 @@ pub(crate) mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------
+    // Open-time pragma tests
+    // -------------------------------------------------------------------------
+
     #[test]
-    fn migrate_populates_schema_meta_with_four_rows_at_v1() {
+    fn open_db_sets_64mb_page_cache() {
+        let _env = CacheEnv::new("pragma-cache-size");
+        let conn = open_db().expect("open_db should succeed");
+        let mut st = conn.prepare("PRAGMA cache_size").unwrap();
+        st.next().unwrap();
+        assert_eq!(
+            st.read::<i64, _>(0).unwrap(),
+            -65536,
+            "2 MB default page cache is absurd for a 377 MB database"
+        );
+    }
+
+    #[test]
+    fn optimize_stamp_limits_reanalysis_to_once_per_day() {
+        let _env = CacheEnv::new("optimize-gate");
+        let conn = open_db().expect("open_db should succeed");
+        assert_eq!(
+            read_schema_version(&conn, "optimize_day"),
+            Some(today_day_number()),
+            "first open stamps the optimize day"
+        );
+        drop(conn);
+        let second = open_db().expect("second open_db should succeed");
+        assert_eq!(
+            read_schema_version(&second, "optimize_day"),
+            Some(today_day_number()),
+            "same-day reopen must not re-stamp"
+        );
+    }
+
+    #[test]
+    fn migrate_populates_schema_meta_with_table_versions() {
         let _env = CacheEnv::new("schema-meta");
         let conn = open_db().expect("open_db should succeed");
         let mut st = conn
@@ -3302,11 +3371,22 @@ pub(crate) mod tests {
                 st.read::<i64, _>(1).unwrap(),
             ));
         }
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0], ("files".to_string(), FILES_SCHEMA_VERSION));
-        assert_eq!(rows[1], ("ledger".to_string(), LEDGER_SCHEMA_VERSION));
-        assert_eq!(rows[2], ("opencode".to_string(), OPENCODE_SCHEMA_VERSION));
-        assert_eq!(rows[3], ("pricing".to_string(), PRICING_SCHEMA_VERSION));
+        // Look rows up by name: asserting an exact length or order would
+        // couple this test to every future table (headers today), so each
+        // table's presence is checked independently. The headers row itself
+        // is asserted by the headers-table tests owning that feature.
+        let map: HashMap<&str, i64> = rows
+            .iter()
+            .map(|(name, version)| (name.as_str(), *version))
+            .collect();
+        assert_eq!(map["files"], FILES_SCHEMA_VERSION);
+        assert_eq!(map["ledger"], LEDGER_SCHEMA_VERSION);
+        assert_eq!(map["opencode"], OPENCODE_SCHEMA_VERSION);
+        assert_eq!(map["pricing"], PRICING_SCHEMA_VERSION);
+        assert!(
+            map.contains_key("optimize_day"),
+            "optimize gate stamp present"
+        );
     }
 
     /// A second `open_db()` on the same database must be idempotent — no
@@ -3319,7 +3399,12 @@ pub(crate) mod tests {
         let mut st = conn.prepare("SELECT COUNT(*) FROM schema_meta").unwrap();
         st.next().unwrap();
         let count = st.read::<i64, _>(0).unwrap();
-        assert_eq!(count, 4, "idempotent open must not duplicate rows");
+        let mut st = conn
+            .prepare("SELECT COUNT(DISTINCT name) FROM schema_meta")
+            .unwrap();
+        st.next().unwrap();
+        let distinct = st.read::<i64, _>(0).unwrap();
+        assert_eq!(count, distinct, "idempotent open must not duplicate rows");
     }
 
     /// A stale `ledger` version must trigger the mismatch warning and get
