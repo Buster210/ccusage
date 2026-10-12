@@ -33863,7 +33863,7 @@
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
 			"cache_read": 0.2,
-			"input": 0.21,
+			"input": 0.25,
 			"output": 5
 		},
 		"exactOnly": true,
@@ -33873,8 +33873,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.01096,
-			"input": 0.01096,
+			"cache_read": 0.0048,
+			"input": 0.0048,
 			"output": 1.44
 		},
 		"limit": {
@@ -33919,7 +33919,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.55,
+			"input": 0.45,
 			"output": 16.5
 		},
 		"exactOnly": true,
