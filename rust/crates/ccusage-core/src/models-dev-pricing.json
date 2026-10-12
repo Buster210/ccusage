@@ -26983,9 +26983,9 @@
 	},
 	"qwen/qwen3.8-27b-uncensored": {
 		"cost": {
-			"cache_read": 0.125,
-			"input": 0.75,
-			"output": 2.5
+			"cache_read": 0.22,
+			"input": 1,
+			"output": 3
 		},
 		"limit": {
 			"context": 1010000
@@ -26993,9 +26993,9 @@
 	},
 	"qwen/qwen3.8-27b-uncensored:thinking": {
 		"cost": {
-			"cache_read": 0.125,
-			"input": 0.75,
-			"output": 2.5
+			"cache_read": 0.22,
+			"input": 1,
+			"output": 3
 		},
 		"limit": {
 			"context": 1010000
@@ -34068,8 +34068,8 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.032,
-			"input": 0.032,
+			"cache_read": 0.0232,
+			"input": 0.0232,
 			"output": 1.2
 		},
 		"exactOnly": true,
