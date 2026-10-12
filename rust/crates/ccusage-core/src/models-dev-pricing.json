@@ -16586,6 +16586,53 @@
 			"context": 131072
 		}
 	},
+	"greenpt/deepseek-v4-flash-0731": {
+		"cost": {
+			"cache_read": 0.044724,
+			"input": 0.156534,
+			"output": 0.391335
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
+	"greenpt/deepseek-v4.1-flash": {
+		"cost": {
+			"cache_read": 0.012299,
+			"input": 0.245982,
+			"output": 1.229911
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
+	"greenpt/gpt-oss-120b": {
+		"cost": {
+			"input": 0.22362,
+			"output": 0.78267
+		},
+		"limit": {
+			"context": 128000
+		}
+	},
+	"greenpt/llama-3.3-70b-instruct": {
+		"cost": {
+			"input": 1.229911,
+			"output": 1.229911
+		},
+		"limit": {
+			"context": 128000
+		}
+	},
+	"greenpt/qwen3-235b-a22b-instruct-2507": {
+		"cost": {
+			"input": 1.00629,
+			"output": 3.018871
+		},
+		"limit": {
+			"context": 250000
+		}
+	},
 	"greg-1-mini": {
 		"cost": {
 			"cache_read": 0.01,
@@ -33973,9 +34020,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.01,
-			"input": 0.03,
-			"output": 0.3
+			"cache_read": 0.024,
+			"input": 0.024,
+			"output": 1.188
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34201,7 +34248,7 @@
 		"cost": {
 			"cache_read": 0.032,
 			"input": 0.032,
-			"output": 0.84
+			"output": 0.9
 		},
 		"exactOnly": true,
 		"limit": {
