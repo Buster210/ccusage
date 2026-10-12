@@ -1948,6 +1948,16 @@
 			"context": 16384
 		}
 	},
+	"TheDrummer/Skyfall-31B-v4.2": {
+		"cost": {
+			"cache_read": 0.06,
+			"input": 0.12,
+			"output": 0.15
+		},
+		"limit": {
+			"context": 16384
+		}
+	},
 	"TheDrummer/UnslopNemo-12B-v4.1": {
 		"cost": {
 			"cache_read": 0.2465,
@@ -33918,9 +33928,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.72,
-			"output": 24
+			"cache_read": 0.55,
+			"input": 0.73,
+			"output": 10
 		},
 		"exactOnly": true,
 		"limit": {
