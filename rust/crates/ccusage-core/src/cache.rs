@@ -345,6 +345,8 @@ const LEDGER_SCHEMA_VERSION: i64 = 2;
 const OPENCODE_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the `pricing` table, tracked in `schema_meta`.
 const PRICING_SCHEMA_VERSION: i64 = 2;
+/// Schema version for the `headers` table, tracked in `schema_meta`.
+const HEADERS_SCHEMA_VERSION: i64 = 1;
 
 /// Encode parsed entries into the compact blob stored in the `files` table.
 fn encode_entries(entries: &[LoadedEntry]) -> Option<Vec<u8>> {
@@ -431,7 +433,7 @@ pub fn clear_cache() {
     let Some(dir) = cache_dir() else {
         return;
     };
-    for name in &[DB_FILE, "cache.db-wal", "cache.db-shm"] {
+    for name in &[DB_FILE, "cache.db-wal", "cache.db-shm", "pi-headers.json"] {
         let _ = fs::remove_file(dir.join(name));
     }
 }
@@ -449,6 +451,7 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
             || agent.contains(':')
             || (!agent.is_empty() && agent != "all" && agent_namespaces(agent).is_empty());
     };
+    let mut cleared_pi = false;
     for ns in agent_namespaces(agent) {
         cacheable = true;
         if let Ok(mut st) = conn.prepare("DELETE FROM files WHERE namespace = ?") {
@@ -459,6 +462,11 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
             let _ = st.bind((1, *ns));
             let _ = st.next();
         }
+        if let Ok(mut st) = conn.prepare("DELETE FROM headers WHERE namespace = ?") {
+            let _ = st.bind((1, *ns));
+            let _ = st.next();
+        }
+        cleared_pi = cleared_pi || *ns == "pi" || ns.starts_with("pi:");
     }
     // pi named stores use `pi:<name>` (e.g. `pi:omp`); clear them when
     // the store name or its parent `pi` is requested.
@@ -466,6 +474,8 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
         cacheable = true;
         let _ = conn.execute("DELETE FROM files WHERE namespace LIKE 'pi:%'");
         let _ = conn.execute("DELETE FROM ledger WHERE namespace LIKE 'pi:%'");
+        let _ = conn.execute("DELETE FROM headers WHERE namespace LIKE 'pi:%'");
+        cleared_pi = true;
     } else if agent.contains(':') {
         cacheable = true;
         if let Ok(mut st) = conn.prepare("DELETE FROM files WHERE namespace = ?") {
@@ -475,6 +485,13 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
         if let Ok(mut st) = conn.prepare("DELETE FROM ledger WHERE namespace = ?") {
             let _ = st.bind((1, agent));
             let _ = st.next();
+        }
+        if let Ok(mut st) = conn.prepare("DELETE FROM headers WHERE namespace = ?") {
+            let _ = st.bind((1, agent));
+            let _ = st.next();
+        }
+        if agent.starts_with("pi:") {
+            cleared_pi = true;
         }
     } else if !agent.is_empty() && agent != "all" && agent_namespaces(agent).is_empty() {
         // unknown agent likely a pi named store (e.g. `omp` -> `pi:omp` and `pi:omp:<path>`)
@@ -502,6 +519,19 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
             let _ = st.bind((2, ns_prefix.as_str()));
             let _ = st.next();
         }
+        if let Ok(mut st) =
+            conn.prepare("DELETE FROM headers WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'")
+        {
+            let _ = st.bind((1, ns.as_str()));
+            let _ = st.bind((2, ns_prefix.as_str()));
+            let _ = st.next();
+        }
+        cleared_pi = true;
+    }
+    // The JSON sidecar only ever holds pi headers: drop it whenever any pi
+    // namespace cleared, or a fresh table would re-import it on next load.
+    if cleared_pi && let Some(dir) = cache_dir() {
+        let _ = std::fs::remove_file(dir.join("pi-headers.json"));
     }
     if agent == "opencode" {
         let _ = conn.execute("DELETE FROM opencode");
@@ -563,6 +593,17 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
              body TEXT NOT NULL,\
              updated_at INTEGER\
         );\
+        CREATE TABLE IF NOT EXISTS headers (\
+             namespace TEXT NOT NULL,\
+             path TEXT NOT NULL,\
+             mtime_ms INTEGER NOT NULL,\
+             size INTEGER NOT NULL,\
+             session INTEGER NOT NULL,\
+             parent TEXT,\
+             malformed INTEGER NOT NULL,\
+             timestamp_ms INTEGER,\
+             PRIMARY KEY (namespace, path)\
+        );\
         CREATE TABLE IF NOT EXISTS schema_meta (\
              name TEXT PRIMARY KEY,\
              version INTEGER NOT NULL\
@@ -573,7 +614,7 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         let mut st = conn
             .prepare(
                 "INSERT OR IGNORE INTO schema_meta(name, version) VALUES\
-                     (?, ?), (?, ?), (?, ?), (?, ?)",
+                     (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)",
             )
             .ok()?;
         st.bind((1, "files")).ok()?;
@@ -584,6 +625,8 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
         st.bind((6, OPENCODE_SCHEMA_VERSION)).ok()?;
         st.bind((7, "pricing")).ok()?;
         st.bind((8, PRICING_SCHEMA_VERSION)).ok()?;
+        st.bind((9, "headers")).ok()?;
+        st.bind((10, HEADERS_SCHEMA_VERSION)).ok()?;
         st.next().ok()?;
     }
     // pricing v2: `updated_at` drives the freshness window. Memoize the
@@ -671,6 +714,113 @@ fn today_day_number() -> i64 {
         .map(|elapsed| (elapsed.as_secs() / 86400) as i64)
         .unwrap_or(0)
 }
+/// One Pi session-header row: the first-line parse outcome for a source file,
+/// keyed `namespace\0path` exactly like the legacy `pi-headers.json` sidecar
+/// it replaces. Integers are `u64`/`i64` content; the casts at the SQL boundary
+/// are safe because stat values and millis timestamps fit `i64`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredHeader {
+    pub mtime_ms: u64,
+    pub size: u64,
+    pub session: bool,
+    pub parent: Option<String>,
+    pub malformed: bool,
+    pub timestamp_ms: Option<i64>,
+}
+
+/// Load every session-header row, keyed `namespace\0path`. Returns `None`
+/// when the database is unavailable so callers can fall back to the legacy
+/// sidecar file; an empty table is `Some(empty)` and means "no headers".
+pub fn load_headers_from_db() -> Option<HashMap<String, StoredHeader>> {
+    let conn = open_db()?;
+    let mut st = conn
+        .prepare("SELECT namespace, path, mtime_ms, size, session, parent, malformed, timestamp_ms FROM headers")
+        .ok()?;
+    let mut map = HashMap::new();
+    while let Ok(sqlite::State::Row) = st.next() {
+        let (Ok(namespace), Ok(path), Ok(mtime_ms), Ok(size), Ok(session), Ok(malformed)) = (
+            st.read::<String, _>(0),
+            st.read::<String, _>(1),
+            st.read::<i64, _>(2),
+            st.read::<i64, _>(3),
+            st.read::<i64, _>(4),
+            st.read::<i64, _>(6),
+        ) else {
+            continue;
+        };
+        let parent: Option<String> = st.read::<String, _>(5).ok();
+        let timestamp_ms: Option<i64> = st.read::<i64, _>(7).ok();
+        map.insert(
+            format!("{namespace}\0{path}"),
+            StoredHeader {
+                mtime_ms: mtime_ms.max(0) as u64,
+                size: size.max(0) as u64,
+                session: session != 0,
+                parent,
+                malformed: malformed != 0,
+                timestamp_ms,
+            },
+        );
+    }
+    Some(map)
+}
+
+/// Persist session-header rows in one transaction. Same-key races carry the
+/// same stat-bound content, so last-writer-wins is idempotent; unlike the
+/// legacy sidecar file, a concurrent reader never sees a torn write.
+/// Returns whether the rows committed, so one-time migrations can gate
+/// destructive follow-ups on known success. Hot-path callers ignore the
+/// result: SQL errors stay non-fatal, matching this module's philosophy.
+pub fn save_headers_to_db(rows: &HashMap<String, StoredHeader>) -> bool {
+    if rows.is_empty() {
+        return true;
+    }
+    let Some(conn) = open_db() else {
+        return false;
+    };
+    if conn.execute("BEGIN IMMEDIATE").is_err() {
+        return false;
+    }
+    let committed = (|| -> Option<()> {
+        let mut st = conn
+            .prepare(
+                "INSERT OR REPLACE INTO headers(namespace, path, mtime_ms, size, session, parent, malformed, timestamp_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .ok()?;
+        for (key, header) in rows {
+            let Some((namespace, path)) = key.split_once('\0') else {
+                continue;
+            };
+            st.bind((1, namespace)).ok()?;
+            st.bind((2, path)).ok()?;
+            st.bind((3, header.mtime_ms as i64)).ok()?;
+            st.bind((4, header.size as i64)).ok()?;
+            st.bind((5, i64::from(header.session))).ok()?;
+            match &header.parent {
+                Some(parent) => st.bind((6, parent.as_str())).ok()?,
+                None => st.bind((6, sqlite::Value::Null)).ok()?,
+            }
+            st.bind((7, i64::from(header.malformed))).ok()?;
+            match header.timestamp_ms {
+                Some(ts) => st.bind((8, ts)).ok()?,
+                None => st.bind((8, sqlite::Value::Null)).ok()?,
+            }
+            st.next().ok()?;
+            st.reset().ok()?;
+        }
+        Some(())
+    })();
+    let ok = conn
+        .execute(if committed.is_some() {
+            "COMMIT"
+        } else {
+            "ROLLBACK"
+        })
+        .is_ok();
+    committed.is_some() && ok
+}
+
 /// Read a table's stored schema version, or `None` if unstamped/unreadable.
 fn read_schema_version(conn: &sqlite::Connection, name: &str) -> Option<i64> {
     let mut st = conn
@@ -3323,6 +3473,42 @@ pub(crate) mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Session headers table tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn headers_table_round_trips_rows() {
+        let _env = CacheEnv::new("headers-table");
+        let mut rows = HashMap::new();
+        rows.insert(
+            "ns\0/path".to_string(),
+            StoredHeader {
+                mtime_ms: 7,
+                size: 9,
+                session: true,
+                parent: Some("p".to_string()),
+                malformed: false,
+                timestamp_ms: Some(123),
+            },
+        );
+        save_headers_to_db(&rows);
+        let back = load_headers_from_db().expect("database must be available");
+        assert_eq!(back.len(), 1);
+        let header = &back["ns\0/path"];
+        assert_eq!(
+            (
+                header.mtime_ms,
+                header.size,
+                header.session,
+                header.parent.as_deref(),
+                header.malformed,
+                header.timestamp_ms
+            ),
+            (7, 9, true, Some("p"), false, Some(123))
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Open-time pragma tests
     // -------------------------------------------------------------------------
 
@@ -3437,12 +3623,18 @@ pub(crate) mod tests {
                 dir.join(DB_FILE).exists(),
                 "cache.db should exist after open"
             );
+            // A migrated-away sidecar left behind by a crash.
+            fs::write(dir.join("pi-headers.json"), "{\"v\":1,\"files\":{}}").unwrap();
         }
         clear_cache();
         let dir = cache_dir().unwrap();
         assert!(
             !dir.join(DB_FILE).exists(),
             "cache.db must be removed after clear_cache"
+        );
+        assert!(
+            !dir.join("pi-headers.json").exists(),
+            "pi-headers.json must be removed or the next load re-imports it"
         );
         assert!(
             !dir.join("cache.db-wal").exists(),
@@ -3452,6 +3644,39 @@ pub(crate) mod tests {
             !dir.join("cache.db-shm").exists(),
             "cache.db-shm must be removed"
         );
+    }
+
+    #[test]
+    fn clear_cache_namespaces_removes_pi_headers_and_sidecar() {
+        let _env = CacheEnv::new("clear-pi-headers");
+        let header = || StoredHeader {
+            mtime_ms: 1,
+            size: 1,
+            session: true,
+            parent: None,
+            malformed: false,
+            timestamp_ms: None,
+        };
+        let mut rows = HashMap::new();
+        rows.insert("pi\0/tmp/a.jsonl".to_string(), header());
+        rows.insert("claude\0/tmp/b.jsonl".to_string(), header());
+        assert!(save_headers_to_db(&rows), "seed must commit");
+        let sidecar = cache_dir().expect("cache dir").join("pi-headers.json");
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        fs::write(&sidecar, b"{}").unwrap();
+
+        clear_cache_namespaces("pi");
+
+        let stored = load_headers_from_db().expect("headers readable");
+        assert!(
+            !stored.keys().any(|k| k.starts_with("pi\0")),
+            "pi headers must clear"
+        );
+        assert!(
+            stored.contains_key("claude\0/tmp/b.jsonl"),
+            "other namespaces kept"
+        );
+        assert!(!sidecar.exists(), "sidecar must clear with pi");
     }
 
     /// `clear_cache_namespaces` must delete only the target namespace rows

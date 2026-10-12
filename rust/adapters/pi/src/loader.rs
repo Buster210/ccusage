@@ -354,6 +354,8 @@ fn load_entries_from_paths(
         .is_some()
         .then(std::time::Instant::now);
     for (unit, entries) in units.iter().zip(per_unit) {
+        // The retain always runs: rows pruned from `files` on an earlier run
+        // still live in the ledger and only this call re-emits them.
         live.extend(crate::cache::retain_via_ledger(
             &unit.namespace,
             entries,
@@ -420,6 +422,30 @@ struct HeaderSidecar {
     files: HashMap<String, StoredSessionHeader>,
 }
 
+/// Sidecar shape and table shape carry the same fields; convert at the
+/// boundary so the reuse loop below never learns which store it reads.
+fn stored_header_to_pi(header: &crate::cache::StoredHeader) -> StoredSessionHeader {
+    StoredSessionHeader {
+        mtime_ms: header.mtime_ms,
+        size: header.size,
+        session: header.session,
+        parent: header.parent.clone(),
+        malformed: header.malformed,
+        timestamp_ms: header.timestamp_ms,
+    }
+}
+
+fn stored_header_to_db(header: &StoredSessionHeader) -> crate::cache::StoredHeader {
+    crate::cache::StoredHeader {
+        mtime_ms: header.mtime_ms,
+        size: header.size,
+        session: header.session,
+        parent: header.parent.clone(),
+        malformed: header.malformed,
+        timestamp_ms: header.timestamp_ms,
+    }
+}
+
 /// `stat` fingerprint without opening the file; mirrors
 /// `ccusage_core::cache::file_metadata` (whose fields are crate-private).
 fn file_stat_ms(path: &Path) -> Option<(u64, u64)> {
@@ -443,12 +469,78 @@ fn load_session_headers(
     let timed = std::env::var_os("CCUSAGE_DEBUG_TIMING").is_some();
     let started = timed.then(std::time::Instant::now);
     let sidecar_path = crate::cache::cache_dir().map(|dir| dir.join("pi-headers.json"));
-    let sidecar: HeaderSidecar = sidecar_path
-        .as_ref()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(|sidecar: &HeaderSidecar| sidecar.v == 1)
-        .unwrap_or_default();
+    // Session headers live in the `headers` table; the JSON sidecar is only a
+    // one-time migration source (plus the full fallback when the database is
+    // unavailable). The table is consulted only when populated, so warm runs
+    // never parse the sidecar file.
+    let db_headers = crate::cache::load_headers_from_db();
+    let table_was_empty = matches!(&db_headers, Some(rows) if rows.is_empty());
+    let mut sidecar = HeaderSidecar::default();
+    let from_db = match db_headers {
+        Some(rows) if !rows.is_empty() => {
+            sidecar.v = 1;
+            sidecar.files = rows
+                .iter()
+                .map(|(key, header)| (key.clone(), stored_header_to_pi(header)))
+                .collect();
+            true
+        }
+        present => {
+            sidecar = sidecar_path
+                .as_ref()
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .filter(|sidecar: &HeaderSidecar| sidecar.v == 1)
+                .unwrap_or_default();
+            present.is_some()
+        }
+    };
+    // One-time migration: move sidecar keys the table lacks, then delete the
+    // file solely on known save success. When the table is empty that is the
+    // whole file; when it is already populated only orphaned keys move (a
+    // crash between save and delete, or a concurrent first-runner). A failed
+    // save keeps the file so the next run retries instead of losing headers.
+    // Runs before the parse gate below: a fully-reused sidecar has nothing
+    // to parse but must still move.
+    if table_was_empty {
+        if !sidecar.files.is_empty() {
+            let rows: HashMap<String, crate::cache::StoredHeader> = sidecar
+                .files
+                .iter()
+                .map(|(key, header)| (key.clone(), stored_header_to_db(header)))
+                .collect();
+            if crate::cache::save_headers_to_db(&rows)
+                && let Some(path) = sidecar_path.as_ref()
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    } else if from_db {
+        let orphan: Option<HeaderSidecar> = sidecar_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<HeaderSidecar>(&bytes).ok())
+            .filter(|sidecar: &HeaderSidecar| sidecar.v == 1);
+        if let Some(file) = orphan {
+            let orphan_rows: HashMap<String, crate::cache::StoredHeader> = file
+                .files
+                .into_iter()
+                .filter(|(key, _)| !sidecar.files.contains_key(key))
+                .map(|(key, header)| (key, stored_header_to_db(&header)))
+                .collect();
+            if !orphan_rows.is_empty() {
+                if crate::cache::save_headers_to_db(&orphan_rows)
+                    && let Some(path) = sidecar_path.as_ref()
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+            } else if let Some(path) = sidecar_path.as_ref() {
+                // Every key is already in the table: a previous save
+                // succeeded but its delete never ran. Nothing left to write.
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
     let mut headers: Vec<Option<parser::PiSessionHeader>> = Vec::with_capacity(files.len());
     let mut need: Vec<(usize, PathBuf, String)> = Vec::new();
     let mut reused = 0usize;
@@ -515,29 +607,37 @@ fn load_session_headers(
             headers[index] = header;
         }
         if !inserts.is_empty() {
-            // Reload-and-union: sibling loader calls (other scopes sharing
-            // this file) may save concurrently; union converges while
-            // last-writer-wins would drop their keys. Same-key races carry
-            // the same stat-bound content, so overwrites are idempotent.
-            // Stale keys (deleted files) simply never match a stat again;
-            // no pruning, so concurrent namespaces cannot wipe each other.
-            let mut merged: HeaderSidecar = sidecar_path
-                .as_ref()
-                .and_then(|path| std::fs::read(path).ok())
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .filter(|sidecar: &HeaderSidecar| sidecar.v == 1)
-                .unwrap_or_default();
-            merged.files.extend(inserts);
-            merged.v = 1;
-            if let Some(path) = sidecar_path.as_ref()
-                && let Some(parent) = path.parent()
-                && std::fs::create_dir_all(parent).is_ok()
-                && let Ok(bytes) = serde_json::to_vec(&merged)
-            {
-                // Atomic replace so a concurrent reader never sees a torn file.
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, &bytes).is_ok() {
-                    let _ = std::fs::rename(&tmp, path);
+            if from_db {
+                let rows: HashMap<String, crate::cache::StoredHeader> = inserts
+                    .iter()
+                    .map(|(key, header)| (key.clone(), stored_header_to_db(header)))
+                    .collect();
+                crate::cache::save_headers_to_db(&rows);
+            } else {
+                // Reload-and-union: sibling loader calls (other scopes sharing
+                // this file) may save concurrently; union converges while
+                // last-writer-wins would drop their keys. Same-key races carry
+                // the same stat-bound content, so overwrites are idempotent.
+                // Stale keys (deleted files) simply never match a stat again;
+                // no pruning, so concurrent namespaces cannot wipe each other.
+                let mut merged: HeaderSidecar = sidecar_path
+                    .as_ref()
+                    .and_then(|path| std::fs::read(path).ok())
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .filter(|sidecar: &HeaderSidecar| sidecar.v == 1)
+                    .unwrap_or_default();
+                merged.files.extend(inserts);
+                merged.v = 1;
+                if let Some(path) = sidecar_path.as_ref()
+                    && let Some(parent) = path.parent()
+                    && std::fs::create_dir_all(parent).is_ok()
+                    && let Ok(bytes) = serde_json::to_vec(&merged)
+                {
+                    // Atomic replace so a concurrent reader never sees a torn file.
+                    let tmp = path.with_extension("json.tmp");
+                    if std::fs::write(&tmp, &bytes).is_ok() {
+                        let _ = std::fs::rename(&tmp, path);
+                    }
                 }
             }
         }
@@ -1872,19 +1972,29 @@ mod tests {
 
     #[test]
     fn warm_run_reuses_persisted_session_headers() {
-        let cache_env = CacheEnv::new("pi-headers");
-        let fixture = Fixture::new();
-        let parent = fixture.write_file(
+        let _cache_env = CacheEnv::new("pi-headers");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ccusage-test-sources")
+            .join(std::process::id().to_string())
+            .join("pi-headers");
+        std::fs::create_dir_all(root.join("sessions/project-a")).unwrap();
+        let write = |rel: &str, contents: &str| -> PathBuf {
+            let path = root.join(rel);
+            std::fs::write(&path, contents).unwrap();
+            path
+        };
+        let parent = write(
             "sessions/project-a/root.jsonl",
-            [
+            &[
                 session_line("root", "2026-01-01T00:00:00.000Z", None),
                 usage_line("2026-01-02T10:00:00.000Z", 100, 10, 20, 3),
             ]
             .join("\n"),
         );
-        let child = fixture.write_file(
+        let child = write(
             "sessions/project-a/child.jsonl",
-            [
+            &[
                 session_line("child", "2026-01-03T00:00:00.000Z", Some(&parent)),
                 usage_line("2026-01-03T01:00:00.000Z", 50, 5, 6, 1),
             ]
@@ -1897,7 +2007,7 @@ mod tests {
         let load = || {
             load_entries_from_paths(
                 &shared,
-                vec![fixture.path("sessions")],
+                vec![root.join("sessions")],
                 None,
                 PiLoadScope::Default,
             )
@@ -1905,8 +2015,9 @@ mod tests {
         };
         let cold = load();
         assert!(!cold.is_empty());
+        let stored = ccusage_core::cache::load_headers_from_db().expect("headers table readable");
         assert!(
-            cache_env.dir().join("ccusage/pi-headers.json").exists(),
+            !stored.is_empty(),
             "first load must persist session headers"
         );
         let warm = load();
@@ -1925,6 +2036,224 @@ mod tests {
         assert!(
             edited.len() > cold.len(),
             "edited file must contribute new rows"
+        );
+    }
+
+    #[test]
+    fn orphan_sidecar_keys_migrate_then_file_deletes() {
+        let cache_env = CacheEnv::new("pi-headers-orphan");
+        let fixture = Fixture::new();
+        let _ = fixture.write_file(
+            "sessions/project-a/root.jsonl",
+            [
+                session_line("root", "2026-01-01T00:00:00.000Z", None),
+                usage_line("2026-01-02T10:00:00.000Z", 100, 10, 20, 3),
+            ]
+            .join("\n"),
+        );
+        // Table already populated; the sidecar file was orphaned by a crash
+        // between save and delete and holds one key the table lacks.
+        let mut seeded = HashMap::new();
+        seeded.insert(
+            "pi\0seeded/path".to_string(),
+            crate::cache::StoredHeader {
+                mtime_ms: 1,
+                size: 1,
+                session: true,
+                parent: None,
+                malformed: false,
+                timestamp_ms: None,
+            },
+        );
+        assert!(crate::cache::save_headers_to_db(&seeded));
+        let sidecar_path = cache_env.dir().join("ccusage/pi-headers.json");
+        std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&serde_json::json!({
+                "v": 1,
+                "files": {
+                    "pi\0gone/path": {
+                        "mtime_ms": 1,
+                        "size": 1,
+                        "session": true,
+                        "parent": null,
+                        "malformed": false,
+                        "timestamp_ms": null
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            ..SharedArgs::default()
+        };
+        let rows = load_entries_from_paths(
+            &shared,
+            vec![fixture.path("sessions")],
+            None,
+            PiLoadScope::Default,
+        )
+        .unwrap();
+        assert!(!rows.is_empty());
+
+        let stored = crate::cache::load_headers_from_db().expect("headers readable");
+        assert!(
+            stored.keys().any(|k| k.ends_with("gone/path")),
+            "orphan sidecar key must move to the table"
+        );
+        assert!(
+            !sidecar_path.exists(),
+            "orphan sidecar must delete after verified save"
+        );
+    }
+
+    #[test]
+    fn already_migrated_sidecar_with_covered_keys_deletes() {
+        let cache_env = CacheEnv::new("pi-headers-covered");
+        let fixture = Fixture::new();
+        let _ = fixture.write_file(
+            "sessions/project-a/root.jsonl",
+            [
+                session_line("root", "2026-01-01T00:00:00.000Z", None),
+                usage_line("2026-01-02T10:00:00.000Z", 100, 10, 20, 3),
+            ]
+            .join("\n"),
+        );
+        // Table already holds every key the orphaned sidecar has: a previous
+        // save succeeded but its delete never ran. Nothing left to write,
+        // but the file must still go so it is never re-imported.
+        let mut seeded = HashMap::new();
+        seeded.insert(
+            "pi\0covered/path".to_string(),
+            crate::cache::StoredHeader {
+                mtime_ms: 1,
+                size: 1,
+                session: true,
+                parent: None,
+                malformed: false,
+                timestamp_ms: None,
+            },
+        );
+        assert!(crate::cache::save_headers_to_db(&seeded));
+        let sidecar_path = cache_env.dir().join("ccusage/pi-headers.json");
+        std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&serde_json::json!({
+                "v": 1,
+                "files": {
+                    "pi\0covered/path": {
+                        "mtime_ms": 1,
+                        "size": 1,
+                        "session": true,
+                        "parent": null,
+                        "malformed": false,
+                        "timestamp_ms": null
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            ..SharedArgs::default()
+        };
+        let rows = load_entries_from_paths(
+            &shared,
+            vec![fixture.path("sessions")],
+            None,
+            PiLoadScope::Default,
+        )
+        .unwrap();
+        assert!(!rows.is_empty());
+
+        assert!(
+            !sidecar_path.exists(),
+            "fully-covered sidecar must delete with nothing left to write"
+        );
+        let stored = crate::cache::load_headers_from_db().expect("headers readable");
+        assert!(
+            stored.contains_key("pi\0covered/path"),
+            "covered key must survive in the table"
+        );
+    }
+
+    #[test]
+    fn legacy_sidecar_migrates_into_headers_table_once() {
+        let cache_env = CacheEnv::new("pi-headers-migrate");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ccusage-test-sources")
+            .join(std::process::id().to_string())
+            .join("pi-headers-migrate");
+        std::fs::create_dir_all(root.join("sessions/project-a")).unwrap();
+        let path = root.join("sessions/project-a/root.jsonl");
+        std::fs::write(
+            &path,
+            [
+                session_line("root", "2026-01-01T00:00:00.000Z", None),
+                usage_line("2026-01-02T10:00:00.000Z", 100, 10, 20, 3),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let (mtime_ms, size) = file_stat_ms(&path).unwrap();
+        // Seed the legacy sidecar the way older binaries left it.
+        let sidecar_path = cache_env.dir().join("ccusage/pi-headers.json");
+        std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();
+        let mut files = HashMap::new();
+        files.insert(
+            format!("pi\0{}", path.to_string_lossy()),
+            StoredSessionHeader {
+                mtime_ms,
+                size,
+                session: true,
+                parent: None,
+                malformed: false,
+                timestamp_ms: None,
+            },
+        );
+        std::fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&HeaderSidecar { v: 1, files }).unwrap(),
+        )
+        .unwrap();
+
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            ..SharedArgs::default()
+        };
+        let load = || {
+            load_entries_from_paths(
+                &shared,
+                vec![root.join("sessions")],
+                None,
+                PiLoadScope::Default,
+            )
+            .unwrap()
+        };
+        let first = load();
+        assert!(!first.is_empty());
+        assert!(
+            !sidecar_path.exists(),
+            "migration must remove the sidecar after copying it"
+        );
+        let stored = ccusage_core::cache::load_headers_from_db().expect("headers table readable");
+        assert!(
+            stored.contains_key(&format!("pi\0{}", path.to_string_lossy())),
+            "migrated rows must land in the headers table"
+        );
+        let second = load();
+        assert_eq!(
+            second.len(),
+            first.len(),
+            "post-migration load from the table must agree"
         );
     }
 
