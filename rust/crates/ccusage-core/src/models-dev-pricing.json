@@ -4160,7 +4160,7 @@
 			"context": 200000
 		}
 	},
-	"anthropic/claude-haiku-5-5": {
+	"anthropic/claude-haiku-5.5": {
 		"cost": {
 			"cache_read": 0.01,
 			"cache_write": 0.125,
@@ -21491,9 +21491,9 @@
 	},
 	"moonshotai/kimi-k2.6:thinking": {
 		"cost": {
-			"cache_read": 0.1155,
-			"input": 0.4342,
-			"output": 2.45
+			"cache_read": 0.125,
+			"input": 0.5,
+			"output": 2.6
 		},
 		"limit": {
 			"context": 262144
