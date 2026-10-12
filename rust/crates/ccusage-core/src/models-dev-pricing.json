@@ -15242,7 +15242,7 @@
 			"output": 0.22
 		},
 		"limit": {
-			"context": 131072
+			"context": 262144
 		}
 	},
 	"google/gemma-4-26b-a4b-it-cybersecurity": {
@@ -33920,7 +33920,7 @@
 		"cost": {
 			"cache_read": 0.3,
 			"input": 0.72,
-			"output": 22
+			"output": 24
 		},
 		"exactOnly": true,
 		"limit": {
