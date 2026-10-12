@@ -8337,7 +8337,7 @@
 	},
 	"cloudflare/clef": {
 		"cost": {
-			"input": 0.24,
+			"input": 0.042,
 			"output": 0
 		},
 		"exactOnly": true,
@@ -8347,7 +8347,7 @@
 	},
 	"cloudflare/clef-flash": {
 		"cost": {
-			"input": 0.038,
+			"input": 0.021,
 			"output": 0
 		},
 		"exactOnly": true,
@@ -34020,8 +34020,8 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.024,
-			"input": 0.024,
+			"cache_read": 0.0336,
+			"input": 0.0336,
 			"output": 1.188
 		},
 		"exactOnly": true,
@@ -34087,9 +34087,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.29,
-			"input": 0.45,
-			"output": 14.9
+			"cache_read": 0.55,
+			"input": 0.73,
+			"output": 10
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34246,9 +34246,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.032,
-			"input": 0.032,
-			"output": 0.9
+			"cache_read": 0.0232,
+			"input": 0.0232,
+			"output": 1.2
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34257,9 +34257,9 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.059,
-			"input": 0.079,
-			"output": 4.8
+			"cache_read": 0.06,
+			"input": 0.055,
+			"output": 5
 		},
 		"exactOnly": true,
 		"limit": {
