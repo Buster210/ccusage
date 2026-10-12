@@ -407,7 +407,10 @@ fn push_deduped_entry(
 /// Exact-match dedupe key shared by the entry and summary paths.
 ///
 /// Without a request ID, gateways reuse one message ID for every response,
-/// so the key is scoped to the session and timestamp instead.
+/// so the key is scoped to the session and timestamp instead. Real Anthropic IDs (`msg_`
+/// prefix) are unique per response, so requestless entries with one collapse by session
+/// across timestamps: Claude Code writes one line per content block with the same
+/// `message.id` but distinct timestamps.
 fn usage_dedupe_hash(
     message_id: &str,
     request_id: Option<&str>,
@@ -419,9 +422,20 @@ fn usage_dedupe_hash(
     request_id.hash(&mut hasher);
     if request_id.is_none() {
         session_id.hash(&mut hasher);
-        timestamp.hash(&mut hasher);
+        if !is_anthropic_message_id(message_id) {
+            timestamp.hash(&mut hasher);
+        }
     }
     hasher.finish()
+}
+
+/// Real Anthropic message IDs are unique per response, unlike the placeholder IDs gateways
+/// reuse for every response.
+///
+/// The prefix is a heuristic: only a request ID proves two lines belong to one response, so a
+/// gateway that reused a `msg_`-shaped placeholder would collapse to one entry per session.
+pub(crate) fn is_anthropic_message_id(message_id: &str) -> bool {
+    message_id.starts_with("msg_")
 }
 
 fn sidechain_replay_dedupe_hash(message_id: &str, session_id: &str) -> u64 {
@@ -450,7 +464,8 @@ fn loaded_entry_matches_dedupe_key(
     entry.data.message.id.as_deref() == Some(message_id)
         && entry.data.request_id.as_deref() == request_id
         && (request_id.is_some()
-            || (loaded_entry_session_id(entry) == session_id && entry.timestamp == timestamp))
+            || (loaded_entry_session_id(entry) == session_id
+                && (is_anthropic_message_id(message_id) || entry.timestamp == timestamp)))
 }
 
 fn sidechain_entry_replay_dedupe_hash(message_id: &str, session_id: &str) -> u64 {

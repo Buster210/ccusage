@@ -679,6 +679,27 @@ mod tests {
     }
 
     #[test]
+    fn applies_documented_gpt_6_fast_multipliers() {
+        let pricing = PricingMap::load_embedded();
+        let usage = CodexModelUsage {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 500_000,
+            output_tokens: 100_000,
+            total_tokens: 1_100_000,
+            ..CodexModelUsage::default()
+        };
+
+        for model in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+            let standard =
+                calculate_codex_model_cost(model, &usage, &pricing, CodexSpeed::Standard);
+            let fast = calculate_codex_model_cost(model, &usage, &pricing, CodexSpeed::Fast);
+
+            assert!(standard > 0.0, "{model} has embedded pricing");
+            assert!((fast - (standard * 2.0)).abs() < 1e-9, "{model}");
+        }
+    }
+
+    #[test]
     fn uses_recorded_service_tiers_in_auto_mode() {
         let mut pricing = PricingMap::default();
         pricing.load_json(
@@ -713,6 +734,135 @@ mod tests {
         assert!((auto - 30e-6).abs() < f64::EPSILON);
         assert!((forced_standard - 20e-6).abs() < f64::EPSILON);
         assert!((forced_fast - 40e-6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prices_recorded_flex_usage_at_flex_rate() {
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "gpt-test": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000002,
+                    "provider_specific_entry": { "flex": 0.5 }
+                }
+            }"#,
+        );
+        let usage = CodexModelUsage {
+            input_tokens: 20,
+            total_tokens: 20,
+            recorded_flex_usage: CodexUsageBucket {
+                input_tokens: 20,
+                ..CodexUsageBucket::default()
+            },
+            ..CodexModelUsage::default()
+        };
+
+        let cost = calculate_codex_model_cost("gpt-test", &usage, &pricing, CodexSpeed::Auto);
+
+        assert!((cost - 10e-6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prices_rollout_service_tiers_across_loading_and_report_modes() {
+        for (model, expected_costs) in [
+            ("gpt-test", [45e-6, 40e-6, 55e-6, 20e-6]),
+            ("deepseek-v4-flash", [9.9e-6, 8.8e-6, 12.1e-6, 4.4e-6]),
+        ] {
+            let rollout = |second: u8, tier: &str| {
+                let timestamp = format!("2026-08-16T17:00:{second:02}.000Z");
+                [
+                    json!({
+                        "timestamp": timestamp,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "thread_settings_applied",
+                            "thread_settings": { "service_tier": tier },
+                        },
+                    })
+                    .to_string(),
+                    json!({
+                        "timestamp": timestamp,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "model": model,
+                                "last_token_usage": {
+                                    "input_tokens": 10,
+                                    "output_tokens": 0,
+                                    "total_tokens": 10,
+                                },
+                            },
+                        },
+                    })
+                    .to_string(),
+                ]
+                .join("\n")
+            };
+            let fixture = fs_fixture!({
+                "sessions/standard.jsonl": rollout(1, "default"),
+                "sessions/flex.jsonl": rollout(2, "flex"),
+                "sessions/fast.jsonl": rollout(3, "priority"),
+                "sessions/unclassified.jsonl": rollout(4, "unknown"),
+            });
+            let mut pricing = PricingMap::default();
+            pricing.load_json(
+                &json!({
+                    model: {
+                        "input_cost_per_token": 0.000001,
+                        "output_cost_per_token": 0.000002,
+                        "provider_specific_entry": { "fast": 2, "flex": 0.5 },
+                    },
+                })
+                .to_string(),
+            );
+
+            for single_thread in [true, false] {
+                let shared = SharedArgs {
+                    single_thread,
+                    timezone: Some("UTC".to_string()),
+                    ..SharedArgs::default()
+                };
+                for kind in [
+                    AgentReportKind::Daily,
+                    AgentReportKind::Weekly,
+                    AgentReportKind::Monthly,
+                    AgentReportKind::Session,
+                ] {
+                    let groups =
+                        load_groups_from_directory(&fixture.path("sessions"), &shared, kind)
+                            .unwrap();
+                    for (speed, expected) in [
+                        (
+                            CodexSpeedPolicy::Auto(CodexServiceTier::Standard),
+                            expected_costs[0],
+                        ),
+                        (
+                            CodexSpeedPolicy::Auto(CodexServiceTier::Flex),
+                            expected_costs[1],
+                        ),
+                        (
+                            CodexSpeedPolicy::Auto(CodexServiceTier::Fast),
+                            expected_costs[2],
+                        ),
+                        (
+                            CodexSpeedPolicy::Forced(CodexServiceTier::Flex),
+                            expected_costs[3],
+                        ),
+                    ] {
+                        let report =
+                            report_from_groups(&groups, kind, &pricing, speed, CostMode::Calculate);
+                        assert_eq!(report["totals"]["totalTokens"], 40);
+                        let actual = report["totals"]["costUSD"].as_f64().unwrap();
+                        assert!(
+                            (actual - expected).abs() < 1e-12,
+                            "{model}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

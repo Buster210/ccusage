@@ -18,6 +18,7 @@ const PRICING_JSON_PATH_ENV: &str = "CCUSAGE_PRICING_JSON_PATH";
 #[cfg(feature = "fetch-litellm-pricing")]
 const PRICING_FETCH_TIMEOUT_SECONDS: u64 = 10;
 
+#[cfg(not(test))]
 fn main() {
     println!("cargo:rerun-if-env-changed={PRICING_JSON_PATH_ENV}");
 
@@ -86,12 +87,12 @@ fn fetch_pricing_json() -> String {
     );
 }
 
-#[cfg(feature = "fetch-litellm-pricing")]
+#[cfg(all(feature = "fetch-litellm-pricing", not(test)))]
 fn fetch_pricing_json() -> String {
     download_pricing_json().expect("fetch LiteLLM pricing for embed")
 }
 
-#[cfg(feature = "fetch-litellm-pricing")]
+#[cfg(all(feature = "fetch-litellm-pricing", not(test)))]
 fn download_pricing_json() -> std::io::Result<String> {
     let response = minreq::get(litellm_pricing_url()?)
         .with_timeout(PRICING_FETCH_TIMEOUT_SECONDS)

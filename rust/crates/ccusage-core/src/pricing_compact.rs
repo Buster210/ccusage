@@ -39,13 +39,15 @@ fn compact_litellm(json: &str, keep_all: bool) -> Option<String> {
                 fields.insert(target.to_string(), value.clone());
             }
         }
-        if let Some(fast) = pricing
-            .get("provider_specific_entry")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|entry| entry.get("fast"))
-            .filter(|value| !value.is_null())
-        {
-            fields.insert("fast".to_string(), fast.clone());
+        for tier in ["fast", "flex"] {
+            if let Some(multiplier) = pricing
+                .get("provider_specific_entry")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|entry| entry.get(tier))
+                .filter(|value| !value.is_null())
+            {
+                fields.insert(tier.to_string(), multiplier.clone());
+            }
         }
         if fields.contains_key("i") && fields.contains_key("o") {
             compact.insert(model, serde_json::Value::Object(fields));
@@ -69,6 +71,10 @@ fn is_embedded_model(model: &str) -> bool {
         || model.starts_with("jp.anthropic.")
         || model.starts_with("au.anthropic.")
         || model.starts_with("gpt-")
+        || model == "o3"
+        || model.starts_with("o3-")
+        || model == "o4-mini"
+        || model.starts_with("o4-mini-")
         || model.starts_with("openai/")
         || model.starts_with("azure/")
         || model.starts_with("zai/")

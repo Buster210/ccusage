@@ -62,7 +62,31 @@ pub(super) struct CopilotUsageEntry {
     pub(super) reasoning_output_tokens: u64,
     pub(super) extra_total_tokens: u64,
     pub(super) request_count: u64,
+    /// Cumulative per-model credits from session-state `totalNanoAiu`. Used only
+    /// to find session credits that `modelMetrics` does not account for.
+    pub(super) nano_aiu: u64,
+    pub(super) cost_usd: Option<f64>,
     pub(super) dedup_key: String,
+}
+
+/// Session-wide credit total from a `session.shutdown` or
+/// `session.usage_checkpoint` event, in nano-AIU. One AIU is one GitHub AI
+/// credit, billed at $0.01.
+#[derive(Debug, Clone)]
+pub(super) struct CopilotCreditSnapshot {
+    pub(super) timestamp: TimestampMs,
+    pub(super) session_id: String,
+    pub(super) is_shutdown: bool,
+    /// `None` for a shutdown whose session total or per-model totals are
+    /// missing, which makes its credits impossible to reconcile.
+    pub(super) total_nano_aiu: Option<u64>,
+    pub(super) dedup_key: String,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct CopilotSourceUsage {
+    pub(super) entries: Vec<CopilotUsageEntry>,
+    pub(super) credit_snapshots: Vec<CopilotCreditSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -114,8 +138,9 @@ pub(super) fn parse_otel_file(path: &Path) -> Result<Vec<CopilotUsageEntry>> {
     let sets = CandidateSets::new(&candidates);
     Ok(candidates
         .into_iter()
-        .filter(|candidate| should_emit_candidate(candidate, &sets))
-        .map(|candidate| CopilotUsageEntry {
+        .enumerate()
+        .filter(|(index, candidate)| should_emit_candidate(*index, candidate, &sets))
+        .map(|(_, candidate)| CopilotUsageEntry {
             timestamp: candidate.timestamp,
             timestamp_text: crate::format_rfc3339_millis(candidate.timestamp),
             session_id: candidate.session_id,
@@ -127,6 +152,8 @@ pub(super) fn parse_otel_file(path: &Path) -> Result<Vec<CopilotUsageEntry>> {
             reasoning_output_tokens: candidate.reasoning_output_tokens,
             extra_total_tokens: candidate.extra_total_tokens,
             request_count: 1,
+            nano_aiu: 0,
+            cost_usd: None,
             dedup_key: candidate.dedup_key,
         })
         .collect())
@@ -152,6 +179,12 @@ struct CopilotSessionStateData {
         deserialize_with = "jsonl::lenient_object"
     )]
     model_metrics: Option<BTreeMap<String, CopilotSessionModelMetrics>>,
+    #[serde(
+        rename = "totalNanoAiu",
+        default,
+        deserialize_with = "jsonl::lenient_f64"
+    )]
+    total_nano_aiu: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -160,6 +193,12 @@ struct CopilotSessionModelMetrics {
     usage: Option<CopilotSessionUsage>,
     #[serde(default, deserialize_with = "jsonl::lenient_object")]
     requests: Option<CopilotSessionRequests>,
+    #[serde(
+        rename = "totalNanoAiu",
+        default,
+        deserialize_with = "jsonl::lenient_f64"
+    )]
+    total_nano_aiu: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -183,7 +222,10 @@ struct CopilotSessionUsage {
     reasoning_tokens: u64,
 }
 
-pub(super) fn parse_session_state_file(path: &Path) -> Result<Vec<CopilotUsageEntry>> {
+const SHUTDOWN_EVENT: &str = "session.shutdown";
+const USAGE_CHECKPOINT_EVENT: &str = "session.usage_checkpoint";
+
+pub(super) fn parse_session_state_file(path: &Path) -> Result<CopilotSourceUsage> {
     let session_id = path
         .parent()
         .and_then(Path::file_name)
@@ -192,26 +234,53 @@ pub(super) fn parse_session_state_file(path: &Path) -> Result<Vec<CopilotUsageEn
         .filter(|name| !name.is_empty())
         .map(str::to_string);
     let Some(session_id) = session_id else {
-        return Ok(Vec::new());
+        return Ok(CopilotSourceUsage::default());
     };
 
     let content = fs::read(path)?;
-    let prefilter = LinePrefilter::all(&[b"session.shutdown"]);
-    let mut entries = Vec::new();
+    let prefilter =
+        LinePrefilter::any(&[SHUTDOWN_EVENT.as_bytes(), USAGE_CHECKPOINT_EVENT.as_bytes()]);
+    let mut parsed = CopilotSourceUsage::default();
     for event in jsonl::records::<CopilotSessionStateEvent>(&content, Some(&prefilter)) {
-        if event.event_type.as_deref() != Some("session.shutdown") {
-            continue;
-        }
+        let is_shutdown = match event.event_type.as_deref() {
+            Some(SHUTDOWN_EVENT) => true,
+            Some(USAGE_CHECKPOINT_EVENT) => false,
+            _ => continue,
+        };
         let Some(timestamp_text) = event.timestamp.as_deref() else {
             continue;
         };
         let Some(timestamp) = parse_ts_timestamp(timestamp_text) else {
             continue;
         };
-        let Some(model_metrics) = event.data.and_then(|data| data.model_metrics) else {
-            continue;
+        let data = event.data.unwrap_or_default();
+        let session_nano_aiu = nano_aiu(data.total_nano_aiu);
+        let snapshot_key = |total: Option<u64>| {
+            event.id.as_deref().map_or_else(
+                || {
+                    format!(
+                        "credits:{session_id}:{is_shutdown}:{}:{total:?}",
+                        timestamp.as_millis()
+                    )
+                },
+                |event_id| format!("credits:{session_id}:{event_id}"),
+            )
         };
-        for (model, metrics) in model_metrics {
+        if !is_shutdown {
+            // A checkpoint without a total carries nothing to reconcile.
+            if let Some(total) = session_nano_aiu {
+                parsed.credit_snapshots.push(CopilotCreditSnapshot {
+                    timestamp,
+                    session_id: session_id.clone(),
+                    is_shutdown,
+                    total_nano_aiu: Some(total),
+                    dedup_key: snapshot_key(Some(total)),
+                });
+            }
+            continue;
+        }
+        let mut models_report_credits = true;
+        for (model, metrics) in data.model_metrics.unwrap_or_default() {
             let model = normalize_copilot_model(&model);
             let request_count = metrics
                 .requests
@@ -230,6 +299,8 @@ pub(super) fn parse_session_state_file(path: &Path) -> Result<Vec<CopilotUsageEn
             {
                 continue;
             }
+            let model_nano_aiu = nano_aiu(metrics.total_nano_aiu);
+            models_report_credits &= model_nano_aiu.is_some();
             let timestamp_text = crate::format_rfc3339_millis(timestamp);
             let dedup_key = session_state_dedup_key(
                 &session_id,
@@ -239,7 +310,7 @@ pub(super) fn parse_session_state_file(path: &Path) -> Result<Vec<CopilotUsageEn
                 &usage,
                 request_count,
             );
-            entries.push(CopilotUsageEntry {
+            parsed.entries.push(CopilotUsageEntry {
                 timestamp,
                 timestamp_text,
                 session_id: session_id.clone(),
@@ -251,11 +322,27 @@ pub(super) fn parse_session_state_file(path: &Path) -> Result<Vec<CopilotUsageEn
                 reasoning_output_tokens: usage.reasoning_tokens,
                 extra_total_tokens: 0,
                 request_count,
+                nano_aiu: model_nano_aiu.unwrap_or_default(),
+                cost_usd: None,
                 dedup_key,
             });
         }
+        let total_nano_aiu = session_nano_aiu.filter(|_| models_report_credits);
+        parsed.credit_snapshots.push(CopilotCreditSnapshot {
+            timestamp,
+            session_id: session_id.clone(),
+            is_shutdown,
+            total_nano_aiu,
+            dedup_key: snapshot_key(total_nano_aiu),
+        });
     }
-    Ok(entries)
+    Ok(parsed)
+}
+
+fn nano_aiu(value: Option<f64>) -> Option<u64> {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u64)
 }
 
 fn session_state_dedup_key(
@@ -350,7 +437,9 @@ fn to_candidate(
         ],
     );
     let usage = TokenUsageRaw {
-        input_tokens: input.saturating_sub(input.min(cache_read)),
+        // Copilot counts cache reads and writes in the input tokens, as it does in
+        // session-state `inputTokens`.
+        input_tokens: input.saturating_sub(cache_read.saturating_add(cache_creation)),
         output_tokens: output,
         cache_creation_input_tokens: cache_creation,
         cache_read_input_tokens: cache_read,
@@ -406,11 +495,13 @@ struct CandidateSets {
     chat_response_ids: FxHashSet<String>,
     inference_response_ids: FxHashSet<String>,
     agent_turn_response_ids: FxHashSet<String>,
+    repeated_chat_spans: FxHashSet<usize>,
 }
 
 impl CandidateSets {
     fn new(candidates: &[CopilotUsageCandidate]) -> Self {
         Self {
+            repeated_chat_spans: repeated_chat_spans(candidates),
             chat_traces: source_trace_ids(candidates, CopilotUsageSource::ChatSpan),
             inference_traces: source_trace_ids(candidates, CopilotUsageSource::InferenceLog),
             agent_turn_traces: source_trace_ids(candidates, CopilotUsageSource::AgentTurnLog),
@@ -449,7 +540,49 @@ fn source_response_ids(
         .collect()
 }
 
-fn should_emit_candidate(candidate: &CopilotUsageCandidate, sets: &CandidateSets) -> bool {
+/// The Copilot CLI exports some chat spans a second time, under a new trace or
+/// span ID but with the response ID and usage of the original call. VS Code
+/// reports one response ID on every call of a turn, so the usage tells calls
+/// apart. Returns the chat spans that repeat an earlier one.
+fn repeated_chat_spans(candidates: &[CopilotUsageCandidate]) -> FxHashSet<usize> {
+    let mut earliest = FxHashMap::default();
+    let mut repeated = FxHashSet::default();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.source != CopilotUsageSource::ChatSpan {
+            continue;
+        }
+        let Some(response_id) = candidate.response_id.as_deref() else {
+            continue;
+        };
+        let call = (
+            response_id,
+            candidate.model.as_str(),
+            candidate.input_tokens,
+            candidate.output_tokens,
+            candidate.cache_creation_tokens,
+            candidate.cache_read_tokens,
+            candidate.reasoning_output_tokens,
+            candidate.extra_total_tokens,
+        );
+        let kept = *earliest.entry(call).or_insert(index);
+        if kept == index {
+            continue;
+        }
+        if candidate.timestamp < candidates[kept].timestamp {
+            repeated.insert(kept);
+            earliest.insert(call, index);
+        } else {
+            repeated.insert(index);
+        }
+    }
+    repeated
+}
+
+fn should_emit_candidate(
+    index: usize,
+    candidate: &CopilotUsageCandidate,
+    sets: &CandidateSets,
+) -> bool {
     let trace_match = |values: &FxHashSet<String>| {
         candidate
             .trace_id
@@ -463,7 +596,7 @@ fn should_emit_candidate(candidate: &CopilotUsageCandidate, sets: &CandidateSets
             .is_some_and(|response_id| values.contains(response_id))
     };
     match candidate.source {
-        CopilotUsageSource::ChatSpan => true,
+        CopilotUsageSource::ChatSpan => !sets.repeated_chat_spans.contains(&index),
         CopilotUsageSource::InferenceLog => {
             !trace_match(&sets.chat_traces) && !response_match(&sets.chat_response_ids)
         }
@@ -734,7 +867,8 @@ mod session_state_tests {
         });
 
         let entries = parse_session_state_file(&fixture.path("session-1/events.jsonl"))
-            .expect("session-state file should parse");
+            .expect("session-state file should parse")
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].timestamp_text, "2026-04-15T09:52:27.352Z");
@@ -790,7 +924,9 @@ mod session_state_tests {
             ),
         });
 
-        let entries = parse_session_state_file(&fixture.path("session-1/events.jsonl")).unwrap();
+        let entries = parse_session_state_file(&fixture.path("session-1/events.jsonl"))
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].input_tokens, 1);
@@ -836,7 +972,9 @@ mod session_state_tests {
             .to_string(),
         });
 
-        let entries = parse_session_state_file(&fixture.path("session-1/events.jsonl")).unwrap();
+        let entries = parse_session_state_file(&fixture.path("session-1/events.jsonl"))
+            .unwrap()
+            .entries;
 
         assert_eq!(
             entries
@@ -848,5 +986,107 @@ mod session_state_tests {
         assert_eq!(entries[1].cache_creation_tokens, 4);
         assert_eq!(entries[1].cache_read_tokens, 3);
         assert_eq!(entries[0].request_count, 1);
+    }
+
+    #[test]
+    fn parses_credit_totals_from_checkpoints_and_shutdowns() {
+        let fixture = fs_fixture!({
+            "session-1/events.jsonl": [
+                json!({
+                    "type": "session.usage_checkpoint",
+                    "id": "checkpoint-1",
+                    "timestamp": "2026-04-15T09:50:00.000Z",
+                    "data": {"totalNanoAiu": 51_322_830_000_u64, "promptCacheBreakState": []}
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-1",
+                    "timestamp": "2026-04-15T09:52:27.352Z",
+                    "data": {
+                        "totalNanoAiu": 93_524_970_000.0,
+                        "modelMetrics": {
+                            "test-model": {
+                                "usage": {"inputTokens": 100, "outputTokens": 50},
+                                "totalNanoAiu": 42_202_140_000.0
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "shutdown-2",
+                    "timestamp": "2026-04-16T09:00:00.000Z",
+                    "data": {"totalNanoAiu": 93_524_970_000_u64, "modelMetrics": {}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let parsed = parse_session_state_file(&fixture.path("session-1/events.jsonl")).unwrap();
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].nano_aiu, 42_202_140_000);
+        assert_eq!(
+            parsed
+                .credit_snapshots
+                .iter()
+                .map(|snapshot| (
+                    snapshot.dedup_key.as_str(),
+                    snapshot.is_shutdown,
+                    snapshot.total_nano_aiu
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "credits:session-1:checkpoint-1",
+                    false,
+                    Some(51_322_830_000)
+                ),
+                ("credits:session-1:shutdown-1", true, Some(93_524_970_000)),
+                ("credits:session-1:shutdown-2", true, Some(93_524_970_000)),
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_shutdown_credits_unknown_when_a_total_is_missing() {
+        let fixture = fs_fixture!({
+            "session-1/events.jsonl": [
+                json!({
+                    "type": "session.shutdown",
+                    "id": "without-model-total",
+                    "timestamp": "2026-04-15T09:52:27.352Z",
+                    "data": {
+                        "totalNanoAiu": 93_524_970_000_u64,
+                        "modelMetrics": {
+                            "test-model": {"usage": {"inputTokens": 100, "outputTokens": 50}}
+                        }
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "session.shutdown",
+                    "id": "without-session-total",
+                    "timestamp": "2026-04-16T09:52:27.352Z",
+                    "data": {"modelMetrics": {}}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let parsed = parse_session_state_file(&fixture.path("session-1/events.jsonl")).unwrap();
+
+        assert_eq!(
+            parsed
+                .credit_snapshots
+                .iter()
+                .map(|snapshot| snapshot.total_nano_aiu)
+                .collect::<Vec<_>>(),
+            [None, None]
+        );
     }
 }
