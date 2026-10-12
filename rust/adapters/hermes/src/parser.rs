@@ -11,7 +11,7 @@ use crate::{
 pub(super) struct HermesEntry {
     timestamp: TimestampMs,
     timestamp_text: String,
-    pub(super) session_id: String,
+    session_id: String,
     model: String,
     provider: String,
     usage: TokenUsageRaw,

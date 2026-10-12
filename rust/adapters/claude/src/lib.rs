@@ -434,7 +434,7 @@ fn usage_dedupe_hash(
 ///
 /// The prefix is a heuristic: only a request ID proves two lines belong to one response, so a
 /// gateway that reused a `msg_`-shaped placeholder would collapse to one entry per session.
-pub(crate) fn is_anthropic_message_id(message_id: &str) -> bool {
+fn is_anthropic_message_id(message_id: &str) -> bool {
     message_id.starts_with("msg_")
 }
 
@@ -740,12 +740,12 @@ struct UsageIteration {
     usage: TokenUsageRaw,
 }
 
-pub(crate) struct AdvisorUsage {
+struct AdvisorUsage {
     model: String,
     usage: TokenUsageRaw,
 }
 
-pub(crate) fn advisor_usages_from_line(line: &[u8]) -> Vec<AdvisorUsage> {
+fn advisor_usages_from_line(line: &[u8]) -> Vec<AdvisorUsage> {
     if memmem::find(line, br#""advisor_message""#).is_none() {
         return Vec::new();
     }
@@ -996,7 +996,7 @@ fn is_unsupported_nullable_field(field: &[u8]) -> bool {
     )
 }
 
-pub(crate) fn is_semver_prefix(value: &str) -> bool {
+fn is_semver_prefix(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
     if !consume_ascii_digits(bytes, &mut index) || bytes.get(index) != Some(&b'.') {

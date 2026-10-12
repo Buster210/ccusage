@@ -219,7 +219,7 @@ fn parse_line(
 
 /// Recompute cost and missing-pricing for a cached entry from its stored tokens,
 /// mirroring the parse path (billable output folds in `extra_total_tokens`).
-pub(super) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&PricingMap>) {
+fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&PricingMap>) {
     let model = entry.data.message.model.clone().unwrap_or_default();
     let billable_usage = TokenUsageRaw {
         output_tokens: entry

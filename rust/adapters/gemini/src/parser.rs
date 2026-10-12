@@ -102,7 +102,7 @@ struct GeminiTokens {
 
 #[derive(Debug, Clone)]
 pub(super) struct GeminiUsageEvent {
-    pub(super) timestamp: TimestampMs,
+    timestamp: TimestampMs,
     timestamp_text: String,
     session_id: String,
     model: String,

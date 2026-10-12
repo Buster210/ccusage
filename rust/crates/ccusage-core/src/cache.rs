@@ -246,10 +246,10 @@ impl LedgerEntry {
 /// Freshness fingerprint for a single source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
-    pub(crate) mtime_epoch_millis: u64,
-    pub(crate) size: u64,
+    mtime_epoch_millis: u64,
+    size: u64,
     /// Content fingerprint for SQLite adapters (0 for FileStat strategy).
-    pub(crate) fingerprint: u64,
+    fingerprint: u64,
 }
 
 /// Strategy for determining whether a cached file is still fresh.
@@ -312,7 +312,7 @@ pub fn cache_key(path: &Path) -> String {
 }
 
 /// Capture the current freshness fingerprint of a source file, if it exists.
-pub fn file_metadata(path: &Path) -> Option<FileMetadata> {
+pub(crate) fn file_metadata(path: &Path) -> Option<FileMetadata> {
     let metadata = fs::metadata(path).ok()?;
     let mtime = metadata
         .modified()
