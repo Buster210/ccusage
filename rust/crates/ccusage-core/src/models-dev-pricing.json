@@ -1650,9 +1650,9 @@
 	},
 	"TEE/glm-5.1": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 1.5,
-			"output": 5.25
+			"cache_read": 0.18,
+			"input": 0.7,
+			"output": 2.5
 		},
 		"limit": {
 			"context": 202752
@@ -1660,9 +1660,9 @@
 	},
 	"TEE/glm-5.1-thinking": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 1.5,
-			"output": 5.25
+			"cache_read": 0.18,
+			"input": 0.7,
+			"output": 2.5
 		},
 		"limit": {
 			"context": 202752
@@ -10531,9 +10531,9 @@
 	},
 	"deepseek/deepseek-latest": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.088,
+			"input": 0.37,
+			"output": 2.93
 		},
 		"exactOnly": true,
 		"limit": {
@@ -10800,9 +10800,9 @@
 	},
 	"deepseek/deepseek-v4-pro-0813:thinking": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.088,
+			"input": 0.37,
+			"output": 2.93
 		},
 		"limit": {
 			"context": 1048576
@@ -21388,9 +21388,9 @@
 	},
 	"moonshotai/kimi-k2.5:thinking": {
 		"cost": {
-			"cache_read": 0.15,
-			"input": 0.3,
-			"output": 1.9
+			"cache_read": 0.07,
+			"input": 0.375,
+			"output": 2
 		},
 		"limit": {
 			"context": 262144
@@ -31899,9 +31899,9 @@
 	},
 	"x-ai/grok-latest": {
 		"cost": {
-			"cache_read": 0.4,
-			"input": 1.6,
-			"output": 4.8
+			"cache_read": 0.5,
+			"input": 2,
+			"output": 6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -32749,9 +32749,9 @@
 	},
 	"z-ai/glm-4.6-original": {
 		"cost": {
-			"cache_read": 0.175,
-			"input": 0.35,
-			"output": 1.4
+			"cache_read": 0.1,
+			"input": 0.5,
+			"output": 2
 		},
 		"limit": {
 			"context": 256000
@@ -32759,9 +32759,9 @@
 	},
 	"z-ai/glm-4.6:thinking": {
 		"cost": {
-			"cache_read": 0.175,
-			"input": 0.35,
-			"output": 1.4
+			"cache_read": 0.1,
+			"input": 0.5,
+			"output": 2
 		},
 		"limit": {
 			"context": 200000
@@ -32927,9 +32927,9 @@
 	},
 	"z-ai/glm-5-original": {
 		"cost": {
-			"cache_read": 0.2,
-			"input": 1,
-			"output": 3.2
+			"cache_read": 0.1,
+			"input": 0.6,
+			"output": 1.9
 		},
 		"limit": {
 			"context": 200000
@@ -32937,9 +32937,9 @@
 	},
 	"z-ai/glm-5-original:thinking": {
 		"cost": {
-			"cache_read": 0.2,
-			"input": 1,
-			"output": 3.2
+			"cache_read": 0.1,
+			"input": 0.6,
+			"output": 1.9
 		},
 		"limit": {
 			"context": 200000
@@ -32993,9 +32993,9 @@
 	},
 	"z-ai/glm-5.1:thinking": {
 		"cost": {
-			"cache_read": 0.15,
-			"input": 0.75,
-			"output": 2.6
+			"cache_read": 0.18,
+			"input": 0.7,
+			"output": 2.5
 		},
 		"limit": {
 			"context": 200000
@@ -33126,9 +33126,9 @@
 	},
 	"z-ai/glm-5:thinking": {
 		"cost": {
-			"cache_read": 0.13,
-			"input": 0.5,
-			"output": 2.55
+			"cache_read": 0.1,
+			"input": 0.6,
+			"output": 1.9
 		},
 		"limit": {
 			"context": 200000
@@ -33919,8 +33919,8 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.45,
-			"output": 18
+			"input": 0.65,
+			"output": 20
 		},
 		"exactOnly": true,
 		"limit": {
