@@ -421,7 +421,7 @@ fn calculate_open_code_cost(
     // per-token rates of 0 in models.dev, but the generic `> 0.0` skip
     // would discard that 0 and fuzzy-match a paid sibling (e.g.
     // `mimo-v2.5-free` -> `mimo-v2.5`). Short-circuit on the model id
-    // itself so the exact 0 is honoured and no sibling is consulted.
+    // itself so the exact 0 is honored and no sibling is consulted.
     // `free` is always a suffix (`-free` or `:free`) — verified 358/358
     // in opencode DB and 96/96 in pricing all end with `free`.
     if model.to_ascii_lowercase().ends_with("free") {

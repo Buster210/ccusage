@@ -2494,7 +2494,7 @@ pub(crate) mod tests {
     /// session must produce DISTINCT synthetic ledger keys. Before the `\u{1f}`
     /// separator, `project="a:b"` + `session="c"` and `project="a"` +
     /// `session="b:c"` both formatted to `synth:a:b:c:...` — a silent spend
-    /// loss when the second entry was INSERT-OR-IGNOREd as a duplicate.
+    /// loss when the second entry was INSERT-OR-IGNOREEd as a duplicate.
     #[test]
     fn synthetic_key_no_colon_boundary_collision() {
         let mut a = sample_entry();

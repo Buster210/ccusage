@@ -2184,7 +2184,7 @@ mod tests {
 
     #[test]
     fn uses_session_v2_aggregate_when_no_message_level_usage_exists() {
-        let _cache_env = CacheEnv::new("opencode-uses-session-v2-aggregate-when-no-messag");
+        let _cache_env = CacheEnv::new("opencode-uses-session-v2-aggregate-when-no-message");
         let fixture = fs_fixture!({});
         let db_path = fixture.path("opencode.db");
         create_db_session_aggregate_table(&db_path, "session_v2");
@@ -3208,7 +3208,7 @@ mod tests {
 
     #[test]
     fn serves_unchanged_row_from_cache_on_second_load() {
-        let _cache_env = CacheEnv::new("opencode-serves-unchanged-row-from-cache-on-secon");
+        let _cache_env = CacheEnv::new("opencode-serves-unchanged-row-from-cache-on-second");
         let env = CacheEnv::new("opencode-row-cache-hit");
         let fixture = fs_fixture!({});
         let db = fixture.path("opencode.db");
