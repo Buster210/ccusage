@@ -15242,7 +15242,7 @@
 			"output": 0.22
 		},
 		"limit": {
-			"context": 262144
+			"context": 131072
 		}
 	},
 	"google/gemma-4-26b-a4b-it-cybersecurity": {
@@ -33863,7 +33863,7 @@
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
 			"cache_read": 0.2,
-			"input": 0.26,
+			"input": 0.25,
 			"output": 5
 		},
 		"exactOnly": true,
@@ -34079,8 +34079,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.059,
-			"input": 0.079,
+			"cache_read": 0.05,
+			"input": 0.07,
 			"output": 4.8
 		},
 		"exactOnly": true,
