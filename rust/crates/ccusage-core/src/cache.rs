@@ -660,94 +660,11 @@ struct StoredFile {
 
 /// Load every `files` row for `namespace`, keyed by source path. The entries
 /// blob is decoded lazily by [`partition_files`] only on a confirmed cache hit.
-/// Blob transfer dominates warm runs, so large namespaces shard the scan across
-/// workers (connections are not shareable); failed shards read as fresh, never loss.
+/// One indexed scan over `files_namespace`: fanning out per-shard connections
+/// re-paid a full `open_db` plus migration per shard and re-walked the same
+/// index range, measuring ~10x slower than a single scan on a 4.7k-row
+/// namespace. Failures read as fresh, never loss.
 fn load_namespace_files(conn: &sqlite::Connection, namespace: &str) -> HashMap<String, StoredFile> {
-    if row_count(conn, namespace) >= 128 {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(2, 8);
-        let mut map = HashMap::new();
-        std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(workers);
-            for shard in 0..workers {
-                handles.push(scope.spawn(move || load_namespace_shard(namespace, workers, shard)));
-            }
-            for handle in handles {
-                map.extend(handle.join().unwrap_or_default());
-            }
-        });
-        if !map.is_empty() {
-            return map;
-        }
-        // Sharded load came back empty (connections refused?); fall through
-        // to the single-connection scan rather than dropping the cache.
-    }
-    load_namespace_files_single(conn, namespace)
-}
-
-fn row_count(conn: &sqlite::Connection, namespace: &str) -> usize {
-    let Ok(mut st) = conn.prepare("SELECT COUNT(*) FROM files WHERE namespace = ?") else {
-        return 0;
-    };
-    if st.bind((1, namespace)).is_err() {
-        return 0;
-    }
-    match st.next() {
-        Ok(sqlite::State::Row) => st.read::<i64, _>(0).unwrap_or(0).max(0) as usize,
-        _ => 0,
-    }
-}
-
-fn load_namespace_shard(
-    namespace: &str,
-    workers: usize,
-    shard: usize,
-) -> HashMap<String, StoredFile> {
-    let mut map = HashMap::new();
-    let Some(conn) = open_db() else {
-        return map;
-    };
-    let Ok(mut st) = conn.prepare(
-        "SELECT path, mtime, size, cost_fingerprint, entries FROM files \
-         WHERE namespace = ? AND (rowid % ?2) = ?3",
-    ) else {
-        return map;
-    };
-    if st.bind((1, namespace)).is_err()
-        || st.bind((2, workers as i64)).is_err()
-        || st.bind((3, shard as i64)).is_err()
-    {
-        return map;
-    }
-    while let Ok(sqlite::State::Row) = st.next() {
-        let (Ok(path), Ok(mtime), Ok(size), Ok(cost), Ok(entries)) = (
-            st.read::<String, _>(0),
-            st.read::<i64, _>(1),
-            st.read::<i64, _>(2),
-            st.read::<i64, _>(3),
-            st.read::<Vec<u8>, _>(4),
-        ) else {
-            continue;
-        };
-        map.insert(
-            path,
-            StoredFile {
-                mtime: mtime as u64,
-                size: size as u64,
-                fingerprint: cost as u64,
-                entries,
-            },
-        );
-    }
-    map
-}
-
-fn load_namespace_files_single(
-    conn: &sqlite::Connection,
-    namespace: &str,
-) -> HashMap<String, StoredFile> {
     let mut map = HashMap::new();
     let Ok(mut st) = conn.prepare(
         "SELECT path, mtime, size, cost_fingerprint, entries FROM files WHERE namespace = ?",
@@ -927,7 +844,7 @@ fn partition_files(
         let mut all_cached: Vec<(usize, CachedEntries)> = Vec::new();
         let mut all_fresh: Vec<(usize, FreshFile)> = Vec::new();
         for handle in handles {
-            // Fail open like load_namespace_shard: a panicked worker
+            // Fail open: a panicked worker
             // contributes nothing instead of aborting the whole load.
             let (cached, fresh) = handle.join().unwrap_or_default();
             all_cached.extend(cached);
@@ -940,6 +857,15 @@ fn partition_files(
             fresh: all_fresh,
         }
     })
+}
+
+/// True when every cached path for the namespace is still in the live file
+/// list, so no source vanished since the rows were stored. Non-UTF-8 live
+/// paths never match (stored keys are lossy strings), which fails safe toward
+/// the full write-back/merge path instead of skipping needed work.
+fn stored_paths_all_live(stored: &HashMap<String, StoredFile>, files: &[PathBuf]) -> bool {
+    let live: HashSet<&str> = files.iter().filter_map(|file| file.to_str()).collect();
+    stored.keys().all(|path| live.contains(path.as_str()))
 }
 
 /// Options for [`load_with_cache`], grouped so the two flags can't be
@@ -1087,6 +1013,11 @@ where
             partition.fresh.len()
         );
     }
+    // Steady state: every file was a cache hit and no cached source vanished.
+    // Write-back would only re-commit an unchanged database (no upserts, no
+    // appends, nothing to prune), so its transaction is skipped below. The
+    // ledger merge still runs: rows pruned on an earlier run live on there.
+    let steady = partition.fresh.is_empty() && stored_paths_all_live(&stored, files);
 
     let fresh_paths: Vec<PathBuf> = partition
         .fresh
@@ -1109,8 +1040,12 @@ where
     }
 
     // Persist fresh entries, append them to the ledger, and prune deleted sources
-    // in one transaction. Skipped when the cache is unavailable.
-    if let Some(conn) = conn.as_ref() {
+    // in one transaction. Skipped when the cache is unavailable, and when steady
+    // (nothing fresh, nothing vanished): same end state, minus a BEGIN/COMMIT
+    // fsync pair per namespace per run.
+    if let Some(conn) = conn.as_ref()
+        && !steady
+    {
         let __wb_start = timing_enabled().then(Instant::now);
         write_back(conn, namespace, &partition.fresh, &parsed, files, true);
         if let Some(s) = __wb_start {
@@ -1139,7 +1074,9 @@ where
 
     // Merge the ledger: record new billable entries and re-emit entries whose
     // source file has since been deleted. Without a cache there is nothing to
-    // merge, so the live entries pass through unchanged.
+    // merge, so the live entries pass through unchanged. The scan always runs:
+    // rows pruned from `files` on an earlier run still live in the ledger and
+    // only this scan re-emits them, so steadiness cannot prove an empty set.
     let __merge_start = timing_enabled().then(Instant::now);
     let res = Ok(match conn {
         Some(conn) => merge_ledger(&conn, namespace, live, opts.live_only, date_filter),
@@ -1203,7 +1140,15 @@ where
     for entry in parsed.iter_mut().flatten() {
         reprice(entry);
     }
-    if let Some(conn) = conn.as_ref() {
+    // Steady state (see `load_with_cache`): skip the write-back transaction when
+    // nothing parsed fresh and nothing vanished. Unlike `load_with_cache` the
+    // ledger merge stays with the caller, which always retains: rows pruned
+    // from `files` on an earlier run still live in the ledger and only the
+    // caller's retain re-emits them.
+    let steady = partition.fresh.is_empty() && stored_paths_all_live(&stored, files);
+    if let Some(conn) = conn.as_ref()
+        && !steady
+    {
         write_back(conn, namespace, &partition.fresh, &parsed, files, false);
     }
     let mut groups: Vec<Vec<LoadedEntry>> = vec![Vec::new(); files.len()];
@@ -1854,7 +1799,7 @@ where
         // original file order regardless of which worker finished first.
         let mut results: Vec<(usize, crate::Result<Vec<LoadedEntry>>)> = handles
             .into_iter()
-            // Fail open like load_namespace_shard: a panicked worker's
+            // Fail open: a panicked worker's
             // chunk reads as missing instead of aborting the whole load.
             .flat_map(|handle| handle.join().unwrap_or_default())
             .collect();
@@ -2745,6 +2690,28 @@ pub(crate) mod tests {
         );
         assert!((warm_deleted[0].cost - 0.42).abs() < 1e-9);
 
+        // Third load: the stored row was pruned, so write-back is steady and
+        // skipped — the merge must still re-emit the ledgered spend.
+        let warm_steady = load_with_cache(
+            "ns-two-phase",
+            &[],
+            CacheOpts {
+                single_thread: false,
+                live_only: false,
+            },
+            Freshness::FileStat,
+            |_| Ok(Vec::new()),
+            |_| {},
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            warm_steady.len(),
+            1,
+            "steady load must still re-emit ledger"
+        );
+        assert!((warm_steady[0].cost - 0.42).abs() < 1e-9);
+
         let src2 = write_source("two-phase-ledger", "line2\n");
         let mut entry_b = sample_entry();
         entry_b.session_id = Arc::from("session-b");
@@ -3455,6 +3422,28 @@ pub(crate) mod tests {
         let _ = fs::remove_file(&src_a);
         let _ = fs::remove_file(&src_b);
     }
+    // -------------------------------------------------------------------------
+    // Steady-state detection tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn steady_detection_requires_all_stored_paths_live() {
+        let _env = CacheEnv::new("steady-paths");
+        let src_a = write_source("steady-a", "a\n");
+        let src_b = write_source("steady-b", "b\n");
+        let meta_a = file_metadata(&src_a).unwrap();
+        let meta_b = file_metadata(&src_b).unwrap();
+        let mut stored = stored_snapshot(&src_a, &meta_a, &[sample_entry()]);
+        stored.extend(stored_snapshot(&src_b, &meta_b, &[sample_entry()]));
+
+        let files = vec![src_a.clone(), src_b.clone()];
+        assert!(stored_paths_all_live(&stored, &files));
+
+        // A vanished source fails safe: the full write-back/merge path runs.
+        let _ = fs::remove_file(&src_b);
+        assert!(!stored_paths_all_live(&stored, &[src_a]));
+    }
+
     // -------------------------------------------------------------------------
     // Fingerprint freshness strategy tests
     // -------------------------------------------------------------------------
