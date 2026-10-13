@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Dispatched by release.yaml for tagpr's release PR.
+  workflow_dispatch:
 
 permissions: read-all
 
