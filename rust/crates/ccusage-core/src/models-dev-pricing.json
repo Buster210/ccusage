@@ -1938,16 +1938,6 @@
 			"context": 16384
 		}
 	},
-	"TheDrummer/Skyfall-31B-v4.2": {
-		"cost": {
-			"cache_read": 0.06,
-			"input": 0.12,
-			"output": 0.15
-		},
-		"limit": {
-			"context": 16384
-		}
-	},
 	"TheDrummer/UnslopNemo-12B-v4.1": {
 		"cost": {
 			"cache_read": 0.2465,
@@ -3805,10 +3795,10 @@
 	},
 	"anthropic-claude-5.5-haiku": {
 		"cost": {
-			"cache_read": 0.05,
-			"cache_write": 0.625,
-			"input": 0.5,
-			"output": 2.5
+			"cache_read": 0.01,
+			"cache_write": 0.125,
+			"input": 0.1,
+			"output": 0.5
 		},
 		"limit": {
 			"context": 1000000
@@ -4869,16 +4859,6 @@
 		},
 		"limit": {
 			"context": 128000
-		}
-	},
-	"ateron/gemma-4-dark-thoughts-v2-31b": {
-		"cost": {
-			"cache_read": 0.05,
-			"input": 0.1,
-			"output": 0.45
-		},
-		"limit": {
-			"context": 65536
 		}
 	},
 	"au.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -12159,6 +12139,16 @@
 		}
 	},
 	"flexai/DeepSeek-V4-Flash-0731": {
+		"cost": {
+			"cache_read": 0.0029,
+			"input": 0.0192,
+			"output": 0.27
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
+	"flexai/DeepSeek-V4-Flash-0731@eu": {
 		"cost": {
 			"cache_read": 0.0029,
 			"input": 0.0192,
@@ -22032,16 +22022,6 @@
 			"context": 1000000
 		}
 	},
-	"nbeerbower/gemma4-gutenberg-31b": {
-		"cost": {
-			"cache_read": 0.05,
-			"input": 0.1,
-			"output": 0.45
-		},
-		"limit": {
-			"context": 65536
-		}
-	},
 	"nebius/Qwen/Qwen3-235B-A22B-Instruct-2507": {
 		"cost": {
 			"cache_read": 0.2,
@@ -22314,26 +22294,6 @@
 		},
 		"limit": {
 			"context": 262144
-		}
-	},
-	"nimbz/gemma-4-giftige-blume-31b-v2": {
-		"cost": {
-			"cache_read": 0.05,
-			"input": 0.1,
-			"output": 0.45
-		},
-		"limit": {
-			"context": 65536
-		}
-	},
-	"nimbz/schattenblume-31b": {
-		"cost": {
-			"cache_read": 0.05,
-			"input": 0.1,
-			"output": 0.45
-		},
-		"limit": {
-			"context": 65536
 		}
 	},
 	"nomic-embed-text": {
@@ -29351,16 +29311,6 @@
 			"context": 128000
 		}
 	},
-	"soob3123/GrayLine-Qwen3-8B": {
-		"cost": {
-			"cache_read": 0.15,
-			"input": 0.3,
-			"output": 0.3
-		},
-		"limit": {
-			"context": 32768
-		}
-	},
 	"soob3123/Veiled-Calla-12B": {
 		"cost": {
 			"cache_read": 0.15,
@@ -34456,7 +34406,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.536,
+			"input": 0.4,
 			"output": 14
 		},
 		"exactOnly": true,
