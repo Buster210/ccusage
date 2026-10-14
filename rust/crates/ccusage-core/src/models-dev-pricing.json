@@ -2644,8 +2644,9 @@
 	},
 	"alibaba/qwen3-coder-480b-a35b-instruct": {
 		"cost": {
-			"input": 1.95,
-			"output": 9.75
+			"cache_read": 1.3754,
+			"input": 1.3754,
+			"output": 6.705075
 		},
 		"limit": {
 			"context": 262000
@@ -2673,22 +2674,11 @@
 	},
 	"alibaba/qwen3-max": {
 		"cost": {
-			"cache_read": 0.312,
-			"input": 1.56,
-			"output": 7.8
+			"input": 1.2,
+			"output": 6
 		},
 		"limit": {
 			"context": 262144
-		}
-	},
-	"alibaba/qwen3-max-preview": {
-		"cost": {
-			"cache_read": 0.312,
-			"input": 1.56,
-			"output": 7.8
-		},
-		"limit": {
-			"context": 252000
 		}
 	},
 	"alibaba/qwen3-max-thinking": {
@@ -2714,8 +2704,8 @@
 	},
 	"alibaba/qwen3-next-80b-a3b-instruct": {
 		"cost": {
-			"input": 0.195,
-			"output": 1.56
+			"input": 0.20631,
+			"output": 1.65048
 		},
 		"limit": {
 			"context": 129024
@@ -2725,16 +2715,6 @@
 		"cost": {
 			"input": 0.15,
 			"output": 1.2
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
-	"alibaba/qwen3-vl-flash": {
-		"cost": {
-			"cache_read": 0.065,
-			"input": 0.065,
-			"output": 0.52
 		},
 		"limit": {
 			"context": 262144
@@ -2858,15 +2838,6 @@
 		},
 		"limit": {
 			"context": 983616
-		}
-	},
-	"alibaba/qwen3.6-max-preview": {
-		"cost": {
-			"input": 0.65,
-			"output": 3.9
-		},
-		"limit": {
-			"context": 262144
 		}
 	},
 	"alibaba/qwen3.6-plus": {
@@ -28846,16 +28817,6 @@
 			"context": 128000
 		}
 	},
-	"sciforium/deepseek-v4.1-flash": {
-		"cost": {
-			"cache_read": 0.012,
-			"input": 0.246,
-			"output": 0.944
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
 	"scx-ai-gp/deepseek-v4.1-flash": {
 		"cost": {
 			"cache_read": 0.01,
@@ -34339,7 +34300,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.02016,
+			"input": 0.01584,
 			"output": 0.891
 		},
 		"exactOnly": true,
@@ -34405,9 +34366,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.4,
-			"output": 14
+			"cache_read": 0.28,
+			"input": 0.5,
+			"output": 15
 		},
 		"exactOnly": true,
 		"limit": {
