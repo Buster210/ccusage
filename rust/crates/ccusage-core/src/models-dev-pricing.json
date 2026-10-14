@@ -24942,16 +24942,16 @@
 	},
 	"openai/gpt-5.6-sol-pro": {
 		"cost": {
-			"cache_read": 0.2,
-			"cache_write": 2.5,
-			"input": 2,
-			"output": 10,
+			"cache_read": 0.4,
+			"cache_write": 5,
+			"input": 4,
+			"output": 20,
 			"tiers": [
 				{
-					"cache_read": 0.4,
-					"cache_write": 5,
-					"input": 4,
-					"output": 15,
+					"cache_read": 0.8,
+					"cache_write": 10,
+					"input": 8,
+					"output": 30,
 					"tier": {
 						"size": 272000,
 						"type": "context"
@@ -28815,6 +28815,16 @@
 		},
 		"limit": {
 			"context": 128000
+		}
+	},
+	"sciforium/deepseek-v4.1-flash": {
+		"cost": {
+			"cache_read": 0.012,
+			"input": 0.246,
+			"output": 0.944
+		},
+		"limit": {
+			"context": 1048576
 		}
 	},
 	"scx-ai-gp/deepseek-v4.1-flash": {
@@ -34482,11 +34492,12 @@
 			"context": 1050000
 		}
 	},
-	"~perplexity/pplx-decider-27b-latest": {
+	"~perplexity/pplx-decider-latest": {
 		"cost": {
 			"input": 0.02,
 			"output": 0
 		},
+		"exactOnly": true,
 		"limit": {
 			"context": 262144
 		}
