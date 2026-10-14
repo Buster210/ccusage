@@ -8755,16 +8755,6 @@
 			"context": 262000
 		}
 	},
-	"consensusprotocol/deepseek-v4-flash": {
-		"cost": {
-			"cache_read": 0.005,
-			"input": 0.1,
-			"output": 0.2
-		},
-		"limit": {
-			"context": 524288
-		}
-	},
 	"consensusprotocol/deepseek-v4.1-flash": {
 		"cost": {
 			"cache_read": 0.005,
@@ -14527,26 +14517,6 @@
 		},
 		"limit": {
 			"context": 1000000
-		}
-	},
-	"gonka24/deepseek-v4-flash": {
-		"cost": {
-			"cache_read": 0.012,
-			"input": 0.065,
-			"output": 0.116
-		},
-		"limit": {
-			"context": 390000
-		}
-	},
-	"gonka24/glm-5.3-flash": {
-		"cost": {
-			"cache_read": 0.035,
-			"input": 0.15,
-			"output": 0.3
-		},
-		"limit": {
-			"context": 200000
 		}
 	},
 	"gonka24/minimax-m2.7": {
@@ -28409,16 +28379,6 @@
 			"context": 1000000
 		}
 	},
-	"reka-ai/deepseek-v4-flash": {
-		"cost": {
-			"cache_read": 0.01,
-			"input": 0.11,
-			"output": 0.66
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
 	"reka-ai/deepseek-v4-pro": {
 		"cost": {
 			"cache_read": 0.13,
@@ -28437,26 +28397,6 @@
 		},
 		"limit": {
 			"context": 1048576
-		}
-	},
-	"reka-ai/glm-5.3-flash": {
-		"cost": {
-			"cache_read": 0.02,
-			"input": 0.15,
-			"output": 0.5
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
-	"reka-ai/qwen3.8-27b": {
-		"cost": {
-			"cache_read": 0.085,
-			"input": 0.41,
-			"output": 3
-		},
-		"limit": {
-			"context": 262144
 		}
 	},
 	"reka-ai/reka-edge-2603": {
@@ -29047,28 +28987,10 @@
 			"context": 1000000
 		}
 	},
-	"scx-ai/gemma-4-31b-it": {
-		"cost": {
-			"input": 0.3,
-			"output": 0.91
-		},
-		"limit": {
-			"context": 131072
-		}
-	},
 	"scx-ai/gpt-oss-120b": {
 		"cost": {
 			"input": 0.17,
 			"output": 0.55
-		},
-		"limit": {
-			"context": 131072
-		}
-	},
-	"scx-ai/llama-4-maverick-17b-instruct": {
-		"cost": {
-			"input": 0.53,
-			"output": 1.62
 		},
 		"limit": {
 			"context": 131072
@@ -34477,9 +34399,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.00462,
-			"input": 0.1452,
-			"output": 0.4356
+			"cache_read": 0.13,
+			"input": 0.1307,
+			"output": 8
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34714,8 +34636,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0536,
-			"input": 0.0576,
+			"cache_read": 0.0586,
+			"input": 0.063,
 			"output": 4.4
 		},
 		"exactOnly": true,
