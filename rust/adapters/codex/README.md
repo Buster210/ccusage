@@ -9,6 +9,7 @@ into the usage entries the reports render.
 - `loader.rs` — reading the source, dedupe, and date filtering.
 - `parser.rs` — raw record parsing, token mapping, and model naming.
 - `paths.rs` — environment variables, default directories, and file discovery.
+- `reader.rs` — opening plain and Zstandard-compressed rollouts as one line stream.
 - `replay.rs` — detecting history that a forked or subagent session replays.
 - `report.rs` — the JSON and table shapes where they differ from the shared ones.
 - `speed.rs` — resolving the service tier that priced each request.
@@ -20,11 +21,15 @@ Anything that is not specific to this source belongs in `ccusage-core` or
 ## Data source
 
 - `~/.codex/sessions/**/*.jsonl`
+- `~/.codex/sessions/**/*.jsonl.zst`
+- `~/.codex/archived_sessions/**/*.jsonl`
+- `~/.codex/archived_sessions/**/*.jsonl.zst`
 
 Record shapes, token mapping, and cost rules are documented in [`src/README.md`](src/README.md).
 
-Reads plain files through `ccusage-adapter-common`, which handles walking, size-balanced
-chunking, and ordered parallel reads.
+Uses `ccusage-adapter-common` for walking and size-balanced chunking. `loader.rs` performs
+the ordered parallel reads, and `reader.rs` streams `.jsonl.zst` rollouts through `zstd`
+without unpacking them to disk.
 
 ## Public surface
 
@@ -60,6 +65,7 @@ chunking, and ordered parallel reads.
 - `serde`
 - `serde_json`
 - `toml`
+- `zstd`
 
 ## Build layer
 
