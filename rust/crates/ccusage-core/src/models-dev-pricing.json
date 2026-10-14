@@ -7496,10 +7496,10 @@
 	},
 	"claude-opus-4-8-fast": {
 		"cost": {
-			"cache_read": 1.2,
-			"cache_write": 15,
-			"input": 12,
-			"output": 60
+			"cache_read": 1,
+			"cache_write": 12.5,
+			"input": 10,
+			"output": 50
 		},
 		"exactOnly": true,
 		"limit": {
@@ -7590,10 +7590,10 @@
 	},
 	"claude-opus-5-5-fast": {
 		"cost": {
-			"cache_read": 0.48,
-			"cache_write": 12,
-			"input": 9.6,
-			"output": 48
+			"cache_read": 0.4,
+			"cache_write": 10,
+			"input": 8,
+			"output": 40
 		},
 		"exactOnly": true,
 		"limit": {
@@ -8706,6 +8706,16 @@
 			"context": 262000
 		}
 	},
+	"consensusprotocol/deepseek-v4-flash": {
+		"cost": {
+			"cache_read": 0.005,
+			"input": 0.1,
+			"output": 0.2
+		},
+		"limit": {
+			"context": 1000000
+		}
+	},
 	"consensusprotocol/deepseek-v4.1-flash": {
 		"cost": {
 			"cache_read": 0.005,
@@ -8751,6 +8761,16 @@
 			"cache_read": 0.0025,
 			"input": 0.12,
 			"output": 0.25
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
+	"consensusprotocol/minimax-m3": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 0.28,
+			"output": 1.1
 		},
 		"limit": {
 			"context": 1048576
@@ -21394,7 +21414,7 @@
 			"output": 0.3
 		},
 		"limit": {
-			"context": 256000
+			"context": 128000
 		}
 	},
 	"mistralai/mistral-small-4-119b-2603:thinking": {
@@ -34310,7 +34330,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.01584,
+			"input": 0.0108,
 			"output": 0.891
 		},
 		"exactOnly": true,
@@ -34376,9 +34396,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.28,
-			"input": 0.5,
-			"output": 15
+			"cache_read": 0.27,
+			"input": 0.49,
+			"output": 14.9
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34558,8 +34578,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0586,
-			"input": 0.063,
+			"cache_read": 0.0565,
+			"input": 0.0608,
 			"output": 4.4
 		},
 		"exactOnly": true,
