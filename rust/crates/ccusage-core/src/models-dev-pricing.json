@@ -23158,8 +23158,9 @@
 	},
 	"nvidia/nemotron-3-super-120b-a12b": {
 		"cost": {
-			"input": 0.2,
-			"output": 0.8
+			"cache_read": 0.025,
+			"input": 0.05,
+			"output": 0.25
 		},
 		"limit": {
 			"context": 262144
@@ -34330,7 +34331,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.0108,
+			"input": 0.01584,
 			"output": 0.891
 		},
 		"exactOnly": true,
@@ -34396,9 +34397,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.27,
-			"input": 0.49,
-			"output": 14.9
+			"cache_read": 0.28,
+			"input": 0.5,
+			"output": 15
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34567,7 +34568,7 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0108,
+			"cache_read": 0.01125,
 			"input": 0.036,
 			"output": 0.9
 		},
