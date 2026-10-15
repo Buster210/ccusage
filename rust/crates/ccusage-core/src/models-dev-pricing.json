@@ -4545,14 +4545,14 @@
 					"input": 6,
 					"output": 22.5,
 					"tier": {
-						"size": 200000,
+						"size": 200001,
 						"type": "context"
 					}
 				}
 			]
 		},
 		"limit": {
-			"context": 200000
+			"context": 1000000
 		}
 	},
 	"anthropic/claude-sonnet-4-20250514": {
@@ -10981,9 +10981,9 @@
 	},
 	"deepseek/deepseek-latest": {
 		"cost": {
-			"cache_read": 0.1866,
-			"input": 0.8957,
-			"output": 0.99
+			"cache_read": 0.04,
+			"input": 1.1,
+			"output": 2.5
 		},
 		"exactOnly": true,
 		"limit": {
@@ -11207,16 +11207,6 @@
 			"context": 1000000
 		}
 	},
-	"deepseek/deepseek-v4-flash-vision-exp-cybersecurity": {
-		"cost": {
-			"cache_read": 0.075,
-			"input": 0.15,
-			"output": 0.6
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
 	"deepseek/deepseek-v4-flash:thinking": {
 		"cost": {
 			"cache_read": 0.0028,
@@ -11260,9 +11250,9 @@
 	},
 	"deepseek/deepseek-v4-pro-0813:thinking": {
 		"cost": {
-			"cache_read": 0.1866,
-			"input": 0.8957,
-			"output": 0.99
+			"cache_read": 0.04,
+			"input": 1.1,
+			"output": 2.5
 		},
 		"limit": {
 			"context": 1048576
@@ -22085,9 +22075,9 @@
 	},
 	"moonshotai/kimi-k2.6:thinking": {
 		"cost": {
-			"cache_read": 0.099,
-			"input": 0.441,
-			"output": 2.45
+			"cache_read": 0.125,
+			"input": 0.5,
+			"output": 2.6
 		},
 		"limit": {
 			"context": 262144
@@ -34727,8 +34717,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.23,
-			"input": 0.225,
+			"cache_read": 0.16,
+			"input": 0.1627,
 			"output": 8
 		},
 		"exactOnly": true,
@@ -34783,9 +34773,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.28,
-			"input": 0.29,
-			"output": 24
+			"cache_read": 0.3,
+			"input": 0.3,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34965,8 +34955,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0586,
-			"input": 0.063,
+			"cache_read": 0.0565,
+			"input": 0.0608,
 			"output": 4.4
 		},
 		"exactOnly": true,
