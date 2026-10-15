@@ -9062,7 +9062,7 @@
 	},
 	"consensusprotocol/glm-5.3-flash": {
 		"cost": {
-			"cache_read": 0.02,
+			"cache_read": 0.01,
 			"input": 0.1,
 			"output": 0.25
 		},
@@ -22513,6 +22513,16 @@
 			"context": 131072
 		}
 	},
+	"nemotron-3.5-super-vl": {
+		"cost": {
+			"cache_read": 0.06,
+			"input": 0.3,
+			"output": 0.65
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"nemotron-lightning-3.5-30b-a3b": {
 		"cost": {
 			"cache_read": 0.01,
@@ -23576,7 +23586,7 @@
 			"output": 0.5
 		},
 		"limit": {
-			"context": 1048576
+			"context": 262144
 		}
 	},
 	"nvidia/nemotron-nano-12b-v2-vl": {
@@ -34810,9 +34820,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.44,
-			"output": 14
+			"cache_read": 0.4,
+			"input": 0.41,
+			"output": 14.9
 		},
 		"exactOnly": true,
 		"limit": {
