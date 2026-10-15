@@ -10656,9 +10656,9 @@
 	},
 	"deepseek/deepseek-latest": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.1,
+			"input": 0.48,
+			"output": 1.98
 		},
 		"exactOnly": true,
 		"limit": {
@@ -10935,9 +10935,9 @@
 	},
 	"deepseek/deepseek-v4-pro-0813:thinking": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.1,
+			"input": 0.48,
+			"output": 1.98
 		},
 		"limit": {
 			"context": 1048576
@@ -21751,9 +21751,9 @@
 	},
 	"moonshotai/kimi-k2.6:thinking": {
 		"cost": {
-			"cache_read": 0.125,
-			"input": 0.5,
-			"output": 2.6
+			"cache_read": 0.099,
+			"input": 0.441,
+			"output": 2.45
 		},
 		"limit": {
 			"context": 262144
@@ -30494,6 +30494,15 @@
 			"context": 32000
 		}
 	},
+	"typesafe/jev-1.14": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"typesafe/jev-latest": {
 		"cost": {
 			"cache_read": 0.021,
@@ -34341,8 +34350,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.13,
-			"input": 0.1307,
+			"cache_read": 0.23,
+			"input": 0.225,
 			"output": 8
 		},
 		"exactOnly": true,
@@ -34397,9 +34406,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.45,
-			"input": 0.49,
-			"output": 14.9
+			"cache_read": 0.3,
+			"input": 0.43,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34530,7 +34539,7 @@
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 64000
+			"context": 262144
 		}
 	},
 	"~unbiased/pareto-latest": {
