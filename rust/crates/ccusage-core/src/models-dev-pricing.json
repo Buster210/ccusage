@@ -2442,6 +2442,15 @@
 			"context": 32768
 		}
 	},
+	"aisingapore/Gemma-SEA-LION-v4-27B-IT": {
+		"cost": {
+			"input": 0.24,
+			"output": 0.48
+		},
+		"limit": {
+			"context": 131072
+		}
+	},
 	"alibaba-qwen3-32b": {
 		"cost": {
 			"input": 0.25,
@@ -23560,6 +23569,16 @@
 			"context": 1000000
 		}
 	},
+	"nvidia/nemotron-3.5-super-vl": {
+		"cost": {
+			"cache_read": 0.02,
+			"input": 0.15,
+			"output": 0.5
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"nvidia/nemotron-nano-12b-v2-vl": {
 		"cost": {
 			"input": 0.2,
@@ -30853,6 +30872,24 @@
 			"context": 32000
 		}
 	},
+	"typesafe-ai/jev-1.13.0": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"limit": {
+			"context": 32000
+		}
+	},
+	"typesafe-ai/jev-1.14.0": {
+		"cost": {
+			"input": 0.042,
+			"output": 0
+		},
+		"limit": {
+			"context": 32000
+		}
+	},
 	"typesafe/jev": {
 		"cost": {
 			"cache_read": 0,
@@ -34707,7 +34744,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.02376,
+			"input": 0.0216,
 			"output": 0.72
 		},
 		"exactOnly": true,
@@ -34773,9 +34810,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.28,
-			"input": 0.29,
-			"output": 24
+			"cache_read": 0.3,
+			"input": 0.44,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
