@@ -8689,7 +8689,7 @@
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 65536
+			"context": 24576
 		}
 	},
 	"cloudflare/clef-omni": {
@@ -21871,6 +21871,24 @@
 			"context": 200000
 		}
 	},
+	"moondream/moondream3-preview": {
+		"cost": {
+			"input": 0.3,
+			"output": 2.5
+		},
+		"limit": {
+			"context": 32000
+		}
+	},
+	"moondream/moondream3.1-9b-a2b": {
+		"cost": {
+			"input": 0.3,
+			"output": 2.5
+		},
+		"limit": {
+			"context": 32000
+		}
+	},
 	"moonshot-ai/kimi-k2.7-code": {
 		"cost": {
 			"cache_read": 0.19,
@@ -34849,7 +34867,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.01116,
+			"input": 0.0216,
 			"output": 0.72
 		},
 		"exactOnly": true,
@@ -34870,9 +34888,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0085,
-			"input": 0.0085,
-			"output": 0.64
+			"cache_read": 0.00459,
+			"input": 0.00459,
+			"output": 0.576
 		},
 		"limit": {
 			"context": 1048576
@@ -34915,9 +34933,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.18,
-			"input": 0.29,
-			"output": 12
+			"cache_read": 0.3,
+			"input": 0.33,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35087,7 +35105,7 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.01125,
-			"input": 0.0225,
+			"input": 0.01404,
 			"output": 0.9
 		},
 		"exactOnly": true,
