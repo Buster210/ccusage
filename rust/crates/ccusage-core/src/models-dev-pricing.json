@@ -12496,9 +12496,9 @@
 	},
 	"flexai/DeepSeek-V4.1-Flash": {
 		"cost": {
-			"cache_read": 0.0225,
-			"input": 0.15,
-			"output": 0.6
+			"cache_read": 0.015,
+			"input": 0.1,
+			"output": 0.66
 		},
 		"limit": {
 			"context": 1048576
@@ -12536,9 +12536,9 @@
 	},
 	"flexai/gpt-oss-20b": {
 		"cost": {
-			"cache_read": 0.0045,
-			"input": 0.03,
-			"output": 0.13
+			"cache_read": 0.003,
+			"input": 0.02,
+			"output": 0.1
 		},
 		"limit": {
 			"context": 131072
@@ -34765,9 +34765,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.28,
-			"input": 0.29,
-			"output": 24
+			"cache_read": 0.3,
+			"input": 0.3,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
