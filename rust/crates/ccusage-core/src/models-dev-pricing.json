@@ -6891,10 +6891,10 @@
 	},
 	"bytedance/doubao-seed-character": {
 		"cost": {
-			"cache_read": 0.0236,
-			"cache_write": 0.0025,
-			"input": 0.1179,
-			"output": 0.2947
+			"cache_read": 0.03,
+			"cache_write": 0.003,
+			"input": 0.15,
+			"output": 0.37
 		},
 		"exactOnly": true,
 		"limit": {
@@ -27659,9 +27659,9 @@
 	},
 	"qwen/qwen3.8-27b-obliterated": {
 		"cost": {
-			"cache_read": 0.2,
+			"cache_read": 0.225,
 			"input": 0.25,
-			"output": 1.5
+			"output": 1.75
 		},
 		"limit": {
 			"context": 524288
@@ -27669,9 +27669,9 @@
 	},
 	"qwen/qwen3.8-27b-obliterated:thinking": {
 		"cost": {
-			"cache_read": 0.2,
+			"cache_read": 0.225,
 			"input": 0.25,
-			"output": 1.5
+			"output": 1.75
 		},
 		"limit": {
 			"context": 524288
@@ -34759,9 +34759,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.3,
-			"output": 14
+			"cache_read": 0.28,
+			"input": 0.29,
+			"output": 24
 		},
 		"exactOnly": true,
 		"limit": {
