@@ -4180,7 +4180,19 @@
 			"cache_read": 0.01,
 			"cache_write": 0.125,
 			"input": 0.1,
-			"output": 0.5
+			"output": 0.5,
+			"tiers": [
+				{
+					"cache_read": 0.05,
+					"cache_write": 0.625,
+					"input": 0.5,
+					"output": 2.5,
+					"tier": {
+						"size": 100000,
+						"type": "context"
+					}
+				}
+			]
 		},
 		"exactOnly": true,
 		"limit": {
@@ -11104,9 +11116,9 @@
 	},
 	"deepseek/deepseek-v3.2:thinking": {
 		"cost": {
-			"cache_read": 0.14,
-			"input": 0.28,
-			"output": 0.42
+			"cache_read": 0.0216,
+			"input": 0.2088,
+			"output": 0.3096
 		},
 		"limit": {
 			"context": 163000
@@ -15672,19 +15684,8 @@
 		"cost": {
 			"cache_read": 0.2,
 			"cache_write": 0.375,
-			"input": 2,
-			"output": 12,
-			"tiers": [
-				{
-					"cache_read": 0.4,
-					"input": 4,
-					"output": 18,
-					"tier": {
-						"size": 200000,
-						"type": "context"
-					}
-				}
-			]
+			"input": 4,
+			"output": 20
 		},
 		"exactOnly": true,
 		"limit": {
@@ -25745,13 +25746,26 @@
 	},
 	"openai/gpt-mini-latest": {
 		"cost": {
-			"cache_read": 0.075,
-			"input": 0.75,
-			"output": 4.5
+			"cache_read": 0.02,
+			"cache_write": 0.25,
+			"input": 0.2,
+			"output": 1.2,
+			"tiers": [
+				{
+					"cache_read": 0.04,
+					"cache_write": 0.5,
+					"input": 0.4,
+					"output": 1.8,
+					"tier": {
+						"size": 272000,
+						"type": "context"
+					}
+				}
+			]
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 400000
+			"context": 1050000
 		}
 	},
 	"openai/gpt-oss-120b": {
@@ -25817,12 +25831,16 @@
 	},
 	"openai/gpt-pro-latest": {
 		"cost": {
-			"input": 30,
-			"output": 180,
+			"cache_read": 0.4,
+			"cache_write": 5,
+			"input": 4,
+			"output": 20,
 			"tiers": [
 				{
-					"input": 60,
-					"output": 270,
+					"cache_read": 0.8,
+					"cache_write": 10,
+					"input": 8,
+					"output": 30,
 					"tier": {
 						"size": 272000,
 						"type": "context"
@@ -32201,20 +32219,8 @@
 		"cost": {
 			"cache_read": 0.2,
 			"cache_write": 0.375,
-			"input": 2,
-			"output": 12,
-			"tiers": [
-				{
-					"cache_read": 0.4,
-					"cache_write": 0.25,
-					"input": 4,
-					"output": 18,
-					"tier": {
-						"size": 200000,
-						"type": "context"
-					}
-				}
-			]
+			"input": 4,
+			"output": 20
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34694,7 +34700,7 @@
 		"cost": {
 			"cache_read": 0.0054,
 			"input": 0.01368,
-			"output": 0.891
+			"output": 0.72
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34941,8 +34947,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0558,
-			"input": 0.06,
+			"cache_read": 0.0223,
+			"input": 0.024,
 			"output": 4.4
 		},
 		"exactOnly": true,
