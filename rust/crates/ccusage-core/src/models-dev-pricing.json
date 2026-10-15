@@ -27215,8 +27215,8 @@
 	"qwen/qwen3-vl-30b-a3b-instruct": {
 		"cost": {
 			"cache_read": 0.0216,
-			"input": 0.108,
-			"output": 0.43
+			"input": 0.15,
+			"output": 0.6
 		},
 		"limit": {
 			"context": 131072
@@ -34764,9 +34764,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.01,
-			"input": 0.0089,
-			"output": 0.8
+			"cache_read": 0.0054,
+			"input": 0.00405,
+			"output": 0.72
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34832,7 +34832,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.4,
+			"input": 0.395,
 			"output": 14
 		},
 		"exactOnly": true,
