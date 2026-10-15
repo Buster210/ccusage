@@ -8657,7 +8657,7 @@
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 24576
+			"context": 65536
 		}
 	},
 	"cloudflare/clef-omni": {
@@ -34683,9 +34683,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.23,
-			"input": 0.234,
-			"output": 8
+			"cache_read": 0.249,
+			"input": 0.26,
+			"output": 5
 		},
 		"exactOnly": true,
 		"limit": {
