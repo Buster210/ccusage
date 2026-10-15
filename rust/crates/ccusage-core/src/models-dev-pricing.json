@@ -28741,6 +28741,24 @@
 			"context": 16384
 		}
 	},
+	"reka/reka-edge-2603": {
+		"cost": {
+			"input": 0.105,
+			"output": 0.105
+		},
+		"limit": {
+			"context": 16384
+		}
+	},
+	"reka/reka-flash-3": {
+		"cost": {
+			"input": 0.105,
+			"output": 0.21
+		},
+		"limit": {
+			"context": 65536
+		}
+	},
 	"rekaai/reka-edge": {
 		"cost": {
 			"input": 0.13754,
@@ -34765,9 +34783,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.3,
-			"output": 14
+			"cache_read": 0.28,
+			"input": 0.29,
+			"output": 24
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34947,8 +34965,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0223,
-			"input": 0.024,
+			"cache_read": 0.0586,
+			"input": 0.063,
 			"output": 4.4
 		},
 		"exactOnly": true,
