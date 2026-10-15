@@ -10118,6 +10118,16 @@
 			"context": 262144
 		}
 	},
+	"deepinfra/stepfun-ai/Step-5-Preview": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 1,
+			"output": 2.7
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"deepinfra/tencent/Hy3": {
 		"cost": {
 			"cache_read": 0.033,
@@ -12444,9 +12454,9 @@
 	},
 	"flexai/DeepSeek-V4-Flash-0731": {
 		"cost": {
-			"cache_read": 0.0029,
-			"input": 0.0192,
-			"output": 0.27
+			"cache_read": 0.0178,
+			"input": 0.119,
+			"output": 0.238
 		},
 		"limit": {
 			"context": 1048576
@@ -12454,9 +12464,9 @@
 	},
 	"flexai/DeepSeek-V4-Flash-0731@eu": {
 		"cost": {
-			"cache_read": 0.0029,
-			"input": 0.0192,
-			"output": 0.27
+			"cache_read": 0.0178,
+			"input": 0.119,
+			"output": 0.238
 		},
 		"limit": {
 			"context": 1048576
@@ -12464,9 +12474,9 @@
 	},
 	"flexai/DeepSeek-V4.1-Flash": {
 		"cost": {
-			"cache_read": 0.0135,
-			"input": 0.09,
-			"output": 0.18
+			"cache_read": 0.0225,
+			"input": 0.15,
+			"output": 0.6
 		},
 		"limit": {
 			"context": 1048576
@@ -12474,9 +12484,9 @@
 	},
 	"flexai/Muse-Glimmer-30B": {
 		"cost": {
-			"cache_read": 0.0525,
-			"input": 0.35,
-			"output": 1.5
+			"cache_read": 0.045,
+			"input": 0.3,
+			"output": 1.2
 		},
 		"limit": {
 			"context": 131072
@@ -12494,9 +12504,9 @@
 	},
 	"flexai/gpt-oss-120b": {
 		"cost": {
-			"cache_read": 0.0045,
-			"input": 0.03,
-			"output": 0.17
+			"cache_read": 0.0075,
+			"input": 0.05,
+			"output": 0.25
 		},
 		"limit": {
 			"context": 131072
@@ -12504,9 +12514,9 @@
 	},
 	"flexai/gpt-oss-20b": {
 		"cost": {
-			"cache_read": 0.003,
-			"input": 0.02,
-			"output": 0.1
+			"cache_read": 0.0045,
+			"input": 0.03,
+			"output": 0.13
 		},
 		"limit": {
 			"context": 131072
@@ -34672,7 +34682,7 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0054,
+			"cache_read": 0.0036,
 			"input": 0.01368,
 			"output": 0.891
 		},
@@ -34683,9 +34693,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.249,
-			"input": 0.26,
-			"output": 5
+			"cache_read": 0.23,
+			"input": 0.225,
+			"output": 8
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34740,7 +34750,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.32,
+			"input": 0.36,
 			"output": 14
 		},
 		"exactOnly": true,
