@@ -18315,7 +18315,7 @@
 			"output": 0.8956
 		},
 		"limit": {
-			"context": 262144
+			"context": 128000
 		}
 	},
 	"ionos/meta-llama/Llama-3.3-70B-Instruct": {
@@ -18333,7 +18333,7 @@
 			"output": 0.727675
 		},
 		"limit": {
-			"context": 131072
+			"context": 128000
 		}
 	},
 	"jamba-large": {
@@ -34740,7 +34740,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.4,
+			"input": 0.34,
 			"output": 14
 		},
 		"exactOnly": true,
@@ -34921,8 +34921,8 @@
 	},
 	"~z-ai/glm-latest": {
 		"cost": {
-			"cache_read": 0.0565,
-			"input": 0.0608,
+			"cache_read": 0.0558,
+			"input": 0.06,
 			"output": 4.4
 		},
 		"exactOnly": true,
