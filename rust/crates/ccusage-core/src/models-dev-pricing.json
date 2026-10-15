@@ -21738,7 +21738,7 @@
 			"output": 0.3
 		},
 		"limit": {
-			"context": 128000
+			"context": 256000
 		}
 	},
 	"mistralai/mistral-small-4-119b-2603:thinking": {
@@ -34717,8 +34717,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.16,
-			"input": 0.1627,
+			"cache_read": 0.13,
+			"input": 0.1307,
 			"output": 8
 		},
 		"exactOnly": true,
@@ -34773,9 +34773,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.3,
-			"output": 14
+			"cache_read": 0.28,
+			"input": 0.29,
+			"output": 24
 		},
 		"exactOnly": true,
 		"limit": {
