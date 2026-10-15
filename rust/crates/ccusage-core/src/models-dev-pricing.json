@@ -19939,6 +19939,17 @@
 			"context": 1048576
 		}
 	},
+	"meta/muse-spark-open": {
+		"cost": {
+			"cache_read": 0.15,
+			"input": 1.25,
+			"output": 4.25
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"meta/muse-wonder": {
 		"cost": {
 			"cache_read": 0.2,
@@ -23581,9 +23592,9 @@
 	},
 	"nvidia/nemotron-3.5-super-vl": {
 		"cost": {
-			"cache_read": 0.02,
-			"input": 0.15,
-			"output": 0.5
+			"cache_read": 0.08,
+			"input": 0.1,
+			"output": 0.4
 		},
 		"limit": {
 			"context": 262144
@@ -34753,9 +34764,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0054,
-			"input": 0.0216,
-			"output": 0.72
+			"cache_read": 0.01,
+			"input": 0.0089,
+			"output": 0.8
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34820,9 +34831,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.4,
-			"input": 0.41,
-			"output": 14.9
+			"cache_read": 0.3,
+			"input": 0.4,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
