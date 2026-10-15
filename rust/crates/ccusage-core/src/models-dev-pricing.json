@@ -11883,6 +11883,16 @@
 			"context": 1048576
 		}
 	},
+	"entrim/glm-5.3": {
+		"cost": {
+			"cache_read": 0.15,
+			"input": 0.5,
+			"output": 2
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"entrim/glm-5.3-flash": {
 		"cost": {
 			"cache_read": 0.0175,
@@ -34682,7 +34692,7 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0036,
+			"cache_read": 0.0054,
 			"input": 0.01368,
 			"output": 0.891
 		},
@@ -34750,7 +34760,7 @@
 	"~moonshotai/kimi-latest": {
 		"cost": {
 			"cache_read": 0.3,
-			"input": 0.36,
+			"input": 0.3,
 			"output": 14
 		},
 		"exactOnly": true,
