@@ -28795,6 +28795,17 @@
 			"context": 1000000
 		}
 	},
+	"reflection/beam": {
+		"cost": {
+			"cache_read": 0.13,
+			"input": 1.3,
+			"output": 4.3
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"reka-ai/deepseek-v4-pro": {
 		"cost": {
 			"cache_read": 0.13,
@@ -34868,8 +34879,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0108,
-			"input": 0.01179,
+			"cache_read": 0.00522,
+			"input": 0.00522,
 			"output": 1.152
 		},
 		"limit": {
@@ -34915,7 +34926,7 @@
 		"cost": {
 			"cache_read": 0.284,
 			"input": 0.294,
-			"output": 28
+			"output": 24
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35084,9 +35095,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0125,
-			"input": 0.0227,
-			"output": 0.7076
+			"cache_read": 0.01125,
+			"input": 0.01134,
+			"output": 0.9
 		},
 		"exactOnly": true,
 		"limit": {
