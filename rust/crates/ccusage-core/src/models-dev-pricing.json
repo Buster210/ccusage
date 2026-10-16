@@ -12368,7 +12368,7 @@
 			"output": 15
 		},
 		"limit": {
-			"context": 1048576
+			"context": 1040000
 		}
 	},
 	"fireworks/glm-5.2": {
@@ -34825,9 +34825,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.23,
-			"input": 0.225,
-			"output": 8
+			"cache_read": 0.249,
+			"input": 0.25,
+			"output": 5
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34836,8 +34836,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0108,
-			"input": 0.0162,
+			"cache_read": 0.00846,
+			"input": 0.00846,
 			"output": 0.576
 		},
 		"limit": {
@@ -35053,7 +35053,7 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.009,
-			"input": 0.02538,
+			"input": 0.01584,
 			"output": 1.125
 		},
 		"exactOnly": true,
