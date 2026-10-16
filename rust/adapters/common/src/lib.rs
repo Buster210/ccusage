@@ -17,11 +17,23 @@ pub fn collect_usage_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 pub fn collect_files_with_extension(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
+    collect_files_matching(
+        dir,
+        &|path| path.extension().is_some_and(|ext| ext == extension),
+        files,
+    );
+}
+
+pub fn collect_files_matching(
+    dir: &Path,
+    matches: &impl Fn(&Path) -> bool,
+    files: &mut Vec<PathBuf>,
+) {
+    // Fork keeps the parallel jwalk walk (speed profile) instead of
+    // upstream's recursive read_dir; same observable ordering via sort.
     let start = files.len();
     for entry in jwalk::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-        if entry.file_type().is_file()
-            && entry.path().extension().is_some_and(|ext| ext == extension)
-        {
+        if entry.file_type().is_file() && matches(&entry.path()) {
             files.push(entry.path());
         }
     }
@@ -88,8 +100,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_file_indexes_by_size, read_files_parallel};
+    use super::{chunk_file_indexes_by_size, collect_files_matching, read_files_parallel};
     use ccusage_test_support::Fixture;
+
+    #[test]
+    fn collects_nested_files_accepted_by_the_predicate() {
+        let fixture = Fixture::new();
+        let kept = fixture.write_file("a/b/kept.jsonl", "");
+        let _ = fixture.write_file("a/skipped.txt", "");
+        let mut files = Vec::new();
+
+        collect_files_matching(
+            fixture.root(),
+            &|path| path.extension().is_some_and(|ext| ext == "jsonl"),
+            &mut files,
+        );
+
+        assert_eq!(files, vec![kept]);
+    }
 
     #[test]
     fn preserves_file_order_and_matches_single_thread() {
