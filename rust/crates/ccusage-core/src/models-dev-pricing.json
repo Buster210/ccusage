@@ -28836,17 +28836,6 @@
 			"context": 1000000
 		}
 	},
-	"reflection/beam": {
-		"cost": {
-			"cache_read": 0.13,
-			"input": 1.3,
-			"output": 4.3
-		},
-		"exactOnly": true,
-		"limit": {
-			"context": 1048576
-		}
-	},
 	"reflection/beam-1.0": {
 		"cost": {
 			"cache_read": 0.13,
@@ -30285,7 +30274,7 @@
 	},
 	"stepfun-ai/Step-5-Preview": {
 		"cost": {
-			"cache_read": 0.05,
+			"cache_read": 0.1,
 			"input": 1,
 			"output": 2.7
 		},
@@ -34940,7 +34929,7 @@
 		"cost": {
 			"cache_read": 0.0054,
 			"input": 0.036,
-			"output": 0.6633
+			"output": 0.6435
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34960,9 +34949,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.00441,
-			"input": 0.00441,
-			"output": 1.152
+			"cache_read": 0.0094,
+			"input": 0.0094,
+			"output": 1.28
 		},
 		"limit": {
 			"context": 1048576
@@ -35005,9 +34994,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.284,
-			"input": 0.294,
-			"output": 28
+			"cache_read": 0.21,
+			"input": 0.304,
+			"output": 11.936
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35177,8 +35166,8 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.01125,
-			"input": 0.02466,
-			"output": 0.9
+			"input": 0.01206,
+			"output": 0.73728
 		},
 		"exactOnly": true,
 		"limit": {
