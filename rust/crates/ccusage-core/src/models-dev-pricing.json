@@ -18986,11 +18986,11 @@
 	},
 	"llama-3.1-8b-instruct": {
 		"cost": {
-			"input": 0.167,
-			"output": 0.167
+			"input": 0.02,
+			"output": 0.049999999999999996
 		},
 		"limit": {
-			"context": 128000
+			"context": 16384
 		}
 	},
 	"llama-3.1-8b-instruct-turbo": {
@@ -34858,9 +34858,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0072,
-			"input": 0.0072,
-			"output": 1.152
+			"cache_read": 0.0049,
+			"input": 0.0049,
+			"output": 1.28
 		},
 		"limit": {
 			"context": 1048576
@@ -35075,8 +35075,8 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.0125,
-			"input": 0.0167,
-			"output": 0.7796
+			"input": 0.0131,
+			"output": 0.8228
 		},
 		"exactOnly": true,
 		"limit": {
