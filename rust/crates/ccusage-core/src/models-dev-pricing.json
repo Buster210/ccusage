@@ -4557,22 +4557,10 @@
 			"cache_read": 0.3,
 			"cache_write": 3.75,
 			"input": 3,
-			"output": 15,
-			"tiers": [
-				{
-					"cache_read": 0.6,
-					"cache_write": 7.5,
-					"input": 6,
-					"output": 22.5,
-					"tier": {
-						"size": 200001,
-						"type": "context"
-					}
-				}
-			]
+			"output": 15
 		},
 		"limit": {
-			"context": 1000000
+			"context": 200000
 		}
 	},
 	"anthropic/claude-sonnet-4-20250514": {
@@ -11001,9 +10989,9 @@
 	},
 	"deepseek/deepseek-latest": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.1866,
+			"input": 0.8957,
+			"output": 0.99
 		},
 		"exactOnly": true,
 		"limit": {
@@ -11270,9 +11258,9 @@
 	},
 	"deepseek/deepseek-v4-pro-0813:thinking": {
 		"cost": {
-			"cache_read": 0.04,
-			"input": 1.1,
-			"output": 2.5
+			"cache_read": 0.1866,
+			"input": 0.8957,
+			"output": 0.99
 		},
 		"limit": {
 			"context": 1048576
@@ -14865,47 +14853,6 @@
 			"context": 204800
 		}
 	},
-	"google-ai-studio/gemini-2.5-flash": {
-		"cost": {
-			"cache_read": 0.03,
-			"input": 0.3,
-			"output": 2.5
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
-	"google-ai-studio/gemini-2.5-flash-lite": {
-		"cost": {
-			"cache_read": 0.01,
-			"input": 0.1,
-			"output": 0.4
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
-	"google-ai-studio/gemini-2.5-pro": {
-		"cost": {
-			"cache_read": 0.125,
-			"input": 1.25,
-			"output": 10,
-			"tiers": [
-				{
-					"cache_read": 0.25,
-					"input": 2.5,
-					"output": 15,
-					"tier": {
-						"size": 200000,
-						"type": "context"
-					}
-				}
-			]
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
 	"google-ai-studio/gemini-3-flash-preview": {
 		"cost": {
 			"cache_read": 0.05,
@@ -15043,47 +14990,6 @@
 		},
 		"limit": {
 			"context": 256000
-		}
-	},
-	"google-vertex/gemini-2.5-flash": {
-		"cost": {
-			"cache_read": 0.03,
-			"input": 0.3,
-			"output": 2.5
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
-	"google-vertex/gemini-2.5-flash-lite": {
-		"cost": {
-			"cache_read": 0.01,
-			"input": 0.1,
-			"output": 0.4
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
-	"google-vertex/gemini-2.5-pro": {
-		"cost": {
-			"cache_read": 0.125,
-			"input": 1.25,
-			"output": 10,
-			"tiers": [
-				{
-					"cache_read": 0.25,
-					"input": 2.5,
-					"output": 15,
-					"tier": {
-						"size": 200000,
-						"type": "context"
-					}
-				}
-			]
-		},
-		"limit": {
-			"context": 1048576
 		}
 	},
 	"google-vertex/gemini-3-flash-preview": {
@@ -19002,6 +18908,7 @@
 	},
 	"liquid/d1-ultra": {
 		"cost": {
+			"cache_read": 0.042,
 			"input": 0.042,
 			"output": 0
 		},
@@ -28950,6 +28857,15 @@
 			"context": 0
 		}
 	},
+	"respan/span-02": {
+		"cost": {
+			"input": 0.01,
+			"output": 0
+		},
+		"limit": {
+			"context": 131072
+		}
+	},
 	"ring-2.6-1t": {
 		"cost": {
 			"input": 0.3,
@@ -34888,9 +34804,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0054,
-			"input": 0.0144,
-			"output": 0.72
+			"cache_read": 0.006,
+			"input": 0.0115,
+			"output": 0.6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34899,8 +34815,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.13,
-			"input": 0.1307,
+			"cache_read": 0.23,
+			"input": 0.225,
 			"output": 8
 		},
 		"exactOnly": true,
@@ -34910,9 +34826,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.00999,
-			"input": 0.00999,
-			"output": 0.576
+			"cache_read": 0.0154,
+			"input": 0.0154,
+			"output": 0.64
 		},
 		"limit": {
 			"context": 1048576
@@ -35126,9 +35042,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0125,
-			"input": 0.025,
-			"output": 0.68
+			"cache_read": 0.01125,
+			"input": 0.02853,
+			"output": 0.9
 		},
 		"exactOnly": true,
 		"limit": {
