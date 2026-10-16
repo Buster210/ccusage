@@ -667,6 +667,23 @@ fn codex_line_usage_kind(line: &[u8]) -> Option<CodexLineKind> {
     {
         return Some(CodexLineKind::Session);
     }
+    // Without any `"type"` key the exact scan matches nothing, so skip
+    // straight to the headless check.
+    if TYPE_KEY_FINDER.find(line).is_some()
+        && codex_line_matches_session_type(line, has_event_msg)
+    {
+        return Some(CodexLineKind::Session);
+    }
+    if USAGE_FIELD_FINDER.find(line).is_some()
+        || INPUT_TOKENS_FIELD_FINDER.find(line).is_some()
+        || PROMPT_TOKENS_FIELD_FINDER.find(line).is_some()
+    {
+        return Some(CodexLineKind::Headless);
+    }
+    None
+}
+
+fn codex_line_matches_session_type(line: &[u8], has_event_msg: bool) -> bool {
     let has_compact_type = COMPACT_TYPE_FIELD_FINDER.find(line).is_some();
     let has_nested_token_count = !has_event_msg
         && has_compact_type
@@ -678,36 +695,27 @@ fn codex_line_usage_kind(line: &[u8]) -> Option<CodexLineKind> {
         && THREAD_SETTINGS_APPLIED_FINDER.find(line).is_some();
     let has_compaction_type = memchr::memmem::find(line, b"token_usage_record").is_some()
         || memchr::memmem::find(line, b"compacted").is_some();
-    if has_event_msg
+    if !(has_event_msg
         || memchr::memmem::find(line, b"turn_context").is_some()
         || has_nested_token_count
         || has_nested_thread_settings_applied
         || has_compaction_type
-        || !has_compact_type
+        || !has_compact_type)
     {
-        let (
-            has_turn_context,
-            has_event_msg,
-            has_token_count,
-            has_thread_settings_applied,
-            has_token_usage_record,
-            has_compacted,
-        ) = codex_line_type_flags(line);
-        if has_turn_context
-            || has_token_usage_record
-            || has_compacted
-            || (has_event_msg && (has_token_count || has_thread_settings_applied))
-        {
-            return Some(CodexLineKind::Session);
-        }
+        return false;
     }
-    if USAGE_FIELD_FINDER.find(line).is_some()
-        || INPUT_TOKENS_FIELD_FINDER.find(line).is_some()
-        || PROMPT_TOKENS_FIELD_FINDER.find(line).is_some()
-    {
-        return Some(CodexLineKind::Headless);
-    }
-    None
+    let (
+        has_turn_context,
+        has_event_msg,
+        has_token_count,
+        has_thread_settings_applied,
+        has_token_usage_record,
+        has_compacted,
+    ) = codex_line_type_flags(line);
+    has_turn_context
+        || has_token_usage_record
+        || has_compacted
+        || (has_event_msg && (has_token_count || has_thread_settings_applied))
 }
 
 fn codex_line_type_flags(line: &[u8]) -> (bool, bool, bool, bool, bool, bool) {
@@ -1038,7 +1046,9 @@ fn usage_from_result_value(value: &Value) -> Option<CodexRawUsage> {
 }
 
 fn usage_from_value(value: Option<&Value>) -> Option<CodexRawUsage> {
-    serde_json::from_value(value?.clone()).ok()
+    // Deserialize from the borrowed value: `from_value` would clone the whole
+    // usage subtree first for identical results.
+    value.and_then(|value| CodexRawUsage::deserialize(value).ok())
 }
 
 fn codex_timestamp_from_result(value: &CodexLogEntry<'_>) -> Option<String> {

@@ -62,6 +62,11 @@ pub(super) fn conversation_db_paths() -> Result<Vec<PathBuf>> {
             continue;
         }
         let dir = conversation_dir(root);
+        // Skip missing roots before the walk; unconditional canonicalization
+        // below still dedups symlinked aliases.
+        if !dir.is_dir() {
+            continue;
+        }
         let mut files = Vec::new();
         collect_files_with_extension(&dir, "db", &mut files);
         for path in files {

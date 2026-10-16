@@ -17,8 +17,11 @@ use crate::{
 
 use super::{
     parser::{codex_value_timestamp, visit_codex_session_file_with_compaction_history},
-    reader::open_rollout_reader,
+    reader::open_rollout_reader_with_capacity,
 };
+
+/// First-line metadata probes read one line; a small buffer suffices.
+const METADATA_BUFFER_SIZE: usize = 8 * 1024;
 
 #[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
@@ -395,7 +398,7 @@ struct CodexSessionMetadata {
 
 fn read_codex_session_metadata(path: &Path) -> CodexSessionMetadata {
     observe_metadata_probe(path);
-    let Ok((mut reader, _)) = open_rollout_reader(path) else {
+    let Ok((mut reader, _)) = open_rollout_reader_with_capacity(path, METADATA_BUFFER_SIZE) else {
         return CodexSessionMetadata::default();
     };
     let mut line = String::new();

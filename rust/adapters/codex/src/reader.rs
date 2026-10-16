@@ -29,11 +29,20 @@ pub(super) fn uncompressed_rollout_path(path: &Path) -> PathBuf {
 }
 
 pub(super) fn open_rollout_reader(path: &Path) -> io::Result<(Box<dyn BufRead>, PathBuf)> {
-    match open_encoded_rollout(path) {
+    open_rollout_reader_with_capacity(path, READ_BUFFER_SIZE)
+}
+
+/// Same as [`open_rollout_reader`], but first-line probes can pass a small
+/// buffer instead of paying the full streaming buffer for one line.
+pub(super) fn open_rollout_reader_with_capacity(
+    path: &Path,
+    capacity: usize,
+) -> io::Result<(Box<dyn BufRead>, PathBuf)> {
+    match open_encoded_rollout(path, capacity) {
         // Codex may compress or restore the rollout between discovery and this open.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let other = other_encoding_path(path);
-            Ok((open_encoded_rollout(&other)?, other))
+            Ok((open_encoded_rollout(&other, capacity)?, other))
         }
         result => Ok((result?, path.to_path_buf())),
     }
@@ -49,16 +58,13 @@ fn other_encoding_path(path: &Path) -> PathBuf {
     }
 }
 
-fn open_encoded_rollout(path: &Path) -> io::Result<Box<dyn BufRead>> {
+fn open_encoded_rollout(path: &Path, capacity: usize) -> io::Result<Box<dyn BufRead>> {
     let file = File::open(path)?;
     if is_compressed_rollout(path) {
         let decoder = zstd::stream::read::Decoder::new(file)?;
-        Ok(Box::new(BufReader::with_capacity(
-            READ_BUFFER_SIZE,
-            decoder,
-        )))
+        Ok(Box::new(BufReader::with_capacity(capacity, decoder)))
     } else {
-        Ok(Box::new(BufReader::with_capacity(READ_BUFFER_SIZE, file)))
+        Ok(Box::new(BufReader::with_capacity(capacity, file)))
     }
 }
 
