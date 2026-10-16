@@ -23225,6 +23225,16 @@
 			"context": 8192
 		}
 	},
+	"nvidia-nemotron-3-5-super-vl-120b-a12b": {
+		"cost": {
+			"cache_read": 0.125,
+			"input": 0.25,
+			"output": 1.25
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"nvidia-nemotron-3-nano-30b-a3b": {
 		"cost": {
 			"input": 0.06,
@@ -34805,7 +34815,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.0144,
+			"input": 0.018,
 			"output": 0.684
 		},
 		"exactOnly": true,
@@ -34826,9 +34836,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0058,
-			"input": 0.0058,
-			"output": 0.64
+			"cache_read": 0.0108,
+			"input": 0.0162,
+			"output": 0.576
 		},
 		"limit": {
 			"context": 1048576
@@ -34871,9 +34881,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.3,
-			"input": 0.33,
-			"output": 14
+			"cache_read": 0.284,
+			"input": 0.294,
+			"output": 28
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35042,9 +35052,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0125,
-			"input": 0.0139,
-			"output": 0.8132
+			"cache_read": 0.009,
+			"input": 0.02538,
+			"output": 1.125
 		},
 		"exactOnly": true,
 		"limit": {
