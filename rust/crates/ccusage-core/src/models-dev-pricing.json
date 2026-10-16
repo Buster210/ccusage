@@ -28854,21 +28854,21 @@
 			"context": 1000000
 		}
 	},
-	"reflection/Beam-1.0-501B-A23B": {
-		"cost": {
-			"cache_read": 0.1,
-			"input": 1,
-			"output": 3
-		},
-		"limit": {
-			"context": 1048576
-		}
-	},
 	"reflection/beam-1.0": {
 		"cost": {
 			"cache_read": 0.04,
 			"input": 0.45,
 			"output": 1.25
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
+	"reflection/beam-1.0-501b-a23b": {
+		"cost": {
+			"cache_read": 0.1,
+			"input": 1,
+			"output": 3
 		},
 		"limit": {
 			"context": 1048576
@@ -34968,9 +34968,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0108,
-			"input": 0.01179,
-			"output": 1.152
+			"cache_read": 0.008,
+			"input": 0.008,
+			"output": 1.28
 		},
 		"limit": {
 			"context": 1048576
@@ -35129,6 +35129,16 @@
 			"context": 1050000
 		}
 	},
+	"~perplexity/pplx-decider-flash-latest": {
+		"cost": {
+			"input": 0.01,
+			"output": 0
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 262144
+		}
+	},
 	"~perplexity/pplx-decider-latest": {
 		"cost": {
 			"input": 0.02,
@@ -35185,8 +35195,8 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.01125,
-			"input": 0.01494,
-			"output": 0.70272
+			"input": 0.036,
+			"output": 0.585
 		},
 		"exactOnly": true,
 		"limit": {
