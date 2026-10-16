@@ -19617,8 +19617,8 @@
 	},
 	"meta-llama/llama-guard-4-12b": {
 		"cost": {
-			"input": 0.18,
-			"output": 0.18
+			"input": 0.144,
+			"output": 0.144
 		},
 		"limit": {
 			"context": 163840
@@ -19920,8 +19920,8 @@
 	},
 	"microsoft/phi-4": {
 		"cost": {
-			"input": 0.07,
-			"output": 0.14
+			"input": 0.056,
+			"output": 0.112
 		},
 		"limit": {
 			"context": 16384
@@ -34805,7 +34805,7 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.01035,
+			"input": 0.0144,
 			"output": 0.684
 		},
 		"exactOnly": true,
@@ -34826,9 +34826,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.00999,
-			"input": 0.00999,
-			"output": 0.576
+			"cache_read": 0.0058,
+			"input": 0.0058,
+			"output": 0.64
 		},
 		"limit": {
 			"context": 1048576
@@ -34871,9 +34871,9 @@
 	},
 	"~moonshotai/kimi-latest": {
 		"cost": {
-			"cache_read": 0.289,
-			"input": 0.299,
-			"output": 24
+			"cache_read": 0.3,
+			"input": 0.33,
+			"output": 14
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35042,9 +35042,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.01125,
-			"input": 0.02142,
-			"output": 0.9
+			"cache_read": 0.0125,
+			"input": 0.0139,
+			"output": 0.8132
 		},
 		"exactOnly": true,
 		"limit": {
