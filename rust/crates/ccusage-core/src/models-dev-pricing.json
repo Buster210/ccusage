@@ -1948,6 +1948,16 @@
 			"context": 8192
 		}
 	},
+	"TheDrummer/orion-26b-a4b-v1.1": {
+		"cost": {
+			"cache_read": 0.05,
+			"input": 0.1,
+			"output": 0.45
+		},
+		"limit": {
+			"context": 65536
+		}
+	},
 	"VongolaChouko/Starcannon-Unleashed-12B-v1.0": {
 		"cost": {
 			"cache_read": 0.2465,
@@ -34858,9 +34868,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0068,
-			"input": 0.0068,
-			"output": 1.28
+			"cache_read": 0.00441,
+			"input": 0.00441,
+			"output": 1.152
 		},
 		"limit": {
 			"context": 1048576
@@ -35074,9 +35084,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0125,
-			"input": 0.0134,
-			"output": 0.8192
+			"cache_read": 0.01125,
+			"input": 0.01206,
+			"output": 0.9
 		},
 		"exactOnly": true,
 		"limit": {
