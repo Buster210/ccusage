@@ -11107,9 +11107,9 @@
 	},
 	"deepseek/deepseek-v3.1": {
 		"cost": {
-			"cache_read": 0.06,
-			"input": 0.19,
-			"output": 0.71
+			"cache_read": 0.13,
+			"input": 0.56,
+			"output": 1.68
 		},
 		"limit": {
 			"context": 131072
@@ -26236,7 +26236,25 @@
 			"context": 36864
 		}
 	},
+	"perplexity/pplx-decider-flash-v1.2": {
+		"cost": {
+			"input": 0.01,
+			"output": 0
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"perplexity/pplx-decider-v1.1-27b": {
+		"cost": {
+			"input": 0.02,
+			"output": 0
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
+	"perplexity/pplx-decider-v1.2": {
 		"cost": {
 			"input": 0.02,
 			"output": 0
@@ -34950,9 +34968,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0058,
-			"input": 0.0058,
-			"output": 1.28
+			"cache_read": 0.0108,
+			"input": 0.01179,
+			"output": 1.152
 		},
 		"limit": {
 			"context": 1048576
@@ -35167,8 +35185,8 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.01125,
-			"input": 0.02385,
-			"output": 0.5958
+			"input": 0.01494,
+			"output": 0.70272
 		},
 		"exactOnly": true,
 		"limit": {
