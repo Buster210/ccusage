@@ -12462,6 +12462,17 @@
 			"context": 1048576
 		}
 	},
+	"fireworks_ai/accounts/fireworks/models/muse-spark-open": {
+		"cost": {
+			"cache_read": 0.15,
+			"input": 1.25,
+			"output": 4.25
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"fireworks_ai/gpt-oss-120b": {
 		"cost": {
 			"cache_read": 0.014,
@@ -22383,6 +22394,17 @@
 		},
 		"limit": {
 			"context": 110000
+		}
+	},
+	"nebius/meta-models/muse-spark-open": {
+		"cost": {
+			"cache_read": 1.25,
+			"input": 1.25,
+			"output": 4.25
+		},
+		"exactOnly": true,
+		"limit": {
+			"context": 1048576
 		}
 	},
 	"nebius/nvidia/Nemotron-3-Ultra-550b-a55b": {
@@ -34815,8 +34837,8 @@
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
 			"cache_read": 0.0054,
-			"input": 0.018,
-			"output": 0.684
+			"input": 0.036,
+			"output": 0.7047
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34836,8 +34858,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.00846,
-			"input": 0.00846,
+			"cache_read": 0.00441,
+			"input": 0.00441,
 			"output": 0.576
 		},
 		"limit": {
@@ -35053,7 +35075,7 @@
 	"~z-ai/glm-flash-latest": {
 		"cost": {
 			"cache_read": 0.009,
-			"input": 0.01584,
+			"input": 0.027,
 			"output": 1.125
 		},
 		"exactOnly": true,
