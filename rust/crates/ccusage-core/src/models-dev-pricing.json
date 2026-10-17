@@ -11338,6 +11338,16 @@
 			"context": 1048576
 		}
 	},
+	"deepseek/deepseek-v4.1-flash-1017:thinking": {
+		"cost": {
+			"cache_read": 0.003,
+			"input": 0.15,
+			"output": 0.6
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"deepseek/deepseek-v4.1-flash-fast": {
 		"cost": {
 			"cache_read": 0.016,
@@ -20541,15 +20551,6 @@
 		},
 		"limit": {
 			"context": 32000
-		}
-	},
-	"mistral-7b-instruct-v0.3": {
-		"cost": {
-			"input": 0.111,
-			"output": 0.111
-		},
-		"limit": {
-			"context": 127000
 		}
 	},
 	"mistral-code-agent-latest": {
@@ -34958,7 +34959,7 @@
 		"cost": {
 			"cache_read": 0.0041,
 			"input": 0.12332,
-			"output": 0.5588
+			"output": 0.3831
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34967,9 +34968,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0097,
-			"input": 0.0097,
-			"output": 0.2971
+			"cache_read": 0.0083,
+			"input": 0.0083,
+			"output": 0.2829
 		},
 		"limit": {
 			"context": 1048576
@@ -35014,7 +35015,7 @@
 		"cost": {
 			"cache_read": 0.0513,
 			"input": 0.27,
-			"output": 14.2307
+			"output": 13.9778
 		},
 		"exactOnly": true,
 		"limit": {
@@ -35193,9 +35194,9 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0094,
-			"input": 0.0293,
-			"output": 0.4182
+			"cache_read": 0.008,
+			"input": 0.0251,
+			"output": 0.3966
 		},
 		"exactOnly": true,
 		"limit": {
