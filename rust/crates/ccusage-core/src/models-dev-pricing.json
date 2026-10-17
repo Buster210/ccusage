@@ -11328,6 +11328,16 @@
 			"context": 1000000
 		}
 	},
+	"deepseek/deepseek-v4.1-flash-1017": {
+		"cost": {
+			"cache_read": 0.003,
+			"input": 0.15,
+			"output": 0.6
+		},
+		"limit": {
+			"context": 1048576
+		}
+	},
 	"deepseek/deepseek-v4.1-flash-fast": {
 		"cost": {
 			"cache_read": 0.016,
@@ -34935,9 +34945,9 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.0022,
-			"input": 0.0219,
-			"output": 0.6246
+			"cache_read": 0.003,
+			"input": 0.15,
+			"output": 0.6
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34946,9 +34956,9 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.004914,
-			"input": 0.15444,
-			"output": 0.46332
+			"cache_read": 0.0041,
+			"input": 0.12332,
+			"output": 0.5588
 		},
 		"exactOnly": true,
 		"limit": {
@@ -34957,8 +34967,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0119,
-			"input": 0.0119,
+			"cache_read": 0.0097,
+			"input": 0.0097,
 			"output": 0.2971
 		},
 		"limit": {
@@ -35183,8 +35193,8 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.0109,
-			"input": 0.0341,
+			"cache_read": 0.0094,
+			"input": 0.0293,
 			"output": 0.4182
 		},
 		"exactOnly": true,
