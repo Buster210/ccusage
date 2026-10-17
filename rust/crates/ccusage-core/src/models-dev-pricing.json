@@ -35183,8 +35183,8 @@
 	},
 	"~z-ai/glm-flash-latest": {
 		"cost": {
-			"cache_read": 0.018,
-			"input": 0.049,
+			"cache_read": 0.02,
+			"input": 0.055,
 			"output": 0.65
 		},
 		"exactOnly": true,
