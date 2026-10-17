@@ -18230,6 +18230,16 @@
 			"context": 128000
 		}
 	},
+	"inference.net/deepseek-v4.1-flash-1017": {
+		"cost": {
+			"cache_read": 0.007,
+			"input": 0.3,
+			"output": 1
+		},
+		"limit": {
+			"context": 262144
+		}
+	},
 	"inference.net/glm-5.3": {
 		"cost": {
 			"cache_read": 0.15,
@@ -34979,8 +34989,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.018,
-			"input": 0.018,
+			"cache_read": 0.0146,
+			"input": 0.0146,
 			"output": 1.28
 		},
 		"limit": {
