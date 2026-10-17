@@ -26266,15 +26266,6 @@
 			"context": 262144
 		}
 	},
-	"perplexity/pplx-decider-v1.1-27b": {
-		"cost": {
-			"input": 0.02,
-			"output": 0
-		},
-		"limit": {
-			"context": 262144
-		}
-	},
 	"perplexity/pplx-decider-v1.2": {
 		"cost": {
 			"input": 0.02,
@@ -34967,13 +34958,13 @@
 	},
 	"~deepseek/deepseek-flash-latest": {
 		"cost": {
-			"cache_read": 0.002,
-			"input": 0.1,
-			"output": 0.5
+			"cache_read": 0.008,
+			"input": 0.09,
+			"output": 0.55
 		},
 		"exactOnly": true,
 		"limit": {
-			"context": 262144
+			"context": 1048576
 		}
 	},
 	"~deepseek/deepseek-pro-latest": {
@@ -34989,8 +34980,8 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.0146,
-			"input": 0.0146,
+			"cache_read": 0.0119,
+			"input": 0.0119,
 			"output": 1.28
 		},
 		"limit": {
