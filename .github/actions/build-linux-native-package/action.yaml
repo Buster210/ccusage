@@ -19,9 +19,11 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/setup-nix-cache
+      id: nix
       with:
         cache-scope: ${{ inputs.cache-scope }}
         gc-max-store-size-linux: 4G
+        defer-save: 'true'
 
     - name: Build Linux static binary
       shell: bash
@@ -73,3 +75,16 @@ runs:
         name: ccusage-native-linux-${{ inputs.arch }}
         path: ccusage-native-linux-${{ inputs.arch }}.tar
         if-no-files-found: error
+
+    # An explicit step rather than cache-nix-action's post-job save. This action
+    # runs inside another composite action, and a nested action's post-job step
+    # does not see the composite's step outputs, so the save inside
+    # setup-nix-cache would reach post-job with an empty primary-key and fail
+    # with "Input required and not supplied: primary-key". See
+    # setup-nix-cache's defer-save input.
+    - name: Save Nix store
+      if: steps.nix.outputs.save == 'true'
+      uses: nix-community/cache-nix-action/save@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        primary-key: ${{ steps.nix.outputs.primary-key }}
+        gc-max-store-size-linux: 4G

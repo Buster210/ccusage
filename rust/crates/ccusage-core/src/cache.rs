@@ -95,6 +95,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     LoadedEntry, chunk_file_indexes_by_size,
+    cli::CostMode,
+    cost::stored_cost_for_mode,
     types::{TokenUsageRaw, UsageEntry, UsageMessage},
 };
 
@@ -184,7 +186,20 @@ impl From<CachedEntry> for LoadedEntry {
             model: c.model.map(|m| strip_model_prefix(&m).to_string()),
             usage_limit_reset_time: c.usage_limit_reset_time,
             missing_pricing_model: None,
+            // `cost_usd` is persisted raw; the mode-dependent half is restored by
+            // `restore_stored_cost` on the cached read path.
+            stored_cost: None,
         }
+    }
+}
+
+/// Restore the mode-dependent `stored_cost` of cached entries from their persisted
+/// raw `cost_usd`. The cold parse stores the same value via `stored_cost_for_mode`,
+/// so warm and cold loads agree in every mode — including a mode switch between
+/// runs, which never re-parses.
+fn restore_stored_cost(entries: &mut [LoadedEntry], mode: CostMode) {
+    for entry in entries {
+        entry.stored_cost = stored_cost_for_mode(entry.data.cost_usd, mode);
     }
 }
 
@@ -312,7 +327,7 @@ pub fn cache_key(path: &Path) -> String {
 }
 
 /// Capture the current freshness fingerprint of a source file, if it exists.
-pub(crate) fn file_metadata(path: &Path) -> Option<FileMetadata> {
+fn file_metadata(path: &Path) -> Option<FileMetadata> {
     let metadata = fs::metadata(path).ok()?;
     let mtime = metadata
         .modified()
@@ -340,6 +355,11 @@ const FILES_SCHEMA_VERSION: i64 = 1;
 /// every `LedgerEntry` layout change so the mismatch warning below fires.
 /// v2 adds `date TEXT` column (denormalized from `LedgerEntry.base.date`) and
 /// index `ledger(namespace,date)` for windowed queries.
+/// The `recorded_cost REAL` column (the agent-recorded costUSD of a deleted
+/// source) does not move the version: it is a column, not a `LedgerEntry`
+/// field, so the postcard blob layout is unchanged and every existing row
+/// still decodes. Bumping the version would make the previously released
+/// binary warn about retained spend that is not dropped.
 const LEDGER_SCHEMA_VERSION: i64 = 2;
 /// Schema version for the `opencode` table, tracked in `schema_meta`.
 const OPENCODE_SCHEMA_VERSION: i64 = 1;
@@ -665,6 +685,16 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
     }
     let _ =
         conn.execute("CREATE INDEX IF NOT EXISTS ledger_namespace_date ON ledger(namespace, date)");
+    // ledger v3: `recorded_cost` keeps the agent-recorded costUSD of a deleted
+    // source, so the stored cost survives the file's removal. The blob layout
+    // is unchanged, so legacy rows keep decoding; their cost stays NULL until
+    // the source is re-appended.
+    if conn
+        .prepare("SELECT recorded_cost FROM ledger LIMIT 1")
+        .is_err()
+    {
+        let _ = conn.execute("ALTER TABLE ledger ADD COLUMN recorded_cost REAL");
+    }
     if let Some(stored) = read_schema_version(conn, "ledger")
         && stored != LEDGER_SCHEMA_VERSION
     {
@@ -1058,6 +1088,9 @@ fn stored_paths_all_live(stored: &HashMap<String, StoredFile>, files: &[PathBuf]
 pub struct CacheOpts {
     pub single_thread: bool,
     pub live_only: bool,
+    /// Active cost mode. Cached hits use it to restore their mode-dependent
+    /// `stored_cost` without a re-parse (see [`restore_stored_cost`]).
+    pub mode: CostMode,
 }
 
 /// Load parsed entries for `files`, reusing the cache for unchanged files and
@@ -1144,7 +1177,14 @@ where
         let res = Ok(match conn {
             Some(conn) => {
                 if has_ledger {
-                    merge_ledger(&conn, namespace, Vec::new(), opts.live_only, date_filter)
+                    merge_ledger(
+                        &conn,
+                        namespace,
+                        Vec::new(),
+                        opts.live_only,
+                        date_filter,
+                        opts.mode,
+                    )
                 } else {
                     Vec::new()
                 }
@@ -1255,6 +1295,7 @@ where
     for entry in &mut live[..cached_total] {
         reprice(entry);
     }
+    restore_stored_cost(&mut live[..cached_total], opts.mode);
 
     // Merge the ledger: record new billable entries and re-emit entries whose
     // source file has since been deleted. Without a cache there is nothing to
@@ -1263,7 +1304,14 @@ where
     // only this scan re-emits them, so steadiness cannot prove an empty set.
     let __merge_start = timing_enabled().then(Instant::now);
     let res = Ok(match conn {
-        Some(conn) => merge_ledger(&conn, namespace, live, opts.live_only, date_filter),
+        Some(conn) => merge_ledger(
+            &conn,
+            namespace,
+            live,
+            opts.live_only,
+            date_filter,
+            opts.mode,
+        ),
         None => live,
     });
     if let Some(s) = __merge_start {
@@ -1343,6 +1391,7 @@ where
         for entry in &mut cached.entries {
             reprice(entry);
         }
+        restore_stored_cost(&mut cached.entries, opts.mode);
         groups[index] = cached.entries;
     }
     Ok(groups)
@@ -1643,8 +1692,9 @@ fn merge_ledger(
     live: Vec<LoadedEntry>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
+    mode: CostMode,
 ) -> Vec<LoadedEntry> {
-    merge_ledger_with(conn, namespace, live, live_only, date_filter, None)
+    merge_ledger_with(conn, namespace, live, live_only, date_filter, mode, None)
 }
 
 /// [`merge_ledger`] with optionally precomputed key sets. `Some` sets must be the
@@ -1655,6 +1705,7 @@ fn merge_ledger_with(
     live: Vec<LoadedEntry>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
+    mode: CostMode,
     precomputed: Option<(FxHashSet<String>, Vec<String>)>,
 ) -> Vec<LoadedEntry> {
     // Blobs load under raw keys, so normalization stays at comparison time.
@@ -1720,7 +1771,7 @@ fn merge_ledger_with(
             .cloned()
             .collect();
         for key in deleted_keys {
-            if let Some(blob) = load_ledger_blob(conn, namespace, &key)
+            if let Some((blob, recorded_cost)) = load_ledger_row(conn, namespace, &key)
                 && let Ok(entry) = postcard::from_bytes::<LedgerEntry>(&blob)
             {
                 if let Some((since, until)) = date_filter {
@@ -1730,6 +1781,10 @@ fn merge_ledger_with(
                     }
                 }
                 let mut loaded = entry.into_loaded(key.clone());
+                // The agent-recorded cost outlived the source file in the ledger
+                // column, so the stored cost is restored here the way the cache
+                // read path does. Rows written before v3 carry no recorded cost.
+                loaded.stored_cost = stored_cost_for_mode(recorded_cost, mode);
                 if let Some(m) = loaded.model.as_deref() {
                     let stripped = strip_model_prefix(m).to_string();
                     if stripped != m {
@@ -1756,8 +1811,8 @@ fn append_entries_to_ledger(
 ) -> Option<()> {
     let mut st = conn
         .prepare(
-            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, recorded_cost, entry) \
+             VALUES (?, ?, ?, ?, ?)",
         )
         .ok()?;
     for entry in entries {
@@ -1775,11 +1830,15 @@ fn append_ledger_row(
     // The dedup key is the row's primary-key column, so the blob omits every
     // dedup-identity field; the id is restored from the column on read.
     let blob = postcard::to_allocvec(&LedgerEntry::from(entry)).ok()?;
+    // The recorded costUSD is cleared from the blob (it would let reprice touch
+    // the frozen ledger cost), so it travels in its own column.
+    let recorded_cost = entry.data.cost_usd;
     st.reset().ok()?;
     st.bind((1, namespace)).ok()?;
     st.bind((2, key.as_str())).ok()?;
     st.bind((3, entry.date.as_str())).ok()?;
-    st.bind((4, &blob[..])).ok()?;
+    st.bind((4, recorded_cost)).ok()?;
+    st.bind((5, &blob[..])).ok()?;
     st.next().ok()?;
     Some(())
 }
@@ -1819,20 +1878,22 @@ fn load_ledger_keys(
     out
 }
 
-/// Fetch the postcard-encoded entry blob for one `(namespace, dedup_key)`, or
-/// `None` if the row is missing.
-fn load_ledger_blob(
+/// Fetch the postcard-encoded entry blob and the recorded costUSD for one
+/// `(namespace, dedup_key)`, or `None` if the row is missing.
+fn load_ledger_row(
     conn: &sqlite::Connection,
     namespace: &str,
     dedup_key: &str,
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, Option<f64>)> {
     let mut st = conn
-        .prepare("SELECT entry FROM ledger WHERE namespace = ? AND dedup_key = ?")
+        .prepare("SELECT entry, recorded_cost FROM ledger WHERE namespace = ? AND dedup_key = ?")
         .ok()?;
     st.bind((1, namespace)).ok()?;
     st.bind((2, dedup_key)).ok()?;
     if let Ok(sqlite::State::Row) = st.next() {
-        return st.read::<Vec<u8>, _>(0).ok();
+        let blob = st.read::<Vec<u8>, _>(0).ok()?;
+        let recorded_cost = st.read::<Option<f64>, _>(1).ok().flatten();
+        return Some((blob, recorded_cost));
     }
     None
 }
@@ -1851,6 +1912,7 @@ pub fn retain_via_ledger(
     live: Vec<LoadedEntry>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
+    mode: CostMode,
 ) -> Vec<LoadedEntry> {
     match open_db() {
         Some(conn) => {
@@ -1895,6 +1957,7 @@ pub fn retain_via_ledger(
                 live,
                 live_only,
                 date_filter,
+                mode,
                 Some((seen, sets.stored_raw)),
             )
         }
@@ -1934,8 +1997,8 @@ fn append_missing_ledger_entries(
 ) -> Option<()> {
     let mut st = conn
         .prepare(
-            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, recorded_cost, entry) \
+             VALUES (?, ?, ?, ?, ?)",
         )
         .ok()?;
     for &index in missing {
@@ -2035,6 +2098,7 @@ pub(crate) mod tests {
             model: Some("claude-test".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         }
     }
 
@@ -2141,12 +2205,13 @@ pub(crate) mod tests {
         let blob = postcard::to_allocvec(&LedgerEntry::from(entry)).unwrap();
         // Try with date column (v2 schema); fallback to legacy schema without date.
         if let Ok(mut st) = conn.prepare(
-            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, entry) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO ledger(namespace, dedup_key, date, recorded_cost, entry) VALUES (?, ?, ?, ?, ?)",
         ) {
             st.bind((1, namespace)).unwrap();
             st.bind((2, key)).unwrap();
             st.bind((3, entry.date.as_str())).unwrap();
-            st.bind((4, &blob[..])).unwrap();
+            st.bind((4, entry.data.cost_usd)).unwrap();
+            st.bind((5, &blob[..])).unwrap();
             st.next().unwrap();
         } else if let Ok(mut st) = conn
             .prepare("INSERT OR IGNORE INTO ledger(namespace, dedup_key, entry) VALUES (?, ?, ?)")
@@ -2254,6 +2319,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| {
@@ -2273,6 +2339,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| {
@@ -2302,6 +2369,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |path| Err(crate::cli_error(format!("boom: {}", path.display()))),
@@ -2319,6 +2387,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| {
@@ -2378,6 +2447,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -2396,6 +2466,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2410,6 +2481,100 @@ pub(crate) mod tests {
         assert!(
             !file_paths("test-ns").contains(&src.to_string_lossy().to_string()),
             "files row must be removed after deletion"
+        );
+    }
+
+    /// A deleted source keeps its agent-recorded cost in the ledger, so the
+    /// stored cost is restored the way the cache read path restores it. The mode
+    /// decides: auto reports the recorded cost, while calculate and display
+    /// report nothing because the tool computes its own cost there.
+    #[test]
+    fn ledger_entry_reports_stored_cost_for_deleted_source() {
+        let _env = CacheEnv::new("ledger-stored-cost");
+        let src = write_source("ledger-stored-cost", "line\n");
+        let mut entry = sample_entry();
+        entry.data.cost_usd = Some(0.25);
+        // An adapter sets the stored cost on a fresh parse; the cache restores
+        // it on a warm one.
+        entry.stored_cost = stored_cost_for_mode(entry.data.cost_usd, CostMode::Auto);
+
+        let cold = load_with_cache(
+            "test-ns",
+            std::slice::from_ref(&src),
+            CacheOpts {
+                single_thread: false,
+                live_only: false,
+                mode: CostMode::Auto,
+            },
+            Freshness::FileStat,
+            |_| Ok(vec![entry.clone()]),
+            |_| {},
+            None,
+        )
+        .unwrap();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].stored_cost, Some(0.25));
+
+        // Delete the source file: the spend now comes back from the ledger.
+        fs::remove_file(&src).unwrap();
+
+        for (mode, expected) in [
+            (CostMode::Auto, Some(0.25)),
+            (CostMode::Calculate, None),
+            (CostMode::Display, None),
+        ] {
+            let warm = load_with_cache(
+                "test-ns",
+                &[],
+                CacheOpts {
+                    single_thread: false,
+                    live_only: false,
+                    mode,
+                },
+                Freshness::FileStat,
+                |_| Ok(Vec::new()),
+                |_| {},
+                None,
+            )
+            .unwrap();
+            assert_eq!(warm.len(), 1, "ledger entry must be emitted after deletion");
+            assert_eq!(
+                warm[0].stored_cost, expected,
+                "stored cost in {mode:?} mode"
+            );
+        }
+    }
+
+    /// A v2 ledger (no `recorded_cost` column) is migrated in place: the column
+    /// appears, while pre-existing rows keep a NULL recorded cost and their
+    /// blobs still decode.
+    #[test]
+    fn migrate_adds_recorded_cost_to_legacy_ledger_table() {
+        let _env = CacheEnv::new("ledger-migrate-recorded-cost");
+        let dir = cache_dir().expect("cache dir");
+        std::fs::create_dir_all(&dir).expect("create cache dir");
+        let legacy = sqlite::open(dir.join(DB_FILE)).expect("open legacy db");
+        legacy
+            .execute(
+                "CREATE TABLE ledger (                     namespace TEXT NOT NULL,                     dedup_key TEXT NOT NULL,                     date TEXT,                     entry BLOB NOT NULL,                     PRIMARY KEY (namespace, dedup_key)                 );                 INSERT INTO ledger(namespace, dedup_key, date, entry)                      VALUES ('claude', 'k1', '2026-01-01', randomblob(16));",
+            )
+            .expect("seed legacy ledger");
+        drop(legacy);
+
+        let conn = open_db().expect("open_db should migrate the legacy ledger");
+        conn.prepare("SELECT recorded_cost FROM ledger LIMIT 1")
+            .expect("recorded_cost column must exist after migration");
+        let mut st = conn
+            .prepare("SELECT recorded_cost FROM ledger WHERE namespace='claude'")
+            .unwrap();
+        st.next().unwrap();
+        assert!(
+            st.read::<Option<f64>, _>(0).unwrap().is_none(),
+            "legacy row keeps a NULL recorded cost"
+        );
+        assert_eq!(
+            read_schema_version(&conn, "ledger"),
+            Some(LEDGER_SCHEMA_VERSION),
         );
     }
 
@@ -2433,6 +2598,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
@@ -2451,6 +2617,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2475,14 +2642,15 @@ pub(crate) mod tests {
     fn covered_retain_skips_append_without_losing_ledger() {
         let _env = CacheEnv::new("covered-skip");
         let live = vec![sample_entry()];
-        let first = retain_via_ledger("test-ns-covered", live.clone(), false, None);
+        let first = retain_via_ledger("test-ns-covered", live.clone(), false, None, CostMode::Auto);
         assert_eq!(first.len(), 1);
         let sets = load_ledger_key_sets(&open_db().expect("cache db must open"), "test-ns-covered");
         assert_eq!(sets.stored_raw.len(), 1);
-        let second = retain_via_ledger("test-ns-covered", live, false, None);
+        let second = retain_via_ledger("test-ns-covered", live, false, None, CostMode::Auto);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].session_id.as_ref(), "session-a");
-        let reemitted = retain_via_ledger("test-ns-covered", Vec::new(), false, None);
+        let reemitted =
+            retain_via_ledger("test-ns-covered", Vec::new(), false, None, CostMode::Auto);
         assert_eq!(
             reemitted.len(),
             1,
@@ -2542,6 +2710,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![a.clone(), b.clone()]),
@@ -2559,6 +2728,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2603,6 +2773,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![a.clone(), b.clone()]),
@@ -2619,6 +2790,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2702,6 +2874,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -2717,6 +2890,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2735,6 +2909,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![new_entry.clone()]),
@@ -2781,6 +2956,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
@@ -2795,6 +2971,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2843,6 +3020,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry_a.clone()]),
@@ -2860,6 +3038,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2882,6 +3061,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2908,6 +3088,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry_a.clone(), entry_b.clone()]),
@@ -2943,6 +3124,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -2958,6 +3140,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2972,6 +3155,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -2990,6 +3174,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -3018,6 +3203,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -3037,6 +3223,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -3066,6 +3253,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| Ok(vec![sample_entry()]),
@@ -3082,6 +3270,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| {
@@ -3116,6 +3305,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| Ok(vec![sample_entry()]),
@@ -3135,6 +3325,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_path| {
@@ -3150,6 +3341,63 @@ pub(crate) mod tests {
         assert!(
             (warm[0].cost - 0.0).abs() < 1e-9,
             "cost must reflect mode-change reprice"
+        );
+
+        let _ = fs::remove_file(&src);
+    }
+
+    /// `stored_cost` is mode-dependent: a warm load restores `Some(cost_usd)` in
+    /// auto mode and `None` in calculate/display, with no re-parse (a mode switch
+    /// between runs is the same path).
+    #[test]
+    fn warm_cache_restores_stored_cost_per_mode() {
+        let _env = CacheEnv::new("stored-cost-mode");
+        let src = write_source("stored-cost-mode", "line\n");
+        let mut logged = sample_entry();
+        logged.data.cost_usd = Some(0.75);
+        let parses = std::sync::atomic::AtomicUsize::new(0);
+
+        let load = |mode: CostMode| {
+            load_with_cache(
+                "test",
+                std::slice::from_ref(&src),
+                CacheOpts {
+                    single_thread: false,
+                    live_only: false,
+                    mode,
+                },
+                Freshness::FileStat,
+                |_path| {
+                    parses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(vec![logged.clone()])
+                },
+                |_| {},
+                None,
+            )
+            .unwrap()
+        };
+
+        // The cold parse would set this itself; the cache only has to reproduce it.
+        load(CostMode::Auto);
+        assert_eq!(
+            load(CostMode::Auto)[0].stored_cost,
+            Some(0.75),
+            "auto mode keeps the logged cost on a cache hit"
+        );
+        assert_eq!(
+            load(CostMode::Calculate)[0].stored_cost,
+            None,
+            "calculate mode must drop the logged cost"
+        );
+        assert_eq!(
+            load(CostMode::Display)[0].stored_cost,
+            None,
+            "display mode must drop the logged cost"
+        );
+        assert_eq!(
+            parses.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the cold load parses; mode changes ride the cache"
         );
 
         let _ = fs::remove_file(&src);
@@ -3171,6 +3419,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
@@ -3189,6 +3438,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -3246,6 +3496,7 @@ pub(crate) mod tests {
                             CacheOpts {
                                 single_thread: true,
                                 live_only: false,
+                                mode: CostMode::Auto,
                             },
                             Freshness::FileStat,
                             |_| Ok(vec![sample_entry()]),
@@ -3282,6 +3533,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
@@ -3300,6 +3552,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -3320,6 +3573,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: true,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -3347,6 +3601,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: true,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![entry.clone()]),
@@ -3363,6 +3618,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(Vec::new()),
@@ -3693,6 +3949,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -3705,6 +3962,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::FileStat,
             |_| Ok(vec![sample_entry()]),
@@ -3871,6 +4129,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::Fingerprint(fp_fn),
             |_path| {
@@ -3890,6 +4149,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::Fingerprint(fp_fn),
             |_path| {
@@ -3910,6 +4170,7 @@ pub(crate) mod tests {
             CacheOpts {
                 single_thread: false,
                 live_only: false,
+                mode: CostMode::Auto,
             },
             Freshness::Fingerprint(fp_fn),
             |_path| {

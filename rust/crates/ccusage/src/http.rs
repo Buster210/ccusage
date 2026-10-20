@@ -1,9 +1,12 @@
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ccusage_core::{
     cache,
     pricing::{PricingEndpoint, project_pricing_body},
 };
+
+mod tls;
 
 const PRICING_FETCH_TIMEOUT_SECONDS: u64 = 10;
 const PRICING_FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -205,6 +208,11 @@ pub(crate) fn fetch_json_sync(url: &str) -> std::io::Result<String> {
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(PRICING_FETCH_TIMEOUT_SECONDS)))
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .unversioned_rustls_crypto_provider(Arc::new(tls::provider()))
+                .build(),
+        )
         .build()
         .new_agent();
 

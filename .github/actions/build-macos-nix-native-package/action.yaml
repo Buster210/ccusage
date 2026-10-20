@@ -17,10 +17,13 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/setup-nix-cache
+      id: nix
       with:
         cache-scope: ${{ inputs.cache-scope }}
+        defer-save: 'true'
 
     - name: Build macOS binary
+      id: build
       shell: bash
       env:
         ARCH: ${{ inputs.arch }}
@@ -29,16 +32,18 @@ runs:
         # (the Apple SDK is multi-arch), so no separate Intel runner is needed.
         case "$ARCH" in
           x64)
-            nix build .#ccusage-darwin-x64 --print-build-logs
+            package=ccusage-darwin-x64
             ;;
           arm64)
-            nix build .#ccusage --print-build-logs
+            package=ccusage
             ;;
           *)
             echo "Unsupported arch: $ARCH" >&2
             exit 1
             ;;
         esac
+        echo "package=$package" >> "$GITHUB_OUTPUT"
+        nix build ".#$package" --print-build-logs
 
     - name: Stage native package
       shell: bash
@@ -58,3 +63,16 @@ runs:
         name: ccusage-native-darwin-${{ inputs.arch }}
         path: ccusage-native-darwin-${{ inputs.arch }}.tar
         if-no-files-found: error
+
+    # An explicit step rather than cache-nix-action's post-job save. This action
+    # runs inside another composite action, and a nested action's post-job step
+    # does not see the composite's step outputs, so the save inside
+    # setup-nix-cache would reach post-job with an empty primary-key and fail
+    # with "Input required and not supplied: primary-key". See
+    # setup-nix-cache's defer-save input.
+    - name: Save Nix store
+      if: steps.nix.outputs.save == 'true'
+      uses: nix-community/cache-nix-action/save@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        primary-key: ${{ steps.nix.outputs.primary-key }}
+        gc-max-store-size-macos: '0'

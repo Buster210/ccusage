@@ -12,7 +12,7 @@ use crate::{
     apply_total_token_fallback, calculate_cost_for_usage_at, calculate_cost_from_pricing,
     cli::CostMode,
     fast::{FxHashMap, FxHashSet, LinePrefilter},
-    format_date_tz, missing_pricing_model_for_usage,
+    format_date_tz, missing_pricing_model_for_usage, stored_cost_for_mode,
 };
 use ccusage_adapter_common::jsonl;
 
@@ -438,6 +438,13 @@ fn read_session_file_data_with_context(
             mode,
             pricing,
         );
+        let stored_cost = pi_stored_cost(
+            model.as_deref(),
+            model.as_deref(),
+            display_cost,
+            mode,
+            pricing,
+        );
         let data = UsageEntry {
             session_id: Some(session_id.clone()),
             timestamp: timestamp_text,
@@ -468,6 +475,7 @@ fn read_session_file_data_with_context(
             data,
             usage_limit_reset_time: None,
             missing_pricing_model,
+            stored_cost,
         });
     }
     Ok(PiSessionData {
@@ -692,6 +700,17 @@ fn pricing_override_model<'a>(
     display_model
         .filter(|model| pricing.has_user_override(model))
         .or_else(|| raw_model.filter(|model| pricing.has_user_override(model)))
+}
+
+fn pi_stored_cost(
+    raw_model: Option<&str>,
+    display_model: Option<&str>,
+    display_cost: Option<f64>,
+    mode: CostMode,
+    pricing: Option<&PricingMap>,
+) -> Option<f64> {
+    let has_override = pricing_override_model(raw_model, display_model, pricing).is_some();
+    stored_cost_for_mode(source_cost_for_mode(display_cost, mode, has_override), mode)
 }
 
 fn source_cost_for_mode(

@@ -81,6 +81,7 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
+          save-cargo-cache: ${{ matrix.arch == 'arm64' }}
 
   release:
     needs: build-native-packages

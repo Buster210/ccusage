@@ -13,10 +13,6 @@ pub mod model_aliases;
 pub mod output;
 pub mod path_utils;
 pub mod pricing;
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../build.rs"]
-mod pricing_snapshot;
 pub mod progress;
 pub mod project_names;
 pub mod sqlite_util;
@@ -32,7 +28,7 @@ pub use agent_report::{agent_summary_json, first_column, summary_period};
 pub use cost::{
     calculate_cost, calculate_cost_for_usage, calculate_cost_for_usage_at,
     calculate_cost_from_pricing, cost_and_missing_for_output, missing_pricing_model_for_candidates,
-    missing_pricing_model_for_token_total, missing_pricing_model_for_usage,
+    missing_pricing_model_for_token_total, missing_pricing_model_for_usage, stored_cost_for_mode,
 };
 pub use date_utils::*;
 pub use last_window::{PeriodUnit, last_periods_since};

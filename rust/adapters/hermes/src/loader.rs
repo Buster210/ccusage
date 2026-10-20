@@ -28,13 +28,14 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
         crate::cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
+            mode: shared.mode,
         },
         crate::cache::Freshness::Fingerprint(fingerprint_hermes_db),
         |db_path| {
             let entries = load_state_db_entries(db_path, shared);
             Ok(entries
                 .into_iter()
-                .map(|entry| to_loaded_entry(entry, tz.as_ref(), pricing))
+                .map(|entry| to_loaded_entry(entry, tz.as_ref(), shared.mode, pricing))
                 .collect())
         },
         |e| reprice(e, shared.mode, pricing),

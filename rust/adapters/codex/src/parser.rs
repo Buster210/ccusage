@@ -669,8 +669,7 @@ fn codex_line_usage_kind(line: &[u8]) -> Option<CodexLineKind> {
     }
     // Without any `"type"` key the exact scan matches nothing, so skip
     // straight to the headless check.
-    if TYPE_KEY_FINDER.find(line).is_some()
-        && codex_line_matches_session_type(line, has_event_msg)
+    if TYPE_KEY_FINDER.find(line).is_some() && codex_line_matches_session_type(line, has_event_msg)
     {
         return Some(CodexLineKind::Session);
     }

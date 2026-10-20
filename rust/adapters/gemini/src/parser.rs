@@ -494,6 +494,7 @@ pub(super) fn event_to_loaded(
         usage_limit_reset_time: None,
         missing_pricing_model,
         data,
+        stored_cost: None,
     }
 }
 

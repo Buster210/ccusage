@@ -51,6 +51,7 @@ fn load_entries_inner(
         crate::cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
+            mode: shared.mode,
         },
         crate::cache::Freshness::FileStat,
         |file| {

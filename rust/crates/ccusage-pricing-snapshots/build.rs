@@ -1,9 +1,5 @@
 use std::{env, fs, path::PathBuf};
 
-// Only the flake.lock parsing behind the fetch feature needs these; the included
-// `pricing_compact.rs` fully qualifies its own `serde_json` paths because
-// `pricing.rs` includes it too.
-#[cfg(feature = "fetch-litellm-pricing")]
 use serde_json::{Map, Value};
 
 const FLAKE_LOCK_JSON: &str = "../../../flake.lock";
@@ -31,7 +27,7 @@ fn main() {
         println!("cargo:rerun-if-changed={FLAKE_LOCK_JSON}");
         fetch_pricing_json()
     };
-    let pricing_json = compact_litellm(&pricing_json, false).expect("compact LiteLLM pricing JSON");
+    let pricing_json = compact_pricing_json(&pricing_json).expect("compact LiteLLM pricing JSON");
 
     fs::write(out_path, deflate(pricing_json.as_bytes()))
         .expect("write build-time pricing snapshot");
@@ -51,9 +47,7 @@ fn embed_snapshot(source: &str, out_name: &str) {
     println!("cargo:rerun-if-changed={source}");
     let snapshot =
         fs::read_to_string(source).unwrap_or_else(|error| panic!("read {source}: {error}"));
-    // Qualified: the `use serde_json::{Map, Value}` above is gated behind the
-    // fetch feature, and this runs on every build.
-    let value = serde_json::from_str::<serde_json::Value>(&snapshot)
+    let value = serde_json::from_str::<Value>(&snapshot)
         .unwrap_or_else(|error| panic!("parse {source}: {error}"));
     let minified =
         serde_json::to_string(&value).unwrap_or_else(|error| panic!("serialize {source}: {error}"));
@@ -158,4 +152,104 @@ fn required_flake_lock_string_field(
         })
 }
 
-include!("src/pricing_compact.rs");
+fn compact_pricing_json(json: &str) -> Option<String> {
+    let Value::Object(raw) = serde_json::from_str::<Value>(json).ok()? else {
+        return None;
+    };
+    let mut compact = Map::new();
+    for (model, pricing) in raw {
+        if !is_embedded_model(&model) {
+            continue;
+        }
+        let Value::Object(pricing) = pricing else {
+            continue;
+        };
+        let mut fields = Map::new();
+        for (source, target) in [
+            ("input_cost_per_token", "i"),
+            ("output_cost_per_token", "o"),
+            ("cache_creation_input_token_cost", "cc"),
+            ("cache_read_input_token_cost", "cr"),
+            ("input_cost_per_token_above_200k_tokens", "ia"),
+            ("output_cost_per_token_above_200k_tokens", "oa"),
+            ("cache_creation_input_token_cost_above_200k_tokens", "cca"),
+            ("cache_read_input_token_cost_above_200k_tokens", "cra"),
+            ("max_input_tokens", "ctx"),
+        ] {
+            let Some(value) = pricing.get(source) else {
+                continue;
+            };
+            if !value.is_null() {
+                fields.insert(target.to_string(), value.clone());
+            }
+        }
+        for tier in ["fast", "flex"] {
+            if let Some(multiplier) = pricing
+                .get("provider_specific_entry")
+                .and_then(Value::as_object)
+                .and_then(|entry| entry.get(tier))
+                .filter(|value| !value.is_null())
+            {
+                fields.insert(tier.to_string(), multiplier.clone());
+            }
+        }
+        if fields.contains_key("i") && fields.contains_key("o") {
+            compact.insert(model, Value::Object(fields));
+        }
+    }
+    serde_json::to_string(&Value::Object(compact)).ok()
+}
+
+fn is_embedded_model(model: &str) -> bool {
+    model.starts_with("claude-")
+        || model.starts_with("anthropic.")
+        || model.starts_with("anthropic/")
+        || model.starts_with("us.anthropic.")
+        || model.starts_with("eu.anthropic.")
+        || model.starts_with("global.anthropic.")
+        || model.starts_with("jp.anthropic.")
+        || model.starts_with("au.anthropic.")
+        || model.starts_with("gpt-")
+        || model == "o3"
+        || model.starts_with("o3-")
+        || model == "o4-mini"
+        || model.starts_with("o4-mini-")
+        || model.starts_with("openai/")
+        || model.starts_with("azure/")
+        || model.starts_with("zai/")
+        || model.starts_with("openrouter/openai/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_pricing_json;
+    use ccusage_core::PricingMap;
+
+    #[test]
+    fn keeps_service_tier_multipliers_in_embedded_pricing() {
+        let compact = compact_pricing_json(
+            r#"{
+                "gpt-test": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000002,
+                    "provider_specific_entry": { "fast": 2, "flex": 0.5 }
+                },
+                "gpt-flex-only": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000002,
+                    "provider_specific_entry": { "fast": null, "flex": 0.25 }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut pricing = PricingMap::default();
+        pricing.load_json(&compact);
+
+        let both = pricing.find_exact("gpt-test").unwrap();
+        assert_eq!(both.fast_multiplier, 2.0);
+        assert_eq!(both.flex_multiplier, 0.5);
+        let flex_only = pricing.find_exact("gpt-flex-only").unwrap();
+        assert_eq!(flex_only.fast_multiplier, 1.0);
+        assert_eq!(flex_only.flex_multiplier, 0.25);
+    }
+}

@@ -25,7 +25,7 @@ use crate::{
     debug_log,
     fast::{FxHashMap, byte_lines, suffix_string},
     format_date_tz, log_level, missing_pricing_model_for_usage, parse_ts_timestamp, parse_tz,
-    progress, summarize_by_key,
+    progress, stored_cost_for_mode, summarize_by_key,
 };
 
 #[doc(hidden)]
@@ -209,6 +209,7 @@ fn load_entries_inner(
         ccusage_core::cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
+            mode: shared.mode,
         },
         ccusage_core::cache::Freshness::FileStat,
         |file| read_usage_file(file, tz_ref, mode, pricing_ref).map(|f| f.entries),
@@ -434,8 +435,10 @@ fn usage_dedupe_hash(
 ///
 /// The prefix is a heuristic: only a request ID proves two lines belong to one response, so a
 /// gateway that reused a `msg_`-shaped placeholder would collapse to one entry per session.
+/// OpenAI Responses API `resp_` IDs are treated the same way: Claude Code writes
+/// one line per content block for a single response.
 fn is_anthropic_message_id(message_id: &str) -> bool {
-    message_id.starts_with("msg_")
+    message_id.starts_with("msg_") || message_id.starts_with("resp_")
 }
 
 fn sidechain_replay_dedupe_hash(message_id: &str, session_id: &str) -> u64 {
@@ -643,6 +646,7 @@ fn read_usage_file(
             mode,
             pricing,
         );
+        let stored_cost = stored_cost_for_mode(data.cost_usd, mode);
         let usage_limit_reset_time =
             usage_limit_reset_time_from_line_bytes(line, data.is_api_error_message);
         let model = data.message.model.as_ref().and_then(|model| {
@@ -668,6 +672,7 @@ fn read_usage_file(
             model,
             usage_limit_reset_time,
             missing_pricing_model,
+            stored_cost,
         };
         let mut advisor_entries = Vec::new();
         for (index, advisor) in advisor_usages_from_line(line).into_iter().enumerate() {
@@ -707,6 +712,7 @@ fn read_usage_file(
                 model: Some(advisor.model),
                 usage_limit_reset_time,
                 missing_pricing_model,
+                stored_cost: None,
             });
         }
         loaded_file.entries.push(entry);
@@ -1365,6 +1371,60 @@ mod tests {
     }
 
     #[test]
+    fn dedupes_response_message_id_from_same_session_at_distinct_timestamps() {
+        let fixture = fs_fixture!({
+            "projects/project-a/session-a/chat.jsonl": [
+                r#"{"timestamp":"2026-05-22T02:34:40.000Z","message":{"id":"resp_0123456789abcdef","model":"gpt-5.5","usage":{"input_tokens":100,"output_tokens":25}}}"#,
+                r#"{"timestamp":"2026-05-22T02:34:40.500Z","message":{"id":"resp_0123456789abcdef","model":"gpt-5.5","usage":{"input_tokens":100,"output_tokens":25}}}"#,
+            ]
+            .join("\n"),
+        });
+        let mut deduped_indexes = Default::default();
+        let mut deduped = Vec::new();
+
+        let loaded = read_usage_file(
+            &fixture.path("projects/project-a/session-a/chat.jsonl"),
+            None,
+            CostMode::Display,
+            None,
+        )
+        .unwrap();
+        for entry in loaded.entries {
+            push_deduped_entry(entry, &mut deduped_indexes, &mut deduped, false);
+        }
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].data.message.usage.output_tokens, 25);
+    }
+
+    #[test]
+    fn dedupes_repeated_requestless_writes_at_the_same_timestamp() {
+        let fixture = fs_fixture!({
+            "projects/project-a/session-a/chat.jsonl": [
+                r#"{"timestamp":"2026-05-22T02:34:40.000Z","message":{"id":"ocgo","model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"output_tokens":25}}}"#,
+                r#"{"timestamp":"2026-05-22T02:34:40.000Z","message":{"id":"ocgo","model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"output_tokens":250,"speed":"standard"}}}"#,
+            ]
+            .join("\n"),
+        });
+        let mut deduped_indexes = Default::default();
+        let mut deduped = Vec::new();
+
+        let loaded = read_usage_file(
+            &fixture.path("projects/project-a/session-a/chat.jsonl"),
+            None,
+            CostMode::Display,
+            None,
+        )
+        .unwrap();
+        for entry in loaded.entries {
+            push_deduped_entry(entry, &mut deduped_indexes, &mut deduped, false);
+        }
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].data.message.usage.output_tokens, 250);
+    }
+
+    #[test]
     fn dedupes_copied_transcripts_with_the_same_serialized_session_id() {
         let fixture = fs_fixture!({
             "projects/project-a/session-a/chat.jsonl": r#"{"timestamp":"2026-05-22T02:34:40.000Z","sessionId":"session-a","message":{"id":"ocgo","model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"output_tokens":1}}}"#,
@@ -1705,6 +1765,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         }
     }
 }

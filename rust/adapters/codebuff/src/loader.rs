@@ -31,6 +31,7 @@ fn load_entries_inner(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<L
         crate::cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
+            mode: shared.mode,
         },
         Freshness::FileStat,
         |file| {
@@ -92,6 +93,7 @@ fn to_loaded_entry(
         missing_pricing_model,
         message_count: None,
         data,
+        stored_cost: None,
     }
 }
 
@@ -250,6 +252,7 @@ mod tests {
             usage_limit_reset_time: None,
             missing_pricing_model: None,
             message_count: None,
+            stored_cost: None,
         };
         let rows = summarize_entries(&[entry], AgentReportKind::Daily).unwrap();
         let report = report_from_rows(&rows, AgentReportKind::Daily);

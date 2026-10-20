@@ -154,6 +154,7 @@ fn load_entries_from_directory_parts(
         db_entries.message_entries,
         shared.live_only,
         None,
+        shared.mode,
     ) {
         if !window.is_unbounded() && !window.contains(entry.timestamp.as_millis()) {
             continue;
@@ -180,6 +181,7 @@ fn load_entries_from_directory_parts(
         cache::CacheOpts {
             single_thread: shared.single_thread,
             live_only: shared.live_only,
+            mode: shared.mode,
         },
         cache::Freshness::FileStat,
         |path| read_message_file(path, tz.as_ref(), shared.mode, pricing.as_ref(), shared),
@@ -3434,6 +3436,7 @@ mod tests {
 
         let shared = SharedArgs {
             live_only: true,
+            mode: crate::cli::CostMode::Auto,
             ..display_shared()
         };
         let cold = load_entries_from_directory(fixture.root(), &shared).unwrap();

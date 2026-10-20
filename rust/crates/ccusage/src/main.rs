@@ -50,6 +50,11 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    pricing::set_embedded_snapshots(pricing::EmbeddedSnapshots {
+        litellm_pricing: ccusage_pricing_snapshots::LITELLM_PRICING,
+        models_dev_pricing: ccusage_pricing_snapshots::MODELS_DEV_PRICING,
+        models_dev_catalog_rules: ccusage_pricing_snapshots::MODELS_DEV_CATALOG_RULES,
+    });
     pricing::set_json_fetcher(http::fetch_json);
     let cli = cli::parse();
     match cli.command {
@@ -978,6 +983,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         };
 
         let rows = adapter::amp::summarize_entries(&[entry], AgentReportKind::Daily).unwrap();
@@ -1066,6 +1072,7 @@ mod tests {
             model: Some("gpt-5.4".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         };
 
         let rows = adapter::pi::summarize_entries(&[entry], AgentReportKind::Daily).unwrap();
@@ -1130,6 +1137,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         };
 
         let report =

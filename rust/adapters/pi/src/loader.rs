@@ -308,6 +308,7 @@ fn load_entries_from_paths(
             crate::cache::CacheOpts {
                 single_thread: shared.single_thread,
                 live_only: shared.live_only,
+                mode: shared.mode,
             },
             crate::cache::Freshness::FileStat,
             parse_cached,
@@ -361,6 +362,7 @@ fn load_entries_from_paths(
             entries,
             shared.live_only,
             None,
+            shared.mode,
         ));
     }
     if let Some(ledger_started) = ledger_started {

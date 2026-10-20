@@ -116,6 +116,7 @@ mod tests {
             model: Some("GLM-5.3".to_string()),
             usage_limit_reset_time: None,
             missing_pricing_model: None,
+            stored_cost: None,
         }
     }
 
@@ -287,6 +288,7 @@ mod tests {
                     model: Some(model.to_string()),
                     usage_limit_reset_time: None,
                     missing_pricing_model: None,
+                    stored_cost: None,
                 }
             },
         )
