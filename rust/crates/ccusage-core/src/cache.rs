@@ -1770,8 +1770,17 @@ fn merge_ledger_with(
             .filter(|k| !seen.contains(normalize_ledger_key(k).as_ref()))
             .cloned()
             .collect();
+        // The blob statement is prepared once and reused for every deleted key.
+        // Preparing it per key compiled the same SQL tens of thousands of times
+        // on a namespace that retains many entries.
+        let mut blob_statement = conn
+            .prepare(
+                "SELECT entry, recorded_cost FROM ledger WHERE namespace = ? AND dedup_key = ?",
+            )
+            .ok();
         for key in deleted_keys {
-            if let Some((blob, recorded_cost)) = load_ledger_row(conn, namespace, &key)
+            if let Some((blob, recorded_cost)) =
+                load_ledger_row(&mut blob_statement, namespace, &key)
                 && let Ok(entry) = postcard::from_bytes::<LedgerEntry>(&blob)
             {
                 if let Some((since, until)) = date_filter {
@@ -1880,14 +1889,17 @@ fn load_ledger_keys(
 
 /// Fetch the postcard-encoded entry blob and the recorded costUSD for one
 /// `(namespace, dedup_key)`, or `None` if the row is missing.
+///
+/// The statement is reused across keys: a namespace that retains many entries
+/// asks for thousands of rows, and preparing the SQL per row cost more than
+/// the lookup itself.
 fn load_ledger_row(
-    conn: &sqlite::Connection,
+    statement: &mut Option<sqlite::Statement<'_>>,
     namespace: &str,
     dedup_key: &str,
 ) -> Option<(Vec<u8>, Option<f64>)> {
-    let mut st = conn
-        .prepare("SELECT entry, recorded_cost FROM ledger WHERE namespace = ? AND dedup_key = ?")
-        .ok()?;
+    let st = statement.as_mut()?;
+    st.reset().ok()?;
     st.bind((1, namespace)).ok()?;
     st.bind((2, dedup_key)).ok()?;
     if let Ok(sqlite::State::Row) = st.next() {
