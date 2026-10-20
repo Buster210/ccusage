@@ -15937,9 +15937,9 @@
 	},
 	"google/gemma-4-26b-a4b-it:thinking": {
 		"cost": {
-			"cache_read": 0.0425,
-			"input": 0.0765,
-			"output": 0.255
+			"cache_read": 0.05,
+			"input": 0.09,
+			"output": 0.3
 		},
 		"limit": {
 			"context": 262144
@@ -35263,8 +35263,8 @@
 	},
 	"~deepseek/deepseek-pro-latest": {
 		"cost": {
-			"cache_read": 0.2,
-			"input": 0.2016,
+			"cache_read": 0.23,
+			"input": 0.225,
 			"output": 8
 		},
 		"exactOnly": true,
@@ -35274,9 +35274,9 @@
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
 		"cost": {
-			"cache_read": 0.00336,
-			"input": 0.0052,
-			"output": 0.12
+			"cache_read": 0.0114,
+			"input": 0.0114,
+			"output": 0.45
 		},
 		"limit": {
 			"context": 1048576
