@@ -3,11 +3,18 @@ name: release
 # Tagged releases: pushing a tag like `v20.0.27` builds the 6 standalone
 # binaries and publishes them as the GitHub release for that tag.
 # The tag must match the version in apps/ccusage/package.json (`v` prefix).
-# To ship: bump the version, commit, then `git tag v<version> && git push origin v<version>`.
+# To ship: bump the version, commit, then push `v<version>`. To retry an existing
+# tag without moving it, run this workflow manually with `release_tag` set.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build and publish
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -24,6 +31,11 @@ jobs:
     # Stock GitHub runners are small and the cache starts cold,
     # so allow headroom on the first runs.
     timeout-minutes: 60
+    # Both macOS targets use the shared macos-15-arm64 runner. Keep those
+    # matrix legs from competing for the same hosted runner at once.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform == 'darwin' && 'macos' || matrix.name }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/build-linux-native-package
@@ -91,6 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -116,12 +130,14 @@ jobs:
             cp "packages/ccusage-win32-$arch/bin/ccusage.exe" \
               "$GITHUB_WORKSPACE/dist/ccusage-win32-$arch.exe"
           done
-      - name: Read package version
+      - name: Read package version and commit
         id: version
-        run: echo "value=$(jq -r .version apps/ccusage/package.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "value=$(jq -r .version apps/ccusage/package.json)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Check tag matches package version
         env:
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ inputs.release_tag || github.ref_name }}
           PKG_VERSION: ${{ steps.version.outputs.value }}
         run: |
           if [ "$REF_NAME" != "v$PKG_VERSION" ]; then
@@ -131,7 +147,7 @@ jobs:
       - name: Publish tagged release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REF_NAME: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
+          REF_NAME: ${{ inputs.release_tag || github.ref_name }}
+          HEAD_SHA: ${{ steps.version.outputs.commit }}
         run: |
           gh release create "$REF_NAME" dist/* --title "ccusage $REF_NAME" --notes "Release $REF_NAME built from $HEAD_SHA."
