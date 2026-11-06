@@ -169,20 +169,19 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-nix-cache
-      - parallel:
-          - name: Run nix flake check
-            run: nix flake check --print-build-logs
-          - name: Run Rust tests
-            run: nix build .#ccusage-tests --print-build-logs
-          - name: JS test
-            run: |
-              nix profile install --inputs-from . .#pnpm nixpkgs#nodejs nixpkgs#just
-              pnpm install --frozen-lockfile
-              mkdir -p "$HOME/.claude/projects"
-              mkdir -p "$HOME/.config/claude/projects"
-              just test-node
-          - name: Babashka performance harness test
-            run: apps/ccusage/scripts/compare-pr-performance_test.clj
+      - name: Run nix flake check
+        run: nix flake check --print-build-logs
+      - name: Run Rust tests
+        run: nix build .#ccusage-tests --print-build-logs
+      - name: JS test
+        run: |
+          nix profile install --inputs-from . .#pnpm nixpkgs#nodejs nixpkgs#just
+          pnpm install --frozen-lockfile
+          mkdir -p "$HOME/.claude/projects"
+          mkdir -p "$HOME/.config/claude/projects"
+          just test-node
+      - name: Babashka performance harness test
+        run: apps/ccusage/scripts/compare-pr-performance_test.clj
       # The dev-profile test and hawk dependency layers are only reused if the
       # sticky disk keeps them, and this job roots nothing else. Rooting them in
       # the store's own gcroots protects them from the next trim (see
