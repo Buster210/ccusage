@@ -2,14 +2,15 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use jiff::tz::TimeZone as JiffTimeZone;
 
 use super::{
     parser::{
-        OpenCodeMessage, OpenCodeSessionAggregate, message_to_entry, reprice,
-        session_value_to_entry,
+        OpenCodeMessage, OpenCodeSessionAggregate, message_to_entry, native_claude_session,
+        reprice, session_message_value_to_entry, session_value_to_entry,
     },
     paths::paths,
 };
@@ -26,7 +27,24 @@ use crate::{
     parse_tz,
 };
 
-pub fn load_entries(shared: &SharedArgs, report_kind: AgentReportKind) -> Result<Vec<LoadedEntry>> {
+pub(crate) fn load_entries(
+    shared: &SharedArgs,
+    report_kind: AgentReportKind,
+) -> Result<Vec<LoadedEntry>> {
+    load_entries_with_native_sessions(shared, report_kind)
+        .map(|entries| entries.into_iter().map(|(entry, _)| entry).collect())
+}
+
+/// An entry and the Claude Code session its `claude-agent` row ran in.
+pub type LinkedEntry = (LoadedEntry, Option<Arc<str>>);
+
+/// Loads OpenCode usage entries, each paired with the Claude Code session its
+/// `claude-agent` row ran in, so a unified report can skip the turns the
+/// Claude source already counts.
+pub fn load_entries_with_native_sessions(
+    shared: &SharedArgs,
+    report_kind: AgentReportKind,
+) -> Result<Vec<LinkedEntry>> {
     let allow_aggregate_fallback = report_kind == AgentReportKind::Session;
     crate::progress::track_usage_load(
         crate::progress::UsageLoadAgent("OpenCode"),
@@ -38,7 +56,7 @@ pub fn load_entries(shared: &SharedArgs, report_kind: AgentReportKind) -> Result
 fn load_entries_inner(
     shared: &SharedArgs,
     allow_aggregate_fallback: bool,
-) -> Result<Vec<LoadedEntry>> {
+) -> Result<Vec<LinkedEntry>> {
     let mut entries = Vec::new();
     let mut seen = FxHashSet::default();
     let mut message_sessions = FxHashSet::default();
@@ -46,14 +64,14 @@ fn load_entries_inner(
     for path in paths()? {
         let directory_entries =
             load_entries_from_directory_parts(&path, shared, allow_aggregate_fallback)?;
-        for entry in directory_entries.message_entries {
-            message_sessions.insert(entry.session_id.to_string());
-            if let Some(id) = entry_id(&entry)
+        for linked in directory_entries.message_entries {
+            message_sessions.insert(linked.0.session_id.to_string());
+            if let Some(id) = entry_id(&linked.0)
                 && !seen.insert(id.to_string())
             {
                 continue;
             }
-            entries.push(entry);
+            entries.push(linked);
         }
         aggregate_entries.extend(directory_entries.aggregate_entries);
     }
@@ -63,7 +81,7 @@ fn load_entries_inner(
         &message_sessions,
         aggregate_entries,
     );
-    entries.sort_by_key(|entry| entry.timestamp);
+    entries.sort_by_key(|(entry, _)| entry.timestamp);
     Ok(entries)
 }
 
@@ -72,18 +90,7 @@ fn load_entries_from_directory(
     opencode_dir: &Path,
     shared: &SharedArgs,
 ) -> Result<Vec<LoadedEntry>> {
-    let directory_entries = load_entries_from_directory_parts(opencode_dir, shared, false)?;
-    let message_sessions = message_session_ids(&directory_entries.message_entries);
-    let mut seen = entry_ids(&directory_entries.message_entries);
-    let mut entries = directory_entries.message_entries;
-    append_aggregate_entries(
-        &mut entries,
-        &mut seen,
-        &message_sessions,
-        directory_entries.aggregate_entries,
-    );
-    entries.sort_by_key(|entry| entry.timestamp);
-    Ok(entries)
+    load_entries_from_directory_for_report(opencode_dir, shared, AgentReportKind::Daily)
 }
 
 #[cfg(test)]
@@ -106,8 +113,8 @@ fn load_entries_from_directory_for_report(
         &message_sessions,
         directory_entries.aggregate_entries,
     );
-    entries.sort_by_key(|entry| entry.timestamp);
-    Ok(entries)
+    entries.sort_by_key(|(entry, _)| entry.timestamp);
+    Ok(entries.into_iter().map(|(entry, _)| entry).collect())
 }
 
 fn load_entries_from_directory_parts(
@@ -156,10 +163,10 @@ fn load_entries_from_directory_parts(
         None,
         shared.mode,
     ) {
-        if !window.is_unbounded() && !window.contains(entry.timestamp.as_millis()) {
+        if !window.is_unbounded() && !window.contains(entry.0.timestamp.as_millis()) {
             continue;
         }
-        if let Some(id) = entry_id(&entry)
+        if let Some(id) = entry_id(&entry.0)
             && !seen.insert(id.to_string())
         {
             continue;
@@ -199,7 +206,7 @@ fn load_entries_from_directory_parts(
         {
             continue;
         }
-        message_entries.push(entry);
+        message_entries.push((entry, None));
     }
 
     Ok(DirectoryLoadResult {
@@ -284,14 +291,14 @@ struct DatabaseLoadContext<'a> {
 
 #[derive(Default)]
 struct DatabaseLoadResult {
-    message_entries: Vec<LoadedEntry>,
-    aggregate_entries: Vec<LoadedEntry>,
+    message_entries: Vec<LinkedEntry>,
+    aggregate_entries: Vec<LinkedEntry>,
 }
 
 #[derive(Default)]
 struct DirectoryLoadResult {
-    message_entries: Vec<LoadedEntry>,
-    aggregate_entries: Vec<LoadedEntry>,
+    message_entries: Vec<LinkedEntry>,
+    aggregate_entries: Vec<LinkedEntry>,
 }
 
 fn fallback_from_cache(
@@ -304,10 +311,10 @@ fn fallback_from_cache(
     }
     let mut entries: Vec<_> = cached
         .into_values()
-        .map(|row| LoadedEntry::from(row.entry))
+        .map(|row| (LoadedEntry::from(row.entry), None))
         .collect();
     for entry in &mut entries {
-        reprice(entry, mode, pricing);
+        reprice(&mut entry.0, mode, pricing);
     }
     // Aggregates never come from the row cache: they are a live-computed
     // session-report fallback, suppressed whenever message-level usage exists.
@@ -433,7 +440,7 @@ fn load_entries_from_database(
     // parses are repriced idempotently) so cost reflects current pricing/mode
     // without reparsing. Ledger-frozen entries are merged later and untouched.
     for entry in &mut entries {
-        reprice(entry, mode, pricing);
+        reprice(&mut entry.0, mode, pricing);
     }
 
     // Session aggregates (upstream): cumulative per-session rows used only as a
@@ -454,7 +461,7 @@ fn load_entries_from_database(
         }
         let message_sessions: FxHashSet<String> = entries
             .iter()
-            .map(|entry| entry.session_id.to_string())
+            .map(|entry| entry.0.session_id.to_string())
             .collect();
         let mut seen_message_ids = entry_ids(&entries);
         let aggregate_context = DatabaseLoadContext {
@@ -470,7 +477,7 @@ fn load_entries_from_database(
                 if message_sessions.contains(entry.session_id.as_ref()) {
                     continue;
                 }
-                push_unique_entry(&mut aggregate_entries, &mut seen_message_ids, entry);
+                push_unique_entry(&mut aggregate_entries, &mut seen_message_ids, (entry, None));
             }
         }
     }
@@ -513,7 +520,11 @@ fn scan_message_table(
     shared: &SharedArgs,
     window: DateWindow,
     fork_copies: &FxHashMap<String, i64>,
-) -> (Vec<LoadedEntry>, Vec<OpenCodeRow>, bool, bool) {
+) -> (Vec<LinkedEntry>, Vec<OpenCodeRow>, bool, bool) {
+    // `session_message` rows carry `seq` and `time_created` after the three
+    // shared columns; older schemas have neither, and every row is then kept
+    // and dated from its payload alone.
+    let columns = MessageRowColumns::for_table(connection, table);
     // Push the window into SQL only while a sample of `time_created` still looks
     // millisecond-scaled. The sample cannot prove the whole column is, which is
     // why the payload check in the loop stays authoritative either way.
@@ -529,7 +540,7 @@ fn scan_message_table(
         );
         DateWindow::UNBOUNDED
     };
-    let statement = prepare_message_query(connection, table, pushdown).or_else(|| {
+    let statement = prepare_message_query(connection, table, &columns, pushdown).or_else(|| {
         // A pre-SQLite-era schema has no `time_created` column, so the filtered
         // query cannot prepare. Scan unfiltered rather than return nothing.
         debug_log(
@@ -539,7 +550,7 @@ fn scan_message_table(
                 db_path.display()
             ),
         );
-        prepare_message_query(connection, table, DateWindow::UNBOUNDED)
+        prepare_message_query(connection, table, &columns, DateWindow::UNBOUNDED)
     });
     let Some(mut statement) = statement else {
         debug_log(
@@ -561,10 +572,9 @@ fn scan_message_table(
                 // Fork-copied history rows are inherited, not generated:
                 // drop them before the window check and the row cache so
                 // they neither count nor get served back from the cache.
-                // `seq` is selected only for `session_message`; without a
-                // readable `seq` the row cannot be classified, so it stays.
+                // Without a readable `seq` the row cannot be classified, so it stays.
                 if table == "session_message"
-                    && is_fork_copy(fork_copies, &session_id, statement.read::<i64, _>(3).ok())
+                    && is_fork_copy(fork_copies, &session_id, columns.seq(&statement))
                 {
                     continue;
                 }
@@ -575,6 +585,15 @@ fn scan_message_table(
                     continue;
                 }
 
+                // The link names the Claude transcript holding the same turns, so
+                // the unified report can skip the copy. Reading it from the payload
+                // keeps it on a cache hit, where the cached entry has no link.
+                let linked = if table == "session_message" {
+                    native_claude_session(&data)
+                } else {
+                    None
+                };
+
                 let mut hasher = crate::fast::FxHasher::default();
                 data.hash(&mut hasher);
                 let content_hash = hasher.finish();
@@ -583,32 +602,52 @@ fn scan_message_table(
                 if let Some(row) = cached.get(&id)
                     && row.content_hash == content_hash
                 {
-                    entries.push(LoadedEntry::from(row.entry.clone()));
+                    entries.push((LoadedEntry::from(row.entry.clone()), linked));
                     fresh_rows.push(row.clone());
                     continue;
                 }
 
-                let msg = match serde_json::from_str::<OpenCodeMessage>(&data) {
-                    Ok(msg) => msg,
-                    Err(error) => {
-                        debug_log(
-                            shared,
-                            format!(
-                                "Failed to read OpenCode database message {}: {error}",
-                                db_path.display()
-                            ),
-                        );
-                        continue;
+                // V2 rows carry the creation time outside the payload; the parser
+                // falls back to it when the payload has none.
+                let parsed = if table == "session_message" {
+                    session_message_value_to_entry(
+                        &data,
+                        id.clone(),
+                        session_id,
+                        columns.created(&statement).unwrap_or(0),
+                        tz,
+                        mode,
+                        pricing,
+                    )
+                } else {
+                    match serde_json::from_str::<OpenCodeMessage>(&data) {
+                        Ok(msg) => message_to_entry(
+                            &msg,
+                            Some(id.clone()),
+                            Some(session_id),
+                            tz,
+                            mode,
+                            pricing,
+                        )
+                        .map(|entry| (entry, None)),
+                        Err(error) => {
+                            debug_log(
+                                shared,
+                                format!(
+                                    "Failed to read OpenCode database message {}: {error}",
+                                    db_path.display()
+                                ),
+                            );
+                            None
+                        }
                     }
                 };
-                if let Some(entry) =
-                    message_to_entry(&msg, Some(id.clone()), Some(session_id), tz, mode, pricing)
-                {
+                if let Some(entry) = parsed {
                     dirty = true;
                     fresh_rows.push(OpenCodeRow {
                         id,
                         content_hash,
-                        entry: cache::CachedEntry::from(&entry),
+                        entry: cache::CachedEntry::from(&entry.0),
                     });
                     entries.push(entry);
                 }
@@ -659,11 +698,11 @@ fn read_message_file(
 }
 
 fn push_unique_entry(
-    entries: &mut Vec<LoadedEntry>,
+    entries: &mut Vec<LinkedEntry>,
     seen_message_ids: &mut FxHashSet<String>,
-    entry: LoadedEntry,
+    entry: LinkedEntry,
 ) -> bool {
-    if let Some(id) = entry_id(&entry)
+    if let Some(id) = entry_id(&entry.0)
         && !seen_message_ids.insert(id.to_string())
     {
         return false;
@@ -672,38 +711,39 @@ fn push_unique_entry(
     true
 }
 
-fn entry_ids(entries: &[LoadedEntry]) -> FxHashSet<String> {
+fn entry_ids(entries: &[LinkedEntry]) -> FxHashSet<String> {
     entries
         .iter()
-        .filter_map(entry_id)
+        .filter_map(|(entry, _)| entry_id(entry))
         .map(str::to_string)
         .collect()
 }
 
 #[cfg(test)]
-fn message_session_ids(entries: &[LoadedEntry]) -> FxHashSet<String> {
+#[cfg(test)]
+fn message_session_ids(entries: &[LinkedEntry]) -> FxHashSet<String> {
     entries
         .iter()
-        .map(|entry| entry.session_id.to_string())
+        .map(|(entry, _)| entry.session_id.to_string())
         .collect()
 }
 
 fn append_aggregate_entries(
-    entries: &mut Vec<LoadedEntry>,
+    entries: &mut Vec<LinkedEntry>,
     seen: &mut FxHashSet<String>,
     message_sessions: &FxHashSet<String>,
-    aggregate_entries: Vec<LoadedEntry>,
+    aggregate_entries: Vec<LinkedEntry>,
 ) {
-    for entry in aggregate_entries {
-        if message_sessions.contains(entry.session_id.as_ref()) {
+    for linked in aggregate_entries {
+        if message_sessions.contains(linked.0.session_id.as_ref()) {
             continue;
         }
-        if let Some(id) = entry_id(&entry)
+        if let Some(id) = entry_id(&linked.0)
             && !seen.insert(id.to_string())
         {
             continue;
         }
-        entries.push(entry);
+        entries.push(linked);
     }
 }
 
@@ -1135,21 +1175,61 @@ impl DateWindow {
 /// subquery is answered from that index alone, leaving only in-range rows to be
 /// fetched by primary key — the difference is what keeps a narrow window off the
 /// gigabytes of payload it does not need.
+/// Columns a message table selects after `id, session_id, data`, in select order.
+#[derive(Debug, Default)]
+struct MessageRowColumns {
+    seq: bool,
+    time_created: bool,
+}
+
+impl MessageRowColumns {
+    fn for_table(connection: &sqlite::Connection, table: &str) -> Self {
+        if table != "session_message" {
+            return Self::default();
+        }
+        let columns = table_columns(connection, "session_message");
+        Self {
+            seq: columns.contains("seq"),
+            time_created: columns.contains("time_created"),
+        }
+    }
+
+    fn select_list(&self) -> String {
+        let mut extra = String::new();
+        if self.seq {
+            extra.push_str(", seq");
+        }
+        if self.time_created {
+            extra.push_str(", time_created");
+        }
+        extra
+    }
+
+    fn seq(&self, statement: &sqlite::Statement<'_>) -> Option<i64> {
+        self.seq.then(|| statement.read::<i64, _>(3).ok()).flatten()
+    }
+
+    fn created(&self, statement: &sqlite::Statement<'_>) -> Option<i64> {
+        if !self.time_created {
+            return None;
+        }
+        let index = 3 + usize::from(self.seq);
+        statement.read::<i64, _>(index).ok().or_else(|| {
+            statement
+                .read::<f64, _>(index)
+                .ok()
+                .map(|value| value as i64)
+        })
+    }
+}
+
 fn prepare_message_query<'c>(
     connection: &'c sqlite::Connection,
     table: &str,
+    columns: &MessageRowColumns,
     window: DateWindow,
 ) -> Option<sqlite::Statement<'c>> {
-    // Fork-copy exclusion needs each `session_message` row's `seq` at
-    // select index 3. Older schemas lack the column, in which case every
-    // row is kept; the legacy `message` table never has it.
-    let seq_column = if table == "session_message"
-        && table_columns(connection, "session_message").contains("seq")
-    {
-        ", seq"
-    } else {
-        ""
-    };
+    let seq_column = columns.select_list();
     let sql = match (window.start, window.end) {
         (Some(_), Some(_)) => format!(
             "SELECT id, session_id, data{seq_column} FROM {table} WHERE id IN \
@@ -1213,6 +1293,7 @@ mod tests {
 
     use super::{
         load_entries, load_entries_from_directory, load_entries_from_directory_for_report,
+        load_entries_with_native_sessions,
     };
     use crate::cli::{AgentReportKind, CostMode, SharedArgs};
     use ccusage_test_support::{CacheEnv, EnvVarsGuard, fs_fixture};
@@ -2469,6 +2550,82 @@ mod tests {
         assert!(session_entries.iter().any(|entry| {
             entry.data.message.id.as_deref() == Some("session:period-aggregate-session")
         }));
+    }
+
+    #[test]
+    fn pairs_claude_agent_rows_with_their_claude_session_across_data_dirs() {
+        // The real cache's `opencode-db` ledger would re-emit every retained
+        // message of the developer's own data dirs into this fixture's output.
+        let _cache_env = CacheEnv::new("opencode-pairs-claude-agent-rows-across-data-dirs");
+        let live = fs_fixture!({});
+        let live_db = live.path("opencode.db");
+        create_db_session_message_table(&live_db, true);
+        for (id, session_id, data) in [
+            (
+                "agent",
+                "agent-session",
+                r#"{"time":{"created":1767312000000},"model":{"id":"opus","providerID":"claude-agent"},"content":[{"type":"tool","native":{"sessionID":"claude-a","messageID":"m"}}],"tokens":{"input":100},"cost":0}"#,
+            ),
+            (
+                "plain",
+                "plain-session",
+                r#"{"time":{"created":1767312000000},"model":{"id":"gpt-test","providerID":"openai"},"content":[{"type":"text","text":"\"native\": not a part"}],"tokens":{"input":5},"cost":0}"#,
+            ),
+        ] {
+            insert_db_session_message(
+                &live_db,
+                id,
+                session_id,
+                "assistant",
+                1_767_312_000_000,
+                data,
+                true,
+            );
+        }
+        let archive = fs_fixture!({});
+        let archive_db = archive.path("opencode.db");
+        create_db_session_aggregate_table(&archive_db, "session_v2");
+        insert_db_session_aggregate(
+            &archive_db,
+            "session_v2",
+            &SessionAggregateFixture {
+                session_id: "agent-session",
+                time_created: 1_767_312_000_000,
+                model: r#"{"id":"opus","providerID":"claude-agent"}"#,
+                cost: 0.0,
+                input_tokens: 9_999,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        );
+        let _guard = EnvVarsGuard::set_many([(
+            "OPENCODE_DATA_DIR",
+            Some(OsString::from(format!(
+                "{},{}",
+                live.root().display(),
+                archive.root().display()
+            ))),
+        )]);
+        let shared = SharedArgs {
+            mode: CostMode::Display,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+
+        let entries = load_entries_with_native_sessions(&shared, AgentReportKind::Session).unwrap();
+        let linked = entries
+            .iter()
+            .map(|(entry, native_session)| {
+                (
+                    entry.data.message.id.as_deref().unwrap(),
+                    native_session.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(linked, [("agent", Some("claude-a")), ("plain", None)]);
     }
 
     #[test]

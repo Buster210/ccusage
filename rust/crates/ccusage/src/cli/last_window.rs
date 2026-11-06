@@ -1,5 +1,6 @@
 use ccusage_cli::{AgentCommandArgs, AgentReportKind, Command, SharedArgs, WeekDay};
-use ccusage_core::{PeriodUnit, format_date, last_periods_since, utc_now};
+use ccusage_core::utc_now;
+use ccusage_report::{PeriodUnit, format_date, last_periods_since};
 
 use super::Cli;
 
@@ -62,8 +63,8 @@ fn window_target(cli: &mut Cli) -> Option<(&mut SharedArgs, PeriodUnit, WeekDay)
     }
 }
 
-/// Every report that buckets by week outside of `ccusage claude weekly` starts
-/// the week on Monday, so the window has to as well.
+/// Weeks start on Monday unless a weekly report sets `--start-of-week`, so the
+/// window has to as well.
 const UNIFIED_WEEK_START: WeekDay = WeekDay::Monday;
 
 fn agent_window_target(
@@ -75,11 +76,14 @@ fn agent_window_target(
         AgentReportKind::Monthly => PeriodUnit::Month,
         AgentReportKind::Session => return None,
     };
-    Some((&mut args.shared, unit, UNIFIED_WEEK_START))
+    let start_of_week = args.start_of_week;
+    Some((&mut args.shared, unit, start_of_week))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use ccusage_cli::{CodexSpeed, SortOrder, WeeklyArgs};
 
     use super::*;
@@ -102,6 +106,8 @@ mod tests {
             pi_path: None,
             open_claw_path: None,
             codex_speed: CodexSpeed::Auto,
+            start_of_week: WeekDay::Monday,
+            sources: BTreeMap::new(),
         }
     }
 
@@ -155,6 +161,20 @@ mod tests {
         assert_eq!(
             since,
             last_periods_since(PeriodUnit::Week, 1, &today, WeekDay::Sunday)
+        );
+    }
+
+    #[test]
+    fn keeps_the_unified_weekly_start_of_week() {
+        let since = resolved_since(Command::All(AgentCommandArgs {
+            start_of_week: WeekDay::Wednesday,
+            ..agent_command(AgentReportKind::Weekly, 1)
+        }));
+
+        let today = format_date(utc_now(), Some("UTC"));
+        assert_eq!(
+            since,
+            last_periods_since(PeriodUnit::Week, 1, &today, WeekDay::Wednesday)
         );
     }
 

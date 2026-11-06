@@ -123,7 +123,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tirith-sarif
-      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: results.sarif
           category: tirith
@@ -136,7 +136,9 @@ jobs:
   # local git hooks never run). Both are existing flake checks, so this reuses
   # their exact behavior instead of re-specifying flags here. The heavy test job
   # re-runs them inside `nix flake check`; that is intentional duplication so the
-  # gate can fail fast before any build/test work starts.
+  # gate can still fail the run early. Build and test jobs start alongside it
+  # instead of waiting on it: it takes ~45s and sat on the critical path ahead
+  # of the slowest build, and `ci-gate` still requires it to pass.
   preflight:
     name: security & lint preflight
     runs-on: ubuntu-latest
@@ -153,7 +155,7 @@ jobs:
         run: nix build --print-build-logs .#checks.x86_64-linux.gitleaks .#checks.x86_64-linux.treefmt
 
   test:
-    needs: [changes, tirith-scan, preflight]
+    needs: [changes, tirith-scan]
     if: needs.changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -181,9 +183,21 @@ jobs:
               just test-node
           - name: Babashka performance harness test
             run: apps/ccusage/scripts/compare-pr-performance_test.clj
+      # The dev-profile test and hawk dependency layers are only reused if the
+      # sticky disk keeps them, and this job roots nothing else. Rooting them in
+      # the store's own gcroots protects them from the next trim (see
+      # build-linux-native-package); only main commits the disk, so PRs skip it.
+      - name: Root test dependency layers for the sticky disk
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          mkdir -p /nix/var/nix/gcroots/ci
+          nix build .#ccusage-tests.passthru.cargoArtifacts \
+            --out-link /nix/var/nix/gcroots/ci/ccusage-test-deps
+          nix build .#ccusage-tests.passthru.hawkArtifacts \
+            --out-link /nix/var/nix/gcroots/ci/ccusage-hawk-deps
 
   build-native-packages:
-    needs: [changes, tirith-scan, preflight]
+    needs: [changes, tirith-scan]
     if: needs.changes.outputs.code-changed == 'true'
     name: ${{ matrix.name }}
     permissions:

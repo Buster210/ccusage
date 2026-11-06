@@ -1,4 +1,4 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 use crate::arg_parser::ArgParser;
 use crate::help::{print_help_and_exit, print_version_and_exit};
@@ -47,6 +47,8 @@ impl RootAllOptions {
             pi_path: None,
             open_claw_path: None,
             codex_speed: CodexSpeed::Auto,
+            start_of_week: WeekDay::Monday,
+            sources: BTreeMap::new(),
         }
     }
 }
@@ -429,13 +431,29 @@ fn parse_all_command(
     parser: &mut ArgParser,
     mut shared: SharedArgs,
     kind: AgentReportKind,
-    _config: &dyn CliConfig,
+    config: &dyn CliConfig,
     initial_options: RootAllOptions,
 ) -> Result<Command, String> {
     let mut sections = initial_options.sections;
     let mut by_agent = initial_options.by_agent;
+    let mut start_of_week = WeekDay::Monday;
+    if kind == AgentReportKind::Weekly {
+        let mut weekly = WeeklyArgs {
+            shared: SharedArgs::with_defaults(),
+            start_of_week,
+        };
+        config.apply_weekly_args(&mut weekly);
+        start_of_week = weekly.start_of_week;
+    }
     while parser.peek().is_some() {
         if parse_unified_report_arg(parser, &mut sections, &mut by_agent)?.is_some() {
+            continue;
+        }
+        if kind == AgentReportKind::Weekly
+            && matches!(parser.peek_name(), Some("-w" | "--start-of-week"))
+        {
+            parser.next_flag()?;
+            start_of_week = parse_week_day(&parser.value_for("--start-of-week")?)?;
             continue;
         }
         parse_shared_arg(parser, &mut shared)?;
@@ -449,6 +467,8 @@ fn parse_all_command(
         pi_path: None,
         open_claw_path: None,
         codex_speed: CodexSpeed::Auto,
+        start_of_week,
+        sources: BTreeMap::new(),
     }))
 }
 
@@ -493,6 +513,8 @@ fn parse_top_level_session_command(
         pi_path: None,
         open_claw_path: None,
         codex_speed: CodexSpeed::Auto,
+        start_of_week: WeekDay::Monday,
+        sources: BTreeMap::new(),
     }))
 }
 
@@ -655,6 +677,8 @@ fn parse_codex_command(
         pi_path: None,
         open_claw_path: None,
         codex_speed,
+        start_of_week: WeekDay::Monday,
+        sources: BTreeMap::new(),
     }))
 }
 
@@ -685,6 +709,8 @@ fn parse_pi_command(
         pi_path,
         open_claw_path: None,
         codex_speed,
+        start_of_week: WeekDay::Monday,
+        sources: BTreeMap::new(),
     }))
 }
 
@@ -715,6 +741,8 @@ fn parse_openclaw_command(
         pi_path: None,
         open_claw_path,
         codex_speed,
+        start_of_week: WeekDay::Monday,
+        sources: BTreeMap::new(),
     }))
 }
 
@@ -746,6 +774,8 @@ fn agent_command_args(shared: SharedArgs, kind: AgentReportKind) -> AgentCommand
         pi_path: None,
         open_claw_path: None,
         codex_speed: CodexSpeed::Auto,
+        start_of_week: WeekDay::Monday,
+        sources: BTreeMap::new(),
     }
 }
 

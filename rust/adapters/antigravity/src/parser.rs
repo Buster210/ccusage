@@ -144,21 +144,15 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
     let fallback_timestamp = file_modified_timestamp(path);
     let connection =
         sqlite::Connection::open_with_flags(path, sqlite::OpenFlags::new().with_read_only())
-            .map_err(|error| {
-                cli_error(format!(
-                    "Failed to open Antigravity database '{}': {error}",
-                    path.display()
-                ))
-            })?;
+            .map_err(|error| cli_error(format!("Failed to open Antigravity database: {error}")))?;
     connection
         .execute("BEGIN DEFERRED TRANSACTION")
         .map_err(|error| {
             cli_error(format!(
-                "Failed to start an Antigravity database snapshot for '{}': {error}",
-                path.display()
+                "Failed to start an Antigravity database snapshot: {error}"
             ))
         })?;
-    if database_snapshot_is_empty(&connection, path)? {
+    if database_snapshot_is_empty(&connection)? {
         return Ok(None);
     }
     let session_id = path
@@ -166,9 +160,9 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
         .and_then(|stem| stem.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let trajectory_timestamp = read_trajectory_timestamp(&connection, path)?;
-    let generation_rows = read_generation_rows(&connection, path)?;
-    let step_rows = read_step_rows(&connection, path)?;
+    let trajectory_timestamp = read_trajectory_timestamp(&connection)?;
+    let generation_rows = read_generation_rows(&connection)?;
+    let step_rows = read_step_rows(&connection)?;
     let generation_model = generation_rows.iter().rev().find_map(|(_, metadata)| {
         metadata
             .model
@@ -287,71 +281,46 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
     Ok(Some(events))
 }
 
-fn database_snapshot_is_empty(connection: &sqlite::Connection, path: &Path) -> Result<bool> {
-    let mut statement = connection.prepare("PRAGMA page_count").map_err(|error| {
-        cli_error(format!(
-            "Failed to inspect Antigravity database '{}': {error}",
-            path.display()
-        ))
-    })?;
+fn database_snapshot_is_empty(connection: &sqlite::Connection) -> Result<bool> {
+    let mut statement = connection
+        .prepare("PRAGMA page_count")
+        .map_err(|error| cli_error(format!("Failed to inspect Antigravity database: {error}")))?;
     if !matches!(
         statement.next().map_err(|error| {
-            cli_error(format!(
-                "Failed to inspect Antigravity database '{}': {error}",
-                path.display()
-            ))
+            cli_error(format!("Failed to inspect Antigravity database: {error}"))
         })?,
         sqlite::State::Row
     ) {
-        return Err(cli_error(format!(
-            "Failed to inspect Antigravity database '{}': page count is unavailable",
-            path.display()
-        )));
+        return Err(cli_error(
+            "Failed to inspect Antigravity database: page count is unavailable",
+        ));
     }
-    let page_count = statement.read::<i64, _>(0).map_err(|error| {
-        cli_error(format!(
-            "Failed to inspect Antigravity database '{}': {error}",
-            path.display()
-        ))
-    })?;
+    let page_count = statement
+        .read::<i64, _>(0)
+        .map_err(|error| cli_error(format!("Failed to inspect Antigravity database: {error}")))?;
     Ok(page_count == 0)
 }
 
-fn read_generation_rows(
-    connection: &sqlite::Connection,
-    path: &Path,
-) -> Result<Vec<(i64, GeneratorMetadata)>> {
+fn read_generation_rows(connection: &sqlite::Connection) -> Result<Vec<(i64, GeneratorMetadata)>> {
     let mut statement = connection
         .prepare("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
-        .map_err(|error| {
-            cli_error(format!(
-                "Failed to query Antigravity database '{}': {error}",
-                path.display()
-            ))
-        })?;
+        .map_err(|error| cli_error(format!("Failed to query Antigravity database: {error}")))?;
     let mut rows = Vec::new();
-    while let sqlite::State::Row = statement.next().map_err(|error| {
-        cli_error(format!(
-            "Failed to iterate Antigravity database '{}': {error}",
-            path.display()
-        ))
-    })? {
-        let idx = statement.read::<i64, _>(0).map_err(|error| {
-            cli_error(format!(
-                "Failed to read Antigravity row index in '{}': {error}",
-                path.display()
-            ))
-        })?;
+    while let sqlite::State::Row = statement
+        .next()
+        .map_err(|error| cli_error(format!("Failed to iterate Antigravity database: {error}")))?
+    {
+        let idx = statement
+            .read::<i64, _>(0)
+            .map_err(|error| cli_error(format!("Failed to read Antigravity row index: {error}")))?;
         let blob = statement.read::<Vec<u8>, _>(1).map_err(|error| {
             cli_error(format!(
-                "Failed to read Antigravity metadata row {idx} in '{}': {error}",
-                path.display()
+                "Failed to read Antigravity metadata row {idx}: {error}"
             ))
         })?;
         let metadata = parse_generator_metadata(&blob).map_err(|error| {
             cli_error(format!(
-                "Failed to parse Antigravity metadata row {idx} in '{}': {error}",
-                path.display()
+                "Failed to parse Antigravity metadata row {idx}: {error}"
             ))
         })?;
         rows.push((idx, metadata));
@@ -359,11 +328,8 @@ fn read_generation_rows(
     Ok(rows)
 }
 
-fn read_step_rows(
-    connection: &sqlite::Connection,
-    path: &Path,
-) -> Result<Vec<(i64, StepMetadata)>> {
-    if !table_exists(connection, "steps", path)? {
+fn read_step_rows(connection: &sqlite::Connection) -> Result<Vec<(i64, StepMetadata)>> {
+    if !table_exists(connection, "steps")? {
         return Ok(Vec::new());
     }
     let mut statement = connection
@@ -371,35 +337,23 @@ fn read_step_rows(
             "SELECT idx, metadata FROM steps \
              WHERE metadata IS NOT NULL ORDER BY idx ASC",
         )
-        .map_err(|error| {
-            cli_error(format!(
-                "Failed to query Antigravity steps in '{}': {error}",
-                path.display()
-            ))
-        })?;
+        .map_err(|error| cli_error(format!("Failed to query Antigravity steps: {error}")))?;
     let mut rows = Vec::new();
-    while let sqlite::State::Row = statement.next().map_err(|error| {
-        cli_error(format!(
-            "Failed to iterate Antigravity steps in '{}': {error}",
-            path.display()
-        ))
-    })? {
+    while let sqlite::State::Row = statement
+        .next()
+        .map_err(|error| cli_error(format!("Failed to iterate Antigravity steps: {error}")))?
+    {
         let idx = statement.read::<i64, _>(0).map_err(|error| {
-            cli_error(format!(
-                "Failed to read Antigravity step index in '{}': {error}",
-                path.display()
-            ))
+            cli_error(format!("Failed to read Antigravity step index: {error}"))
         })?;
         let blob = statement.read::<Vec<u8>, _>(1).map_err(|error| {
             cli_error(format!(
-                "Failed to read Antigravity step metadata {idx} in '{}': {error}",
-                path.display()
+                "Failed to read Antigravity step metadata {idx}: {error}"
             ))
         })?;
         let metadata = parse_step_metadata(&blob).map_err(|error| {
             cli_error(format!(
-                "Failed to parse Antigravity step metadata row {idx} in '{}': {error}",
-                path.display()
+                "Failed to parse Antigravity step metadata row {idx}: {error}"
             ))
         })?;
         rows.push((idx, metadata));
@@ -407,38 +361,31 @@ fn read_step_rows(
     Ok(rows)
 }
 
-fn read_trajectory_timestamp(
-    connection: &sqlite::Connection,
-    path: &Path,
-) -> Result<Option<TimestampMs>> {
-    if !table_exists(connection, "trajectory_metadata_blob", path)? {
+fn read_trajectory_timestamp(connection: &sqlite::Connection) -> Result<Option<TimestampMs>> {
+    if !table_exists(connection, "trajectory_metadata_blob")? {
         return Ok(None);
     }
     let mut statement = connection
         .prepare("SELECT data FROM trajectory_metadata_blob ORDER BY rowid ASC")
         .map_err(|error| {
             cli_error(format!(
-                "Failed to query Antigravity trajectory metadata in '{}': {error}",
-                path.display()
+                "Failed to query Antigravity trajectory metadata: {error}"
             ))
         })?;
     let mut timestamp = None;
     while let sqlite::State::Row = statement.next().map_err(|error| {
         cli_error(format!(
-            "Failed to iterate Antigravity trajectory metadata in '{}': {error}",
-            path.display()
+            "Failed to iterate Antigravity trajectory metadata: {error}"
         ))
     })? {
         let blob = statement.read::<Vec<u8>, _>(0).map_err(|error| {
             cli_error(format!(
-                "Failed to read Antigravity trajectory metadata in '{}': {error}",
-                path.display()
+                "Failed to read Antigravity trajectory metadata: {error}"
             ))
         })?;
         let candidate = parse_trajectory_timestamp(&blob).map_err(|error| {
             cli_error(format!(
-                "Failed to parse Antigravity trajectory metadata in '{}': {error}",
-                path.display()
+                "Failed to parse Antigravity trajectory metadata: {error}"
             ))
         })?;
         if timestamp.is_none() {
@@ -448,27 +395,16 @@ fn read_trajectory_timestamp(
     Ok(timestamp)
 }
 
-fn table_exists(connection: &sqlite::Connection, table: &str, path: &Path) -> Result<bool> {
+fn table_exists(connection: &sqlite::Connection, table: &str) -> Result<bool> {
     let mut statement = connection
         .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")
-        .map_err(|error| {
-            cli_error(format!(
-                "Failed to inspect Antigravity database '{}': {error}",
-                path.display()
-            ))
-        })?;
-    statement.bind((1, table)).map_err(|error| {
-        cli_error(format!(
-            "Failed to inspect Antigravity database '{}': {error}",
-            path.display()
-        ))
-    })?;
+        .map_err(|error| cli_error(format!("Failed to inspect Antigravity database: {error}")))?;
+    statement
+        .bind((1, table))
+        .map_err(|error| cli_error(format!("Failed to inspect Antigravity database: {error}")))?;
     Ok(matches!(
         statement.next().map_err(|error| {
-            cli_error(format!(
-                "Failed to inspect Antigravity database '{}': {error}",
-                path.display()
-            ))
+            cli_error(format!("Failed to inspect Antigravity database: {error}"))
         })?,
         sqlite::State::Row
     ))
@@ -867,6 +803,7 @@ fn model_name_from_id(model_id: u64) -> String {
         1072 => "gemini-3.6-flash-medium".to_string(),
         1073 => "gemini-3.6-flash-low".to_string(),
         1417..=1419 => "gemini-4-argon".to_string(),
+        1402 => "claude-opus-5-5".to_string(),
         1050 => "gemini-3.1-flash-lite".to_string(),
         1_000.. => format!("model_placeholder_m{}", model_id - 1_000),
         _ => format!("antigravity-model-{model_id}"),
@@ -922,6 +859,7 @@ fn normalize_antigravity_model(raw: &str) -> Option<String> {
         "model_placeholder_m417" | "model_placeholder_m418" | "model_placeholder_m419" => {
             "gemini-4-argon"
         }
+        "model_placeholder_m402" => "claude-opus-5-5",
         "model_placeholder_m50" => "gemini-3.1-flash-lite",
         "model_placeholder_m26" => "claude-opus-4-6",
         "model_placeholder_m35" => "claude-sonnet-4-6",
@@ -1591,6 +1529,41 @@ mod tests {
         assert_eq!(
             normalize_antigravity_model("Gemini 3.8 Flash").as_deref(),
             Some("gemini-3.8-flash")
+        );
+    }
+
+    #[test]
+    fn maps_claude_opus_5_5_id_and_placeholder_to_priced_model() {
+        assert_eq!(model_name_from_id(1402), "claude-opus-5-5");
+        assert_eq!(
+            normalize_antigravity_model("model_placeholder_m402").as_deref(),
+            Some("claude-opus-5-5")
+        );
+
+        let pricing = PricingMap::load_embedded();
+        let usage = TokenUsageRaw {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..TokenUsageRaw::default()
+        };
+        let cost = calculate_antigravity_cost(
+            &model_name_from_id(1402),
+            None,
+            usage,
+            TimestampMs::UNIX_EPOCH,
+            CostMode::Calculate,
+            &pricing,
+        );
+        assert!(cost > 0.0);
+        assert!(
+            missing_antigravity_pricing(
+                "claude-opus-5-5",
+                None,
+                usage,
+                CostMode::Calculate,
+                &pricing,
+            )
+            .is_none()
         );
     }
 

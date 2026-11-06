@@ -305,6 +305,7 @@ fn run_cli_with_color<const N: usize>(fixture: &Fixture, args: [&str; N], color:
         .env("HOME", fixture.path("empty-home"))
         .env("USERPROFILE", fixture.path("empty-userprofile"))
         .env("XDG_CONFIG_HOME", fixture.path("empty-xdg-config"))
+        .env("XDG_DATA_HOME", fixture.path("empty-xdg-data"))
         .env("LOG_LEVEL", "0")
         .env("NO_COLOR", "1")
         .env("COLUMNS", "120")

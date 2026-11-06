@@ -118,6 +118,143 @@ fn reports_compressed_codex_rollouts_alongside_plain_ones() {
     assert_eq!(session["totalTokens"], 325);
 }
 
+#[test]
+fn reports_issue_1970_subagent_usage_in_daily_and_session_commands() {
+    let fixture = issue_1970_codex_fixture();
+
+    let daily_json = run_cli(
+        &fixture,
+        &[
+            "codex", "daily", "--since", "20260101", "--until", "20260131", "--json",
+        ],
+    );
+    let daily: Value = serde_json::from_str(&daily_json).unwrap();
+    assert_eq!(daily["totals"]["totalTokens"], 1010);
+    let daily_row = daily["daily"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["date"] == "2026-01-05")
+        .expect("issue 1970 daily row should exist");
+    assert_eq!(daily_row["totalTokens"], 1010);
+
+    let session_json = run_cli(
+        &fixture,
+        &[
+            "codex", "session", "--since", "20260101", "--until", "20260131", "--json",
+        ],
+    );
+    let session: Value = serde_json::from_str(&session_json).unwrap();
+    assert_eq!(session["totals"]["totalTokens"], 1010);
+    let session_row = session["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionFile"] == "child")
+        .expect("issue 1970 session row should exist");
+    assert_eq!(session_row["totalTokens"], 1010);
+
+    insta::assert_snapshot!(
+        "issue_1970_daily_table",
+        format!(
+            "Daily\n{}",
+            run_cli(
+                &fixture,
+                &[
+                    "codex", "daily", "--since", "20260101", "--until", "20260131",
+                ],
+            ),
+        )
+    );
+    insta::assert_snapshot!(
+        "issue_1970_session_table",
+        format!(
+            "Session\n{}",
+            run_cli(
+                &fixture,
+                &[
+                    "codex", "session", "--since", "20260101", "--until", "20260131",
+                ],
+            ),
+        )
+    );
+}
+
+#[test]
+fn prices_issue_1987_recorded_ultrafast_requests_at_ultrafast_rates() {
+    let settings = |timestamp: &str, tier: &str| {
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": { "service_tier": tier },
+            },
+        })
+        .to_string()
+    };
+    let request = |timestamp: &str| {
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "model": "gpt-6.1-sol",
+                    "last_token_usage": {
+                        "input_tokens": 1200,
+                        "cached_input_tokens": 200,
+                        "output_tokens": 50,
+                        "total_tokens": 1250,
+                    },
+                },
+            },
+        })
+        .to_string()
+    };
+    let ultrafast_only = [
+        settings("2026-10-27T10:00:00Z", "ultrafast"),
+        request("2026-10-27T10:00:01Z"),
+    ]
+    .join("\n");
+    let switched_back = [
+        settings("2026-10-27T10:00:00Z", "ultrafast"),
+        request("2026-10-27T10:00:01Z"),
+        settings("2026-10-27T10:00:02Z", "default"),
+        request("2026-10-27T10:00:03Z"),
+    ]
+    .join("\n");
+
+    // Standard: $2 input, $0.10 cached input, $10 output per 1M tokens ($0.00252 here).
+    // Ultrafast: $12 input, $0.60 cached input, $60 output per 1M tokens ($0.01512 here).
+    for (rollout, total_tokens, expected_cost) in [
+        (ultrafast_only, 1250, 0.01512),
+        (switched_back, 2500, 0.01512 + 0.00252),
+    ] {
+        let fixture = fs_fixture!({
+            "codex/config.toml": r#"service_tier = "default""#,
+            "codex/sessions/2026/10/27/rollout.jsonl": rollout,
+        });
+
+        let daily: Value = serde_json::from_str(&run_cli(
+            &fixture,
+            &["codex", "daily", "--speed", "auto", "--json"],
+        ))
+        .unwrap();
+
+        assert_eq!(daily["totals"]["totalTokens"], total_tokens);
+        let cost = daily["totals"]["costUSD"].as_f64().unwrap();
+        assert!((cost - expected_cost).abs() < 1e-12, "{cost}");
+    }
+}
+
+fn issue_1970_codex_fixture() -> Fixture {
+    fs_fixture!({
+        "codex/sessions/2026/01/05/child.jsonl":
+            include_str!("fixtures/codex/issue_1970.jsonl"),
+    })
+}
+
 fn codex_fixture() -> Fixture {
     fs_fixture!({
         "codex/sessions/2026/09/19/rollout-2026-09-19T23-22-40-01a0bb8c-c7c0-7630-9d82-860b875930f0.jsonl": usage("2026-09-19T23:22:40.000Z", 100, 50),

@@ -32,6 +32,8 @@ ccusage daily --by-agent --json
 
 `--sections` accepts `daily`, `weekly`, `monthly`, and `session`. The invoked report section is always included, and table output prints each requested section as a separate table. `--by-agent` adds an `agents` array to daily, weekly, and monthly JSON rows; session rows are already source-specific.
 
+Every section uses the options resolved for the invoked command. For example, `ccusage daily --sections weekly,monthly` applies the `daily` configuration to all three sections; each source's configured date window and timezone are applied while its data is loaded.
+
 ## How Unified Views Work
 
 ccusage detects local usage files from Claude Code, Codex, OpenCode, Amp, Droid, Codebuff, Hermes Agent, pi, Goose, OpenClaw, Kilo, Kimi, Qwen, GitHub Copilot CLI, Gemini CLI, Antigravity, Grok Build CLI, and ZCode. The same daily, weekly, monthly, and session views can run in two modes:
@@ -45,6 +47,8 @@ ccusage detects local usage files from Claude Code, Codex, OpenCode, Amp, Droid,
 Unified tables include an **Agent** column so you can compare sources in one view. Their **Cost($)** column shows USD amounts to two decimal places without repeating the dollar sign in each data or breakdown row; the final **Total** row keeps the dollar sign. Focused views retain their existing cost formatting and remove the agent comparison layer.
 
 Unified tables use content-sized numeric columns to leave more room for model names. Column headers and the `All` and final `Total` rows are bold when terminal styling is enabled; individual agent and model-breakdown rows keep their existing styling. Bold emphasis is preserved when `--no-color` or `NO_COLOR` disables colors. Piped output remains unstyled unless styling is explicitly forced.
+
+When one tool runs another, usage can be logged by both. OpenCode's Claude Agent provider is one example: unified views skip the OpenCode copy of turns that Claude Code's own log has, matching them by session and, in daily views, by day, so a turn that runs across midnight can still be counted twice or partly left out. See [OpenCode](./opencode/#claude-agent-provider).
 
 ## Supported Sources
 

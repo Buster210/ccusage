@@ -449,7 +449,7 @@ fn checks_the_date_window_after_config_and_flags_are_merged() {
             std::iter::once(OsString::from("ccusage"))
                 .chain(args.iter().map(|arg| OsString::from(arg.as_str()))),
             &config,
-            ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+            ccusage_cli::DEFAULT_SESSION_DURATION_HOURS,
             env!("CARGO_PKG_VERSION"),
         )
     };
@@ -486,7 +486,7 @@ fn statusline_ignores_reversed_default_date_window() {
     let result = Cli::parse_from_with_config(
         std::iter::once(OsString::from("ccusage")).chain(args.iter().map(OsString::from)),
         &config,
-        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        ccusage_cli::DEFAULT_SESSION_DURATION_HOURS,
         env!("CARGO_PKG_VERSION"),
     );
 
@@ -901,6 +901,83 @@ fn contextual_root_session_help_lists_id_option() {
     let help = help_text_for_args(&["ccusage".to_string(), "session".to_string()]);
 
     assert!(help.contains("--id"));
+}
+
+#[test]
+fn contextual_root_weekly_help_lists_start_of_week_option() {
+    let help = help_text_for_args(&["ccusage".to_string(), "weekly".to_string()]);
+
+    assert!(help.contains("-w, --start-of-week [start-of-week]"));
+    assert!(help.contains("default: monday"));
+
+    let daily_help = help_text_for_args(&["ccusage".to_string(), "daily".to_string()]);
+    assert!(!daily_help.contains("--start-of-week"));
+}
+
+#[test]
+fn parses_top_level_weekly_start_of_week() {
+    let cli = parse(&[
+        "ccusage",
+        "weekly",
+        "--json",
+        "--offline",
+        "--last",
+        "1",
+        "-w",
+        "wednesday",
+    ]);
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected all-agent command");
+    };
+    assert_eq!(args.kind, AgentReportKind::Weekly);
+    assert_eq!(args.start_of_week, WeekDay::Wednesday);
+    assert!(args.shared.json);
+    assert!(args.shared.offline);
+    assert_eq!(args.shared.last, Some(1));
+
+    let cli = parse(&["ccusage", "weekly", "--start-of-week=friday"]);
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected all-agent command");
+    };
+    assert_eq!(args.start_of_week, WeekDay::Friday);
+
+    let cli = parse(&["ccusage", "weekly"]);
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected all-agent command");
+    };
+    assert_eq!(args.start_of_week, WeekDay::Monday);
+}
+
+#[test]
+fn applies_weekly_config_start_of_week_to_top_level_weekly() {
+    let config = TestConfig {
+        weekly_start: Some(WeekDay::Sunday),
+        ..TestConfig::default()
+    };
+
+    let cli = parse_with_config(&["ccusage", "weekly"], &config);
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected all-agent command");
+    };
+    assert_eq!(args.start_of_week, WeekDay::Sunday);
+
+    let cli = parse_with_config(&["ccusage", "weekly", "-w", "tuesday"], &config);
+    let Some(Command::All(args)) = cli.command else {
+        panic!("expected all-agent command");
+    };
+    assert_eq!(args.start_of_week, WeekDay::Tuesday);
+}
+
+#[test]
+fn rejects_start_of_week_outside_weekly_reports() {
+    assert_eq!(
+        parse_error(&["ccusage", "daily", "-w", "monday"]),
+        "Unknown option '-w'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "weekly", "-w", "someday"]),
+        "Invalid week day 'someday'"
+    );
 }
 
 #[test]
@@ -1551,7 +1628,7 @@ fn named_pi_store_validation_does_not_break_statusline() {
                 .map(|arg| std::ffi::OsString::from(arg.as_str())),
         ),
         &config,
-        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        ccusage_cli::DEFAULT_SESSION_DURATION_HOURS,
         env!("CARGO_PKG_VERSION"),
     );
 
@@ -1577,7 +1654,7 @@ fn named_pi_store_validation_does_not_break_agent_commands() {
                 .map(|arg| std::ffi::OsString::from(arg.as_str())),
         ),
         &config,
-        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        ccusage_cli::DEFAULT_SESSION_DURATION_HOURS,
         env!("CARGO_PKG_VERSION"),
     );
 
@@ -1602,7 +1679,7 @@ fn reports_named_pi_store_validation_through_cli_config_error_path() {
                 .map(|arg| std::ffi::OsString::from(arg.as_str())),
         ),
         &config,
-        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        ccusage_cli::DEFAULT_SESSION_DURATION_HOURS,
         env!("CARGO_PKG_VERSION"),
     );
     let Err(error) = result else {

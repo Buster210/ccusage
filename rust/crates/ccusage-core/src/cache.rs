@@ -91,7 +91,7 @@ macro_rules! timed {
 }
 
 use rustc_hash::{FxHashSet, FxHasher};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     LoadedEntry, chunk_file_indexes_by_size,
@@ -113,6 +113,11 @@ pub struct CachedEntry {
     date: String,
     project: Arc<str>,
     session_id: Arc<str>,
+    /// `data.session_id`: the session the source recorded in the entry, which
+    /// differs from the transcript-path `session_id` for a renamed file. Kept so
+    /// a warm load resolves the same recorded session as a cold one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_session_id: Option<String>,
     project_path: Arc<str>,
     cost_usd: Option<f64>,
     extra_total_tokens: u64,
@@ -138,6 +143,7 @@ impl From<&LoadedEntry> for CachedEntry {
             date: e.date.clone(),
             project: Arc::clone(&e.project),
             session_id: Arc::clone(&e.session_id),
+            data_session_id: e.data.session_id.clone(),
             project_path: Arc::clone(&e.project_path),
             cost_usd: e.data.cost_usd,
             extra_total_tokens: e.extra_total_tokens,
@@ -156,11 +162,68 @@ impl From<&LoadedEntry> for CachedEntry {
     }
 }
 
+/// On-disk form of [`CachedEntry`] written before `data_session_id` existed.
+///
+/// Postcard encodes fields positionally, so a field added mid-struct makes older
+/// blobs undecodable, and that failure drops the `ledger` rows of deleted source
+/// files, which no later run can rebuild. This shape stays decodable, with
+/// `data_session_id` as `None` and the reader's path-session fallback.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct LegacyCachedEntry {
+    timestamp: crate::date_utils::TimestampMs,
+    data_timestamp: String,
+    date: String,
+    project: Arc<str>,
+    session_id: Arc<str>,
+    project_path: Arc<str>,
+    cost_usd: Option<f64>,
+    extra_total_tokens: u64,
+    credits: Option<f64>,
+    message_count: Option<u64>,
+    model: Option<String>,
+    usage_limit_reset_time: Option<crate::date_utils::TimestampMs>,
+    usage: TokenUsageRaw,
+    version: Option<String>,
+    message_id: Option<String>,
+    request_id: Option<String>,
+    is_sidechain: Option<bool>,
+    message_model: Option<String>,
+    message_provider: Option<String>,
+}
+
+impl From<LegacyCachedEntry> for CachedEntry {
+    fn from(c: LegacyCachedEntry) -> Self {
+        CachedEntry {
+            timestamp: c.timestamp,
+            data_timestamp: c.data_timestamp,
+            date: c.date,
+            project: c.project,
+            session_id: c.session_id,
+            data_session_id: None,
+            project_path: c.project_path,
+            cost_usd: c.cost_usd,
+            extra_total_tokens: c.extra_total_tokens,
+            credits: c.credits,
+            message_count: c.message_count,
+            model: c.model,
+            usage_limit_reset_time: c.usage_limit_reset_time,
+            usage: c.usage,
+            version: c.version,
+            message_id: c.message_id,
+            request_id: c.request_id,
+            is_sidechain: c.is_sidechain,
+            message_model: c.message_model,
+            message_provider: c.message_provider,
+        }
+    }
+}
+
 impl From<CachedEntry> for LoadedEntry {
     fn from(c: CachedEntry) -> Self {
         LoadedEntry {
             data: UsageEntry {
-                session_id: Some(c.session_id.to_string()),
+                session_id: c.data_session_id.clone(),
                 timestamp: c.data_timestamp,
                 version: c.version,
                 message: UsageMessage {
@@ -240,6 +303,27 @@ impl From<&LoadedEntry> for LedgerEntry {
             cost: e.cost,
             missing_pricing_model: e.missing_pricing_model.clone(),
         }
+    }
+}
+
+/// On-disk form of [`LedgerEntry`] written before `data_session_id` existed; see
+/// [`LegacyCachedEntry`] for why the old shape stays decodable.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct LegacyLedgerEntry {
+    base: LegacyCachedEntry,
+    cost: f64,
+    missing_pricing_model: Option<String>,
+}
+
+impl LegacyLedgerEntry {
+    /// Same reconstruction as [`LedgerEntry::into_loaded`].
+    fn into_loaded(self, dedup_key: String) -> LoadedEntry {
+        let mut loaded: LoadedEntry = CachedEntry::from(self.base).into();
+        loaded.data.message.id = Some(dedup_key);
+        loaded.cost = self.cost;
+        loaded.missing_pricing_model = self.missing_pricing_model;
+        loaded
     }
 }
 
@@ -374,10 +458,95 @@ fn encode_entries(entries: &[LoadedEntry]) -> Option<Vec<u8>> {
     postcard::to_allocvec(&cached).ok()
 }
 
-/// Decode a `files` blob back into reconstructed entries.
+/// Decode one postcard value from `bytes`, requiring the whole buffer to be used.
+///
+/// `postcard::from_bytes` accepts a leftover tail, so a *newer* blob read as an
+/// older struct can "decode" into nonsense. Requiring an empty tail turns that
+/// into a clean failure, which is what makes the legacy fallbacks below safe.
+fn decode_exact<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    let (value, tail) = postcard::take_from_bytes::<T>(bytes).ok()?;
+    tail.is_empty().then_some(value)
+}
+
+/// Decode a `files` blob back into reconstructed entries, accepting the layout
+/// that releases before `data_session_id` wrote.
 fn decode_entries(bytes: &[u8]) -> Option<Vec<LoadedEntry>> {
-    let cached: Vec<CachedEntry> = postcard::from_bytes(bytes).ok()?;
-    Some(cached.into_iter().map(LoadedEntry::from).collect())
+    if let Some(cached) = decode_exact::<Vec<CachedEntry>>(bytes) {
+        return Some(cached.into_iter().map(LoadedEntry::from).collect());
+    }
+    if let Some(legacy) = decode_exact::<Vec<LegacyCachedEntry>>(bytes) {
+        return Some(
+            legacy
+                .into_iter()
+                .map(|c| LoadedEntry::from(CachedEntry::from(c)))
+                .collect(),
+        );
+    }
+    warn_unreadable_files_row();
+    None
+}
+
+/// A decoded `ledger` row in either on-disk layout.
+enum LedgerEntryOrLegacy {
+    Current(LedgerEntry),
+    Legacy(LegacyLedgerEntry),
+}
+
+impl LedgerEntryOrLegacy {
+    fn date(&self) -> &str {
+        match self {
+            LedgerEntryOrLegacy::Current(entry) => entry.base.date.as_str(),
+            LedgerEntryOrLegacy::Legacy(entry) => entry.base.date.as_str(),
+        }
+    }
+
+    fn into_loaded(self, dedup_key: String) -> LoadedEntry {
+        match self {
+            LedgerEntryOrLegacy::Current(entry) => entry.into_loaded(dedup_key),
+            LedgerEntryOrLegacy::Legacy(entry) => entry.into_loaded(dedup_key),
+        }
+    }
+}
+
+/// Decode a `ledger` blob, accepting the layout that releases before
+/// `data_session_id` wrote.
+fn decode_ledger_entry(bytes: &[u8]) -> Option<LedgerEntryOrLegacy> {
+    if let Some(entry) = decode_exact::<LedgerEntry>(bytes) {
+        return Some(LedgerEntryOrLegacy::Current(entry));
+    }
+    if let Some(legacy) = decode_exact::<LegacyLedgerEntry>(bytes) {
+        return Some(LedgerEntryOrLegacy::Legacy(legacy));
+    }
+    warn_unreadable_ledger_row();
+    None
+}
+
+/// Both decoders failed, so a cached file entry is dropped and the file is read
+/// again. That is safe but slow, and it means the on-disk layout moved without a
+/// decoder for the old one.
+fn warn_unreadable_files_row() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "WARN  Skipping an unreadable row in the cache `files` table; that file is read \
+             again. This means the cache was written by an incompatible version; run \
+             `ccusage clear-cache` to rebuild it if the warning repeats."
+        );
+    });
+}
+
+/// Both decoders failed, so retained spend from a source file that no longer
+/// exists cannot be recovered. Without this warning such a layout change drops
+/// history silently.
+fn warn_unreadable_ledger_row() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "WARN  Skipping an unreadable row in the cache `ledger` table; the spend it \
+             retained from now-deleted source logs is unavailable. Do not run \
+             `ccusage clear-cache` before saving a copy: the ledger cannot be rebuilt."
+        );
+    });
 }
 
 /// Concurrent opens pile onto SQLite's file locks (0.2ms -> 24ms under 8 loader
@@ -1686,28 +1855,56 @@ fn normalize_ledger_key(key: &str) -> Cow<'_, str> {
 ///
 /// `live_only` skips the re-emission, so deleted sources contribute nothing to
 /// the result while their spend stays retained in the ledger for a later run.
-fn merge_ledger(
+fn merge_ledger<T: LedgerPayload>(
     conn: &sqlite::Connection,
     namespace: &str,
-    live: Vec<LoadedEntry>,
+    live: Vec<T>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
     mode: CostMode,
-) -> Vec<LoadedEntry> {
+) -> Vec<T> {
     merge_ledger_with(conn, namespace, live, live_only, date_filter, mode, None)
+}
+
+/// What the ledger keeps for one entry. Most sources store plain entries;
+/// OpenCode pairs an entry with the Claude session it links, and the retained
+/// rows a deleted database re-emits carry no link, like any live row without one.
+pub trait LedgerPayload: Sized {
+    fn ledger_entry(&self) -> &LoadedEntry;
+    fn from_ledger_entry(entry: LoadedEntry) -> Self;
+}
+
+impl LedgerPayload for LoadedEntry {
+    fn ledger_entry(&self) -> &LoadedEntry {
+        self
+    }
+
+    fn from_ledger_entry(entry: LoadedEntry) -> Self {
+        entry
+    }
+}
+
+impl LedgerPayload for (LoadedEntry, Option<std::sync::Arc<str>>) {
+    fn ledger_entry(&self) -> &LoadedEntry {
+        &self.0
+    }
+
+    fn from_ledger_entry(entry: LoadedEntry) -> Self {
+        (entry, None)
+    }
 }
 
 /// [`merge_ledger`] with optionally precomputed key sets. `Some` sets must be the
 /// full unwindowed scan; `None` behaves exactly like [`merge_ledger`].
-fn merge_ledger_with(
+fn merge_ledger_with<T: LedgerPayload>(
     conn: &sqlite::Connection,
     namespace: &str,
-    live: Vec<LoadedEntry>,
+    live: Vec<T>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
     mode: CostMode,
     precomputed: Option<(FxHashSet<String>, Vec<String>)>,
-) -> Vec<LoadedEntry> {
+) -> Vec<T> {
     // Blobs load under raw keys, so normalization stays at comparison time.
     let mut seen: FxHashSet<String>;
     let owned_raw: Vec<String>;
@@ -1718,7 +1915,10 @@ fn merge_ledger_with(
         }
         None => {
             seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
-            seen.extend(live.iter().map(entry_ledger_key));
+            seen.extend(
+                live.iter()
+                    .map(|payload| entry_ledger_key(payload.ledger_entry())),
+            );
             owned_raw = Vec::new();
         }
     }
@@ -1781,10 +1981,10 @@ fn merge_ledger_with(
         for key in deleted_keys {
             if let Some((blob, recorded_cost)) =
                 load_ledger_row(&mut blob_statement, namespace, &key)
-                && let Ok(entry) = postcard::from_bytes::<LedgerEntry>(&blob)
+                && let Some(entry) = decode_ledger_entry(&blob)
             {
                 if let Some((since, until)) = date_filter {
-                    let d = entry.base.date.as_str();
+                    let d = entry.date();
                     if d < since || d > until {
                         continue;
                     }
@@ -1804,7 +2004,7 @@ fn merge_ledger_with(
                     }
                 }
                 seen.insert(normalize_ledger_key(&key).into_owned());
-                out.push(loaded);
+                out.push(T::from_ledger_entry(loaded));
             }
         }
     }
@@ -1919,13 +2119,13 @@ fn load_ledger_row(
 /// namespace distinct from any [`load_with_cache`] caller so the two live sets
 /// never appear to "delete" each other. `live_only` carries the same meaning as
 /// in [`load_with_cache`]: when set, retained spend for gone sources is suppressed.
-pub fn retain_via_ledger(
+pub fn retain_via_ledger<T: LedgerPayload>(
     namespace: &str,
-    live: Vec<LoadedEntry>,
+    live: Vec<T>,
     live_only: bool,
     date_filter: Option<(&str, &str)>,
     mode: CostMode,
-) -> Vec<LoadedEntry> {
+) -> Vec<T> {
     match open_db() {
         Some(conn) => {
             let cover_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
@@ -1935,7 +2135,7 @@ pub fn retain_via_ledger(
             let mut seen = FxHashSet::with_capacity_and_hasher(live.len(), Default::default());
             let mut missing = Vec::new();
             for (index, entry) in live.iter().enumerate() {
-                let key = entry_ledger_key(entry);
+                let key = entry_ledger_key(entry.ledger_entry());
                 if !sets.stored_normalized.contains(&key) {
                     missing.push(index);
                 }
@@ -2001,10 +2201,10 @@ fn load_ledger_key_sets(conn: &sqlite::Connection, namespace: &str) -> LedgerKey
     }
 }
 
-fn append_missing_ledger_entries(
+fn append_missing_ledger_entries<T: LedgerPayload>(
     conn: &sqlite::Connection,
     namespace: &str,
-    live: &[LoadedEntry],
+    live: &[T],
     missing: &[usize],
 ) -> Option<()> {
     let mut st = conn
@@ -2014,7 +2214,7 @@ fn append_missing_ledger_entries(
         )
         .ok()?;
     for &index in missing {
-        append_ledger_row(&mut st, namespace, &live[index])?;
+        append_ledger_row(&mut st, namespace, live[index].ledger_entry())?;
     }
     Some(())
 }
@@ -2661,8 +2861,13 @@ pub(crate) mod tests {
         let second = retain_via_ledger("test-ns-covered", live, false, None, CostMode::Auto);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].session_id.as_ref(), "session-a");
-        let reemitted =
-            retain_via_ledger("test-ns-covered", Vec::new(), false, None, CostMode::Auto);
+        let reemitted = retain_via_ledger::<LoadedEntry>(
+            "test-ns-covered",
+            Vec::new(),
+            false,
+            None,
+            CostMode::Auto,
+        );
         assert_eq!(
             reemitted.len(),
             1,
@@ -3877,6 +4082,94 @@ pub(crate) mod tests {
         assert_eq!(
             stored, LEDGER_SCHEMA_VERSION,
             "migrate must restamp a stale ledger version to the current one"
+        );
+    }
+
+    /// Rewrite a current `CachedEntry` in the pre-`data_session_id` layout, so a
+    /// test can encode a blob the way an older release wrote it.
+    fn legacy_from(c: CachedEntry) -> LegacyCachedEntry {
+        LegacyCachedEntry {
+            timestamp: c.timestamp,
+            data_timestamp: c.data_timestamp,
+            date: c.date,
+            project: c.project,
+            session_id: c.session_id,
+            project_path: c.project_path,
+            cost_usd: c.cost_usd,
+            extra_total_tokens: c.extra_total_tokens,
+            credits: c.credits,
+            message_count: c.message_count,
+            model: c.model,
+            usage_limit_reset_time: c.usage_limit_reset_time,
+            usage: c.usage,
+            version: c.version,
+            message_id: c.message_id,
+            request_id: c.request_id,
+            is_sidechain: c.is_sidechain,
+            message_model: c.message_model,
+            message_provider: c.message_provider,
+        }
+    }
+
+    /// A `files` blob written before `data_session_id` existed must still decode.
+    #[test]
+    fn legacy_files_blob_without_data_session_id_still_decodes() {
+        let entry = sample_entry();
+        let legacy = legacy_from(CachedEntry::from(&entry));
+        let blob = postcard::to_allocvec(&vec![legacy]).expect("encode legacy files blob");
+
+        let decoded = decode_entries(&blob).expect("legacy files blob must decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].session_id.as_ref(), "session-a");
+        assert_eq!(decoded[0].data.session_id, None, "legacy rows record no id");
+        assert_eq!(decoded[0].date, "2026-01-01");
+        assert_eq!(decoded[0].project.as_ref(), "proj");
+        assert_eq!(decoded[0].data.message.id.as_deref(), Some("msg-a"));
+    }
+
+    /// The retained spend of a deleted source lives only in the `ledger` table, so
+    /// an old-format blob that fails to decode silently deletes history.
+    #[test]
+    fn legacy_ledger_blob_still_reemits_spend() {
+        let mut entry = sample_entry();
+        entry.cost = 1.25;
+        let ledger = LedgerEntry::from(&entry);
+        let legacy = LegacyLedgerEntry {
+            base: legacy_from(ledger.base),
+            cost: ledger.cost,
+            missing_pricing_model: ledger.missing_pricing_model,
+        };
+        let blob = postcard::to_allocvec(&legacy).expect("encode legacy ledger blob");
+
+        let decoded = decode_ledger_entry(&blob).expect("legacy ledger blob must decode");
+        assert_eq!(decoded.date(), "2026-01-01");
+        let loaded = decoded.into_loaded("msg-a".to_string());
+        assert_eq!(loaded.cost, 1.25);
+        assert_eq!(loaded.data.message.id.as_deref(), Some("msg-a"));
+        assert_eq!(loaded.date, "2026-01-01");
+    }
+
+    /// Garbage must not decode as any known layout; that is the state the two
+    /// warnings above report, and the row is then skipped rather than trusted.
+    #[test]
+    fn undecodable_blob_decodes_as_neither_layout() {
+        let garbage = [0xff_u8; 9];
+        assert!(decode_entries(&garbage).is_none());
+        assert!(decode_ledger_entry(&garbage).is_none());
+    }
+
+    /// The legacy fallbacks are only safe because a decode must consume every
+    /// byte: `postcard::from_bytes` alone accepts a tail and reads garbage.
+    #[test]
+    fn decode_exact_requires_the_whole_buffer() {
+        let value = 7u32;
+        let mut blob = postcard::to_allocvec(&value).expect("encode");
+        assert_eq!(decode_exact::<u32>(&blob), Some(7));
+        blob.push(0);
+        assert_eq!(
+            decode_exact::<u32>(&blob),
+            None,
+            "a trailing byte must fail"
         );
     }
 

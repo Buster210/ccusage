@@ -16,6 +16,8 @@ use crate::{
 
 const FAST_MULTIPLIER_OVERRIDES_JSON: &str = include_str!("fast-multiplier-overrides.json");
 const FLEX_MULTIPLIER_OVERRIDES_JSON: &str = include_str!("flex-multiplier-overrides.json");
+const ULTRAFAST_MULTIPLIER_OVERRIDES_JSON: &str =
+    include_str!("ultrafast-multiplier-overrides.json");
 
 /// The pricing snapshots the binary embeds, minified and deflated - the
 /// models.dev one alone would otherwise add a quarter megabyte of JSON - and
@@ -370,6 +372,7 @@ pub struct Pricing {
     // pricing starts above 272K input tokens), so the threshold is per model.
     pub(crate) long_context_threshold: Option<u64>,
     pub fast_multiplier: f64,
+    pub ultrafast_multiplier: f64,
     pub flex_multiplier: f64,
 }
 
@@ -401,6 +404,7 @@ impl Pricing {
             cache_read_above_200k: None,
             long_context_threshold: None,
             fast_multiplier: 1.0,
+            ultrafast_multiplier: 1.0,
             flex_multiplier: 1.0,
         }
     }
@@ -612,7 +616,7 @@ pub struct PricingMap {
 /// as `claude-opus-5-eu` passes the gate and is billed at the base model's rate,
 /// which is exactly what marking the id exact-only was meant to prevent. That
 /// spelling names the tier, so it resolves to it rather than losing its rate.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Debug, Default)]
 struct ExactOnlyKeys {
     raw: FxHashSet<String>,
     /// Every id under its normalized spelling, mapped back to the id it names.
@@ -1180,14 +1184,21 @@ impl PricingMap {
                 let mut map = Self::default();
                 let fast_multiplier_overrides =
                     SpeedMultiplierOverrides::load(FAST_MULTIPLIER_OVERRIDES_JSON);
+                let ultrafast_multiplier_overrides =
+                    SpeedMultiplierOverrides::load(ULTRAFAST_MULTIPLIER_OVERRIDES_JSON);
                 let flex_multiplier_overrides =
                     SpeedMultiplierOverrides::load(FLEX_MULTIPLIER_OVERRIDES_JSON);
                 map.load_json_with_overrides(
                     build_time_pricing_json(),
                     &fast_multiplier_overrides,
+                    &ultrafast_multiplier_overrides,
                     &flex_multiplier_overrides,
                 );
-                map.put_builtin_pricing(&fast_multiplier_overrides, &flex_multiplier_overrides);
+                map.put_builtin_pricing(
+                    &fast_multiplier_overrides,
+                    &ultrafast_multiplier_overrides,
+                    &flex_multiplier_overrides,
+                );
                 map.fill_long_context_rates_from_models_dev();
                 // Resolve models that LiteLLM and the built-in table miss from the
                 // embedded models.dev snapshot. This works offline, unlike the network
@@ -1236,18 +1247,50 @@ impl PricingMap {
         map
     }
 
+    /// Returns an independent pricing map with additional user overrides.
+    ///
+    /// This lets callers share one fetched or embedded base between reports
+    /// while keeping each report's override cache separate.
+    /// The base map must not already contain user overrides.
+    pub fn with_user_overrides<'a, I>(&self, overrides: I) -> Self
+    where
+        I: IntoIterator<Item = (&'a String, &'a PricingOverride)>,
+    {
+        let mut map = Self {
+            entries: self.entries.clone(),
+            user_overrides: self.user_overrides.clone(),
+            exact_only: self.exact_only.clone(),
+            context_limits: self.context_limits.clone(),
+            builtin_context_limits: self.builtin_context_limits.clone(),
+            enable_models_dev_fallback: self.enable_models_dev_fallback,
+            enable_embedded_models_dev_fallback: self.enable_embedded_models_dev_fallback,
+            find_cache: std::sync::RwLock::new((0, FxHashMap::default())),
+            normalized_keys: OnceLock::new(),
+        };
+        map.apply_overrides(overrides);
+        map
+    }
+
     pub fn load_json(&mut self, json: &str) -> usize {
         let fast_multiplier_overrides =
             SpeedMultiplierOverrides::load(FAST_MULTIPLIER_OVERRIDES_JSON);
+        let ultrafast_multiplier_overrides =
+            SpeedMultiplierOverrides::load(ULTRAFAST_MULTIPLIER_OVERRIDES_JSON);
         let flex_multiplier_overrides =
             SpeedMultiplierOverrides::load(FLEX_MULTIPLIER_OVERRIDES_JSON);
-        self.load_json_with_overrides(json, &fast_multiplier_overrides, &flex_multiplier_overrides)
+        self.load_json_with_overrides(
+            json,
+            &fast_multiplier_overrides,
+            &ultrafast_multiplier_overrides,
+            &flex_multiplier_overrides,
+        )
     }
 
     fn load_json_with_overrides(
         &mut self,
         json: &str,
         fast_multiplier_overrides: &SpeedMultiplierOverrides,
+        ultrafast_multiplier_overrides: &SpeedMultiplierOverrides,
         flex_multiplier_overrides: &SpeedMultiplierOverrides,
     ) -> usize {
         // Direct deserialization without intermediate `Value` + `from_value`.
@@ -1315,6 +1358,9 @@ impl PricingMap {
                     cache_read_above_200k: pricing.cache_read_input_token_cost_above_200k_tokens,
                     long_context_threshold: None,
                     fast_multiplier,
+                    ultrafast_multiplier: ultrafast_multiplier_overrides
+                        .multiplier_for(&model)
+                        .unwrap_or(1.0),
                     flex_multiplier,
                 },
             );
@@ -1331,6 +1377,8 @@ impl PricingMap {
         let raw = parse_models_dev_json(json)?;
         let fast_multiplier_overrides =
             SpeedMultiplierOverrides::load(FAST_MULTIPLIER_OVERRIDES_JSON);
+        let ultrafast_multiplier_overrides =
+            SpeedMultiplierOverrides::load(ULTRAFAST_MULTIPLIER_OVERRIDES_JSON);
         let flex_multiplier_overrides =
             SpeedMultiplierOverrides::load(FLEX_MULTIPLIER_OVERRIDES_JSON);
         Some(match raw {
@@ -1371,7 +1419,11 @@ impl PricingMap {
                             &provider_id,
                             trust,
                             true,
-                            (&fast_multiplier_overrides, &flex_multiplier_overrides),
+                            (
+                                &fast_multiplier_overrides,
+                                &ultrafast_multiplier_overrides,
+                                &flex_multiplier_overrides,
+                            ),
                             &mut claims,
                         )
                     })
@@ -1388,7 +1440,11 @@ impl PricingMap {
                     "",
                     MODELS_DEV_TRUST_OWNER,
                     false,
-                    (&fast_multiplier_overrides, &flex_multiplier_overrides),
+                    (
+                        &fast_multiplier_overrides,
+                        &ultrafast_multiplier_overrides,
+                        &flex_multiplier_overrides,
+                    ),
                     &mut claims,
                 )
             }
@@ -1416,10 +1472,15 @@ impl PricingMap {
         provider_id: &str,
         trust: u8,
         derive_exact_only: bool,
-        multiplier_overrides: (&SpeedMultiplierOverrides, &SpeedMultiplierOverrides),
+        multiplier_overrides: (
+            &SpeedMultiplierOverrides,
+            &SpeedMultiplierOverrides,
+            &SpeedMultiplierOverrides,
+        ),
         claims: &mut FxHashMap<String, ModelsDevClaimSlot>,
     ) -> usize {
-        let (fast_multiplier_overrides, flex_multiplier_overrides) = multiplier_overrides;
+        let (fast_multiplier_overrides, ultrafast_multiplier_overrides, flex_multiplier_overrides) =
+            multiplier_overrides;
         let rules = models_dev_catalog_rules();
         let mut loaded_count = 0;
         // Two source keys in one catalog can resolve to the same model id, and the
@@ -1527,6 +1588,9 @@ impl PricingMap {
                     cache_read_above_200k: long_context.and_then(|rates| rates.cache_read),
                     long_context_threshold: long_context.map(|rates| rates.threshold),
                     fast_multiplier: fast_multiplier_overrides
+                        .multiplier_for(&model_id)
+                        .unwrap_or(1.0),
+                    ultrafast_multiplier: ultrafast_multiplier_overrides
                         .multiplier_for(&model_id)
                         .unwrap_or(1.0),
                     flex_multiplier: flex_multiplier_overrides
@@ -1931,24 +1995,70 @@ impl PricingMap {
     where
         I: IntoIterator<Item = (&'a String, &'a PricingOverride)>,
     {
+        let fast_multiplier_overrides =
+            SpeedMultiplierOverrides::load(FAST_MULTIPLIER_OVERRIDES_JSON);
+        let ultrafast_multiplier_overrides =
+            SpeedMultiplierOverrides::load(ULTRAFAST_MULTIPLIER_OVERRIDES_JSON);
+        let flex_multiplier_overrides =
+            SpeedMultiplierOverrides::load(FLEX_MULTIPLIER_OVERRIDES_JSON);
+        let mut overrides: Vec<_> = overrides.into_iter().collect();
+        let keys: FxHashSet<&str> = overrides.iter().map(|(model, _)| model.as_str()).collect();
+        overrides.sort_by_cached_key(|(model, _)| override_application_order(model, &keys));
         for (model, override_value) in overrides {
-            self.apply_override(model, override_value);
+            self.apply_override(
+                model,
+                override_value,
+                (
+                    &fast_multiplier_overrides,
+                    &ultrafast_multiplier_overrides,
+                    &flex_multiplier_overrides,
+                ),
+            );
         }
         self.clear_find_cache();
     }
 
-    fn apply_override(&mut self, model: &str, override_value: &PricingOverride) {
+    fn apply_override(
+        &mut self,
+        model: &str,
+        override_value: &PricingOverride,
+        multiplier_overrides: (
+            &SpeedMultiplierOverrides,
+            &SpeedMultiplierOverrides,
+            &SpeedMultiplierOverrides,
+        ),
+    ) {
+        let (fast_multiplier_overrides, ultrafast_multiplier_overrides, flex_multiplier_overrides) =
+            multiplier_overrides;
         // Legacy bracket keys predate 5714f564 raw-model keys; honor as stripped id.
         let key = Self::stripped_legacy_pricing_key(model).unwrap_or(model);
         self.user_overrides
             .insert(key.to_string(), override_value.clone());
-        let base = self
-            .entries
-            .get(key)
-            .copied()
-            .or_else(|| self.entries.get(model).copied())
-            .or_else(|| pricing_alias(model).and_then(|alias| self.entries.get(alias).copied()))
-            .unwrap_or_else(Pricing::empty);
+        let entry = |name: &str| {
+            self.entries
+                .get(name)
+                .copied()
+                .or_else(|| pricing_alias(name).and_then(|alias| self.entries.get(alias).copied()))
+        };
+        let resolved_model = crate::model_aliases::resolve_model_name(key);
+        let base = entry(key)
+            .or_else(|| entry(model))
+            .or_else(|| entry(resolved_model.as_ref()))
+            .unwrap_or_else(|| {
+                let published = |overrides: &SpeedMultiplierOverrides| {
+                    overrides
+                        .multiplier_for(key)
+                        .or_else(|| overrides.multiplier_for(model))
+                        .or_else(|| overrides.multiplier_for(resolved_model.as_ref()))
+                        .unwrap_or(1.0)
+                };
+                Pricing {
+                    fast_multiplier: published(fast_multiplier_overrides),
+                    ultrafast_multiplier: published(ultrafast_multiplier_overrides),
+                    flex_multiplier: published(flex_multiplier_overrides),
+                    ..Pricing::empty()
+                }
+            });
 
         let new_input = override_value.input_cost_per_token.unwrap_or(base.input);
 
@@ -2026,6 +2136,7 @@ impl PricingMap {
             fast_multiplier: override_value
                 .fast_multiplier
                 .unwrap_or(base.fast_multiplier),
+            ultrafast_multiplier: base.ultrafast_multiplier,
             flex_multiplier: override_value
                 .flex_multiplier
                 .unwrap_or(base.flex_multiplier),
@@ -2137,6 +2248,7 @@ impl PricingMap {
     fn put_builtin_pricing(
         &mut self,
         fast_multiplier_overrides: &SpeedMultiplierOverrides,
+        ultrafast_multiplier_overrides: &SpeedMultiplierOverrides,
         flex_multiplier_overrides: &SpeedMultiplierOverrides,
     ) {
         self.put_builtin_entry(
@@ -2154,6 +2266,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2172,6 +2285,9 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: fast_multiplier_overrides
+                    .multiplier_for("claude-opus-4-6")
+                    .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
                     .multiplier_for("claude-opus-4-6")
                     .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
@@ -2196,6 +2312,9 @@ impl PricingMap {
                 fast_multiplier: fast_multiplier_overrides
                     .multiplier_for("claude-opus-4-7")
                     .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
+                    .multiplier_for("claude-opus-4-7")
+                    .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("claude-opus-4-7")
                     .unwrap_or(1.0),
@@ -2218,6 +2337,9 @@ impl PricingMap {
                 fast_multiplier: fast_multiplier_overrides
                     .multiplier_for("claude-opus-4-8")
                     .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
+                    .multiplier_for("claude-opus-4-8")
+                    .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("claude-opus-4-8")
                     .unwrap_or(1.0),
@@ -2238,6 +2360,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2256,6 +2379,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2274,6 +2398,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2292,6 +2417,7 @@ impl PricingMap {
                 cache_read_above_200k: Some(0.6e-6),
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2308,6 +2434,7 @@ impl PricingMap {
             cache_read_above_200k: None,
             long_context_threshold: None,
             fast_multiplier: 1.0,
+            ultrafast_multiplier: 1.0,
             flex_multiplier: 1.0,
         };
         self.put_builtin_entry("claude-3-5-haiku".to_string(), claude_3_5_haiku);
@@ -2327,6 +2454,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2345,6 +2473,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2363,6 +2492,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2381,6 +2511,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("gpt-5")
                     .unwrap_or(1.0),
@@ -2403,6 +2534,9 @@ impl PricingMap {
                 fast_multiplier: fast_multiplier_overrides
                     .multiplier_for("gpt-5.5")
                     .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
+                    .multiplier_for("gpt-5.5")
+                    .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("gpt-5.5")
                     .unwrap_or(1.0),
@@ -2423,6 +2557,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2442,6 +2577,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2461,6 +2597,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -2477,6 +2614,7 @@ impl PricingMap {
             cache_read_above_200k: None,
             long_context_threshold: None,
             fast_multiplier: 1.0,
+            ultrafast_multiplier: 1.0,
             flex_multiplier: 1.0,
         };
         self.put_builtin_entry(
@@ -2503,6 +2641,7 @@ impl PricingMap {
             cache_read_above_200k: None,
             long_context_threshold: None,
             fast_multiplier: 1.0,
+            ultrafast_multiplier: 1.0,
             flex_multiplier: 1.0,
         };
         self.entries
@@ -2511,6 +2650,9 @@ impl PricingMap {
             "gpt-5.3-codex".to_string(),
             Pricing {
                 fast_multiplier: fast_multiplier_overrides
+                    .multiplier_for("gpt-5.3-codex")
+                    .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
                     .multiplier_for("gpt-5.3-codex")
                     .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
@@ -2545,6 +2687,9 @@ impl PricingMap {
                 fast_multiplier: fast_multiplier_overrides
                     .multiplier_for("gpt-5.4")
                     .unwrap_or(1.0),
+                ultrafast_multiplier: ultrafast_multiplier_overrides
+                    .multiplier_for("gpt-5.4")
+                    .unwrap_or(1.0),
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("gpt-5.4")
                     .unwrap_or(1.0),
@@ -2565,6 +2710,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("gpt-5.4-mini")
                     .unwrap_or(1.0),
@@ -2585,6 +2731,7 @@ impl PricingMap {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: flex_multiplier_overrides
                     .multiplier_for("gpt-5.4-nano")
                     .unwrap_or(1.0),
@@ -2616,6 +2763,9 @@ impl PricingMap {
                     fast_multiplier: fast_multiplier_overrides
                         .multiplier_for(model)
                         .unwrap_or(1.0),
+                    ultrafast_multiplier: ultrafast_multiplier_overrides
+                        .multiplier_for(model)
+                        .unwrap_or(1.0),
                     flex_multiplier: flex_multiplier_overrides
                         .multiplier_for(model)
                         .unwrap_or(1.0),
@@ -2636,6 +2786,7 @@ impl PricingMap {
             cache_read_above_200k: None,
             long_context_threshold: None,
             fast_multiplier: 1.0,
+            ultrafast_multiplier: 1.0,
             flex_multiplier: 1.0,
         };
         let glm_base = glm_pricing(0.6e-6, 2.2e-6, 0.11e-6);
@@ -2920,6 +3071,36 @@ fn model_without_date_suffix(model: &str) -> &str {
     model
 }
 
+/// Sorts an override after the overridden models its base entry is built
+/// from. A chain that loops sorts after every acyclic one, by how many links
+/// lead into the loop, so an alias pointing into a cycle follows the cycle.
+fn override_application_order(model: &str, keys: &FxHashSet<&str>) -> (bool, usize) {
+    // A chain longer than the number of keys must revisit one of them.
+    let chain: Vec<String> = std::iter::successors(Some(model.to_string()), |name| {
+        override_dependency(name, keys)
+    })
+    .take(keys.len() + 1)
+    .collect();
+    let occurrences = |name: &String| chain.iter().filter(|other| *other == name).count();
+    chain
+        .iter()
+        .position(|name| occurrences(name) > 1)
+        .map_or((false, chain.len() - 1), |cycle_entry| (true, cycle_entry))
+}
+
+fn override_dependency(model: &str, keys: &FxHashSet<&str>) -> Option<String> {
+    let resolved = crate::model_aliases::resolve_model_name(model);
+    [
+        pricing_alias(model),
+        Some(resolved.as_ref()),
+        pricing_alias(resolved.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|name| *name != model && keys.contains(name))
+    .map(str::to_string)
+}
+
 /// Maps model aliases to canonical pricing keys before fuzzy matching.
 fn pricing_alias(model: &str) -> Option<&'static str> {
     match model {
@@ -3027,9 +3208,9 @@ fn fetch_json_url(url: &str) -> std::io::Result<String> {
 mod tests {
     use super::{
         FAST_MULTIPLIER_OVERRIDES_JSON, FLEX_MULTIPLIER_OVERRIDES_JSON, Fuzzy, Pricing,
-        PricingEndpoint, PricingMap, SpeedMultiplierOverrides, build_time_models_dev_json,
-        build_time_pricing_json, embedded_models_dev_pricing, long_context_split_threshold,
-        model_without_date_suffix,
+        PricingEndpoint, PricingMap, SpeedMultiplierOverrides, ULTRAFAST_MULTIPLIER_OVERRIDES_JSON,
+        build_time_models_dev_json, build_time_pricing_json, embedded_models_dev_pricing,
+        long_context_split_threshold, model_without_date_suffix,
     };
     use ccusage_test_support::fs_fixture;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4967,14 +5148,16 @@ mod tests {
         let loaded_context_limit = pricing.context_limit("gpt-5.6-sol");
 
         let overrides = SpeedMultiplierOverrides::load(FAST_MULTIPLIER_OVERRIDES_JSON);
+        let ultrafast_overrides =
+            SpeedMultiplierOverrides::load(ULTRAFAST_MULTIPLIER_OVERRIDES_JSON);
         let flex_overrides = SpeedMultiplierOverrides::load(FLEX_MULTIPLIER_OVERRIDES_JSON);
         let mut builtin = PricingMap::default();
-        builtin.put_builtin_pricing(&overrides, &flex_overrides);
+        builtin.put_builtin_pricing(&overrides, &ultrafast_overrides, &flex_overrides);
         let builtin_rates = builtin.find_exact("gpt-5.6-sol").unwrap();
         assert_ne!(loaded.input, builtin_rates.input);
         assert_ne!(loaded.output, builtin_rates.output);
 
-        pricing.put_builtin_pricing(&overrides, &flex_overrides);
+        pricing.put_builtin_pricing(&overrides, &ultrafast_overrides, &flex_overrides);
         let resolved = pricing.find_exact("gpt-5.6-sol").unwrap();
         assert_eq!(resolved.input, loaded.input);
         assert_eq!(resolved.output, loaded.output);
@@ -5285,6 +5468,7 @@ mod tests {
         for model in [
             "gpt-6-astra",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-luna",
             "gpt-6-sol",
             "gpt-5.6-sol",
@@ -5314,6 +5498,7 @@ mod tests {
 
         for (model, expected) in [
             ("gpt-6-astra-2026-09-24", 2.0),
+            ("gpt-6.1-terra", 2.0),
             ("gpt-5.4-2026-03-05", 2.0),
             ("openai/gpt-5.6-sol-20261001", 2.0),
             ("gpt-5.6-terra-2026-10-01", 2.0),
@@ -5339,12 +5524,138 @@ mod tests {
     }
 
     #[test]
+    fn resolves_ultrafast_multiplier_with_the_standard_pricing_entry() {
+        let pricing = PricingMap::load_embedded();
+
+        for (model, expected) in [
+            ("gpt-6.1-sol", 6.0),
+            ("gpt-6-1-sol", 6.0),
+            ("openai/gpt-6-1-sol", 6.0),
+            ("openai@gpt-6-1-sol", 6.0),
+            ("gpt-6-1-sol-2026-09-24", 6.0),
+            ("gpt-6-astra", 6.0),
+            ("gpt-6-1-terra", 1.0),
+            ("gpt-6-sol", 1.0),
+        ] {
+            assert_eq!(
+                pricing.find(model).unwrap().ultrafast_multiplier,
+                expected,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_ultrafast_multiplier_through_model_aliases() {
+        let _aliases = crate::model_aliases::set_model_aliases_for_tests([
+            ("private-sol", "gpt-6.1-sol"),
+            ("gpt-6.1-terra", "gpt-6.1-sol"),
+        ]);
+        // Whether the embedded LiteLLM snapshot has an exact Terra entry depends
+        // on the build environment, so the test supplies both entries itself.
+        let mut pricing = PricingMap::default();
+        let json = serde_json::json!({
+            "gpt-6.1-sol": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.00001,
+            },
+            "gpt-6.1-terra": {
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000005,
+            },
+        })
+        .to_string();
+        assert_eq!(pricing.load_json(&json), 2);
+
+        let private_sol = pricing.find("private-sol").unwrap();
+        assert_eq!(private_sol.ultrafast_multiplier, 6.0);
+        assert_eq!(private_sol.input, 2e-6);
+
+        // An exact Terra entry wins over the alias, so its rates and multiplier stay Terra's.
+        let terra = pricing.find("gpt-6.1-terra").unwrap();
+        assert_eq!(terra.ultrafast_multiplier, 1.0);
+        assert_eq!(terra.input, 1e-6);
+    }
+
+    #[test]
+    fn keeps_published_speed_multipliers_for_user_price_overrides() {
+        let _aliases = crate::model_aliases::set_model_aliases_for_tests([
+            ("private-sol", "gpt-6.1-sol"),
+            ("private-dated-sol", "gpt-6.1-sol-2026-09-24"),
+        ]);
+        let override_value = ccusage_cli::PricingOverride {
+            input_cost_per_token: Some(3e-6),
+            ..Default::default()
+        };
+        let sol = PricingMap::load_embedded().find("gpt-6.1-sol").unwrap();
+
+        // Each map holds one override, so no other override creates an exact entry to inherit from.
+        for model in ["gpt-6.1-sol-2026-09-24", "private-dated-sol", "private-sol"] {
+            let key = model.to_string();
+            let pricing = PricingMap::load_with_overrides(true, false, [(&key, &override_value)]);
+            let overridden = pricing.find(model).unwrap();
+            assert_eq!(overridden.input, 3e-6, "{model}");
+            assert_eq!(overridden.fast_multiplier, 2.0, "{model}");
+            assert_eq!(overridden.ultrafast_multiplier, 6.0, "{model}");
+            assert_eq!(overridden.flex_multiplier, 0.5, "{model}");
+        }
+
+        let key = "private-sol".to_string();
+        let aliased = PricingMap::load_with_overrides(true, false, [(&key, &override_value)])
+            .find(&key)
+            .unwrap();
+        assert_eq!(aliased.output, sol.output);
+    }
+
+    #[test]
+    fn applies_target_overrides_before_aliases_that_sort_first() {
+        let _aliases = crate::model_aliases::set_model_aliases_for_tests([
+            ("a-private-sol", "gpt-6.1-sol"),
+            ("cycle-a", "cycle-b"),
+            ("cycle-b", "cycle-a"),
+            ("a-into-cycle", "cycle-a"),
+        ]);
+        let target_override = ccusage_cli::PricingOverride {
+            input_cost_per_token: Some(3e-6),
+            output_cost_per_token: Some(7e-6),
+            ..Default::default()
+        };
+        let alias_override = ccusage_cli::PricingOverride {
+            input_cost_per_token: Some(5e-6),
+            ..Default::default()
+        };
+        let cycle_override = ccusage_cli::PricingOverride {
+            input_cost_per_token: Some(4e-6),
+            output_cost_per_token: Some(9e-6),
+            ..Default::default()
+        };
+        let overrides = std::collections::BTreeMap::from([
+            ("a-private-sol".to_string(), alias_override.clone()),
+            ("gpt-6.1-sol".to_string(), target_override),
+            ("cycle-a".to_string(), cycle_override.clone()),
+            ("cycle-b".to_string(), cycle_override),
+            ("a-into-cycle".to_string(), alias_override),
+        ]);
+        let pricing = PricingMap::load_with_overrides(true, false, &overrides);
+
+        let alias = pricing.find("a-private-sol").unwrap();
+        assert_eq!(alias.input, 5e-6);
+        assert_eq!(alias.output, 7e-6);
+        assert_eq!(pricing.find("cycle-a").unwrap().input, 4e-6);
+        assert_eq!(pricing.find("cycle-b").unwrap().input, 4e-6);
+        let into_cycle = pricing.find("a-into-cycle").unwrap();
+        assert_eq!(into_cycle.input, 5e-6);
+        assert_eq!(into_cycle.output, 9e-6);
+    }
+
+    #[test]
     fn fills_flex_multiplier_only_for_supported_openai_model_names() {
         let mut pricing = PricingMap::default();
 
         for (model, expected) in [
             ("gpt-6-astra-2026-09-24", 0.5),
             ("gpt-6.1-sol-20260924", 0.5),
+            ("gpt-6.1-terra", 0.5),
             ("openai/gpt-5.5", 0.5),
             ("openrouter/openai/gpt-5.4-2026-03-05", 0.5),
             ("azure/gpt-5.2", 0.5),
@@ -5526,6 +5837,7 @@ mod tests {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -5544,6 +5856,7 @@ mod tests {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -5569,6 +5882,7 @@ mod tests {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -5717,6 +6031,7 @@ mod tests {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -5735,6 +6050,7 @@ mod tests {
                 cache_read_above_200k: None,
                 long_context_threshold: None,
                 fast_multiplier: 1.0,
+                ultrafast_multiplier: 1.0,
                 flex_multiplier: 1.0,
             },
         );
@@ -5862,6 +6178,7 @@ mod tests {
                     cache_read_above_200k: None,
                     long_context_threshold: None,
                     fast_multiplier: 1.5,
+                    ultrafast_multiplier: 1.0,
                     flex_multiplier: 1.0,
                 },
             );
@@ -5951,6 +6268,7 @@ mod tests {
                     cache_read_above_200k: Some(3.75e-7),
                     long_context_threshold: None,
                     fast_multiplier: 1.0,
+                    ultrafast_multiplier: 1.0,
                     flex_multiplier: 1.0,
                 },
             );
@@ -5992,6 +6310,7 @@ mod tests {
                     cache_read_above_200k: None,
                     long_context_threshold: None,
                     fast_multiplier: 1.0,
+                    ultrafast_multiplier: 1.0,
                     flex_multiplier: 1.0,
                 },
             );
@@ -6025,6 +6344,7 @@ mod tests {
                     cache_read_above_200k: None,
                     long_context_threshold: None,
                     fast_multiplier: 1.0,
+                    ultrafast_multiplier: 1.0,
                     flex_multiplier: 1.0,
                 },
             );
