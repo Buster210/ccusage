@@ -1,16 +1,12 @@
 name: update pricing
 
 on:
-  push:
-    branches: [master]
-  schedule:
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions: {}
 
-# Both legs push to master, so overlapping runs from pushes, the schedule, or a
-# manual dispatch would otherwise race each other's push.
+# Both legs push to master, so overlapping manual runs would otherwise race
+# each other's push.
 concurrency:
   group: update-pricing
   cancel-in-progress: false
@@ -19,11 +15,6 @@ jobs:
   update-pricing:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name != 'push' || !(
-        startsWith(github.event.head_commit.message, 'chore: release v') ||
-        startsWith(github.event.head_commit.message, 'chore(pricing): ')
-      )
     timeout-minutes: 60
     permissions:
       contents: write
