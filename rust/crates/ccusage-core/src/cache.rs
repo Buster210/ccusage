@@ -36,6 +36,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -47,6 +48,27 @@ static PRICING_V2_MIGRATED: AtomicBool = AtomicBool::new(false);
 static WAL_DONE: AtomicBool = AtomicBool::new(false);
 static EMPTY_CACHE: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::OnceLock::new();
+
+thread_local! {
+    /// Cache connection per thread, tagged with the database path it was opened
+    /// from. Tests point the cache at a temporary directory, so a changed path
+    /// reopens instead of reusing a handle to another database.
+    static DB_CONN: std::cell::RefCell<Option<(PathBuf, Rc<sqlite::Connection>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Shared handle to the cache connection. `sqlite::Connection` is neither `Clone`
+/// nor `Sync`, so the per-thread cache hands out reference-counted handles and
+/// callers keep using `&sqlite::Connection` through deref coercion.
+struct CacheConn(Rc<sqlite::Connection>);
+
+impl std::ops::Deref for CacheConn {
+    type Target = sqlite::Connection;
+
+    fn deref(&self) -> &sqlite::Connection {
+        &self.0
+    }
+}
 
 fn is_known_empty(namespace: &str) -> bool {
     EMPTY_CACHE
@@ -557,14 +579,28 @@ static OPEN_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Open (creating if needed) the cache database, apply pragmas, and migrate the
 /// schema. Returns `None` on any failure so the caller degrades to parsing
 /// without a cache, consistent with this module's non-fatal philosophy.
-fn open_db() -> Option<sqlite::Connection> {
+///
+/// The connection is cached per thread: a run opens the cache once per adapter,
+/// and each open pays pragmas plus schema migration. Tests switch cache
+/// directories, so the cache is keyed by path and reopened when it changes.
+fn open_db() -> Option<CacheConn> {
+    let dir = cache_dir()?;
+    let path = dir.join(DB_FILE);
+    let cached = DB_CONN.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(cached, _)| *cached == path)
+            .map(|(_, conn)| CacheConn(Rc::clone(conn)))
+    });
+    if cached.is_some() {
+        return cached;
+    }
     // `None` degrades to parsing without a cache, matching this function's
     // contract; a poisoned lock would mean a loader thread panicked mid-open.
     let _guard = OPEN_DB_LOCK.lock().ok()?;
     timed!("open_db", {
-        let dir = cache_dir()?;
         fs::create_dir_all(&dir).ok()?;
-        let conn = sqlite::open(dir.join(DB_FILE)).ok()?;
+        let conn = sqlite::open(&path).ok()?;
         // Set the busy timeout first so ordinary lock waits — BEGIN IMMEDIATE and the
         // schema migration — block and retry instead of failing outright.
         conn.execute("PRAGMA busy_timeout=5000;").ok()?;
@@ -585,7 +621,11 @@ fn open_db() -> Option<sqlite::Connection> {
             }
         }
         migrate(&conn)?;
-        Some(conn)
+        let conn = Rc::new(conn);
+        DB_CONN.with(|slot| {
+            *slot.borrow_mut() = Some((path, Rc::clone(&conn)));
+        });
+        Some(CacheConn(conn))
     })
 }
 
@@ -1855,7 +1895,7 @@ fn normalize_ledger_key(key: &str) -> Cow<'_, str> {
 ///
 /// `live_only` skips the re-emission, so deleted sources contribute nothing to
 /// the result while their spend stays retained in the ledger for a later run.
-fn merge_ledger<T: LedgerPayload>(
+fn merge_ledger<T: LedgerPayload + Send>(
     conn: &sqlite::Connection,
     namespace: &str,
     live: Vec<T>,
@@ -1896,7 +1936,7 @@ impl LedgerPayload for (LoadedEntry, Option<std::sync::Arc<str>>) {
 
 /// [`merge_ledger`] with optionally precomputed key sets. `Some` sets must be the
 /// full unwindowed scan; `None` behaves exactly like [`merge_ledger`].
-fn merge_ledger_with<T: LedgerPayload>(
+fn merge_ledger_with<T: LedgerPayload + Send>(
     conn: &sqlite::Connection,
     namespace: &str,
     live: Vec<T>,
@@ -1965,50 +2005,174 @@ fn merge_ledger_with<T: LedgerPayload>(
             scanned = load_ledger_keys(conn, namespace, date_filter);
             &scanned
         };
+        let filter_started = timing_enabled().then(Instant::now);
         let deleted_keys: Vec<String> = stored_keys
             .iter()
             .filter(|k| !seen.contains(normalize_ledger_key(k).as_ref()))
             .cloned()
             .collect();
-        // The blob statement is prepared once and reused for every deleted key.
-        // Preparing it per key compiled the same SQL tens of thousands of times
-        // on a namespace that retains many entries.
-        let mut blob_statement = conn
-            .prepare(
-                "SELECT entry, recorded_cost FROM ledger WHERE namespace = ? AND dedup_key = ?",
-            )
-            .ok();
-        for key in deleted_keys {
-            if let Some((blob, recorded_cost)) =
-                load_ledger_row(&mut blob_statement, namespace, &key)
-                && let Some(entry) = decode_ledger_entry(&blob)
-            {
-                if let Some((since, until)) = date_filter {
-                    let d = entry.date();
-                    if d < since || d > until {
-                        continue;
-                    }
+        let filter_elapsed = filter_started.map(|s| s.elapsed());
+        let decode_started = timing_enabled().then(Instant::now);
+        let deleted_count = deleted_keys.len();
+        // A namespace that retains thousands of gone sources otherwise pays one
+        // indexed lookup per key, and each lookup is a random page fetch on a
+        // database that often runs to hundreds of megabytes. Above the threshold,
+        // read the namespace sequentially instead and skip the live keys in Rust:
+        // one ordered scan moves less data than the random probes it replaces.
+        if deleted_count >= LEDGER_SEQUENTIAL_DECODE_MIN {
+            let rows = load_ledger_rows(conn, namespace, date_filter);
+            out.extend(decode_deleted_rows_parallel(
+                &rows,
+                &seen,
+                date_filter,
+                mode,
+            ));
+        } else {
+            // The blob statement is prepared once and reused for every deleted
+            // key. Preparing it per key compiled the same SQL tens of thousands of
+            // times on a namespace that retains many entries.
+            let mut blob_statement = conn
+                .prepare(
+                    "SELECT entry, recorded_cost FROM ledger WHERE namespace = ? AND dedup_key = ?",
+                )
+                .ok();
+            for key in deleted_keys {
+                if let Some((blob, recorded_cost)) =
+                    load_ledger_row(&mut blob_statement, namespace, &key)
+                {
+                    out.extend(decode_deleted_ledger_rows(
+                        &[(key, blob, recorded_cost)],
+                        &seen,
+                        date_filter,
+                        mode,
+                    ));
                 }
-                let mut loaded = entry.into_loaded(key.clone());
-                // The agent-recorded cost outlived the source file in the ledger
-                // column, so the stored cost is restored here the way the cache
-                // read path does. Rows written before v3 carry no recorded cost.
-                loaded.stored_cost = stored_cost_for_mode(recorded_cost, mode);
-                if let Some(m) = loaded.model.as_deref() {
-                    let stripped = strip_model_prefix(m).to_string();
-                    if stripped != m {
-                        loaded.model = Some(stripped);
-                        if let Some(dm) = loaded.data.message.model.as_mut() {
-                            *dm = strip_model_prefix(dm).to_string();
-                        }
-                    }
-                }
-                seen.insert(normalize_ledger_key(&key).into_owned());
-                out.push(T::from_ledger_entry(loaded));
             }
+        }
+        if timing_enabled() {
+            eprintln!(
+                "[timing] ledger:{namespace}: deleted_filter {:?} count={} decode {:?} scanned={}",
+                filter_elapsed.unwrap_or_default(),
+                deleted_count,
+                decode_started.map(|s| s.elapsed()).unwrap_or_default(),
+                stored_keys.len()
+            );
         }
     }
     out
+}
+
+/// Deleted entries above this count are read with one sequential scan instead of
+/// an indexed lookup per key. Below it the random probes are cheaper, because the
+/// scan also reads every live blob in the namespace.
+const LEDGER_SEQUENTIAL_DECODE_MIN: usize = 4096;
+/// Upper bound on threads that decode retained rows. Each one only allocates
+/// decoded entries, so more than this stops paying for the join overhead.
+const LEDGER_DECODE_WORKERS: usize = 8;
+
+/// Decode a chunk of retained rows, skipping keys that are still live.
+fn decode_deleted_ledger_rows<T: LedgerPayload>(
+    rows: &[(String, Vec<u8>, Option<f64>)],
+    seen: &FxHashSet<String>,
+    date_filter: Option<(&str, &str)>,
+    mode: CostMode,
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(rows.len());
+    for (key, blob, recorded_cost) in rows {
+        if seen.contains(normalize_ledger_key(key).as_ref()) {
+            continue;
+        }
+        let Some(entry) = decode_ledger_entry(blob) else {
+            continue;
+        };
+        if let Some((since, until)) = date_filter {
+            let d = entry.date();
+            if d < since || d > until {
+                continue;
+            }
+        }
+        let mut loaded = entry.into_loaded(key.clone());
+        loaded.stored_cost = stored_cost_for_mode(*recorded_cost, mode);
+        if let Some(m) = loaded.model.as_deref() {
+            let stripped = strip_model_prefix(m);
+            if stripped.len() != m.len() {
+                loaded.model = Some(stripped.to_string());
+                if let Some(dm) = loaded.data.message.model.as_deref() {
+                    let dm_stripped = strip_model_prefix(dm);
+                    if dm_stripped.len() != dm.len() {
+                        loaded.data.message.model = Some(dm_stripped.to_string());
+                    }
+                }
+            }
+        }
+        out.push(T::from_ledger_entry(loaded));
+    }
+    out
+}
+
+/// Read a namespace's rows in key order, with the blob each one carries.
+fn load_ledger_rows(
+    conn: &sqlite::Connection,
+    namespace: &str,
+    date_filter: Option<(&str, &str)>,
+) -> Vec<(String, Vec<u8>, Option<f64>)> {
+    let mut out = Vec::new();
+    let sql = if date_filter.is_some() {
+        "SELECT dedup_key, entry, recorded_cost FROM ledger WHERE namespace = ? AND (date BETWEEN ? AND ? OR date IS NULL)"
+    } else {
+        "SELECT dedup_key, entry, recorded_cost FROM ledger WHERE namespace = ?"
+    };
+    let Ok(mut st) = conn.prepare(sql) else {
+        return out;
+    };
+    if st.bind((1, namespace)).is_err() {
+        return out;
+    }
+    if let Some((since, until)) = date_filter
+        && (st.bind((2, since)).is_err() || st.bind((3, until)).is_err())
+    {
+        return out;
+    }
+    while let Ok(sqlite::State::Row) = st.next() {
+        let (Ok(key), Ok(blob)) = (st.read::<String, _>(0), st.read::<Vec<u8>, _>(1)) else {
+            continue;
+        };
+        let cost = st.read::<Option<f64>, _>(2).ok().flatten();
+        out.push((key, blob, cost));
+    }
+    out
+}
+
+/// Decode retained rows on several threads and concatenate the results in scan
+/// order, so the emitted sequence does not depend on scheduling. Every ledger key
+/// is unique, so chunks need no shared dedupe state.
+fn decode_deleted_rows_parallel<T: LedgerPayload + Send>(
+    rows: &[(String, Vec<u8>, Option<f64>)],
+    seen: &FxHashSet<String>,
+    date_filter: Option<(&str, &str)>,
+    mode: CostMode,
+) -> Vec<T> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(LEDGER_DECODE_WORKERS)
+        .min(rows.len());
+    if workers <= 1 {
+        return decode_deleted_ledger_rows(rows, seen, date_filter, mode);
+    }
+    let chunk_size = rows.len().div_ceil(workers);
+    let mut parts: Vec<Vec<T>> = Vec::with_capacity(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = rows
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || decode_deleted_ledger_rows(chunk, seen, date_filter, mode))
+            })
+            .collect();
+        for handle in handles {
+            parts.push(handle.join().unwrap_or_default());
+        }
+    });
+    parts.into_iter().flatten().collect()
 }
 
 /// Append `entries` to the ledger in the caller's transaction. The primary key
@@ -2119,7 +2283,7 @@ fn load_ledger_row(
 /// namespace distinct from any [`load_with_cache`] caller so the two live sets
 /// never appear to "delete" each other. `live_only` carries the same meaning as
 /// in [`load_with_cache`]: when set, retained spend for gone sources is suppressed.
-pub fn retain_via_ledger<T: LedgerPayload>(
+pub fn retain_via_ledger<T: LedgerPayload + Send>(
     namespace: &str,
     live: Vec<T>,
     live_only: bool,
@@ -2143,9 +2307,10 @@ pub fn retain_via_ledger<T: LedgerPayload>(
             }
             if let Some(cover_started) = cover_started {
                 eprintln!(
-                    "[timing] ledger:{namespace}: cover_check {:?} missing={}",
+                    "[timing] ledger:{namespace}: cover_check {:?} missing={} live={}",
                     cover_started.elapsed(),
-                    missing.len()
+                    missing.len(),
+                    seen.len()
                 );
             }
             let append_started = std::env::var_os("CCUSAGE_DEBUG_TIMING")
@@ -2187,7 +2352,10 @@ struct LedgerKeySets {
 /// Scan the unwindowed stored keys once; a windowed subset cannot prove coverage
 /// because the append covers all dates. Failures surface as empty sets (fail-open).
 fn load_ledger_key_sets(conn: &sqlite::Connection, namespace: &str) -> LedgerKeySets {
+    let started = timing_enabled().then(Instant::now);
     let stored_raw = load_ledger_keys(conn, namespace, None);
+    let scanned = started.map(|s| s.elapsed());
+    let set_started = timing_enabled().then(Instant::now);
     let mut stored_normalized =
         FxHashSet::with_capacity_and_hasher(stored_raw.len(), Default::default());
     stored_normalized.extend(
@@ -2195,6 +2363,14 @@ fn load_ledger_key_sets(conn: &sqlite::Connection, namespace: &str) -> LedgerKey
             .iter()
             .map(|key| normalize_ledger_key(key).into_owned()),
     );
+    if timing_enabled() {
+        eprintln!(
+            "[timing] ledger:{namespace}: stored_keys scan={:?} normalize_set={:?} rows={}",
+            scanned.unwrap_or_default(),
+            set_started.map(|s| s.elapsed()).unwrap_or_default(),
+            stored_raw.len()
+        );
+    }
     LedgerKeySets {
         stored_raw,
         stored_normalized,
