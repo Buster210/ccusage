@@ -36,6 +36,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -47,6 +48,27 @@ static PRICING_V2_MIGRATED: AtomicBool = AtomicBool::new(false);
 static WAL_DONE: AtomicBool = AtomicBool::new(false);
 static EMPTY_CACHE: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::OnceLock::new();
+
+thread_local! {
+    /// Cache connection per thread, tagged with the database path it was opened
+    /// from. Tests point the cache at a temporary directory, so a changed path
+    /// reopens instead of reusing a handle to another database.
+    static DB_CONN: std::cell::RefCell<Option<(PathBuf, Rc<sqlite::Connection>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Shared handle to the cache connection. `sqlite::Connection` is neither `Clone`
+/// nor `Sync`, so the per-thread cache hands out reference-counted handles and
+/// callers keep using `&sqlite::Connection` through deref coercion.
+struct CacheConn(Rc<sqlite::Connection>);
+
+impl std::ops::Deref for CacheConn {
+    type Target = sqlite::Connection;
+
+    fn deref(&self) -> &sqlite::Connection {
+        &self.0
+    }
+}
 
 fn is_known_empty(namespace: &str) -> bool {
     EMPTY_CACHE
@@ -557,14 +579,28 @@ static OPEN_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Open (creating if needed) the cache database, apply pragmas, and migrate the
 /// schema. Returns `None` on any failure so the caller degrades to parsing
 /// without a cache, consistent with this module's non-fatal philosophy.
-fn open_db() -> Option<sqlite::Connection> {
+///
+/// The connection is cached per thread: a run opens the cache once per adapter,
+/// and each open pays pragmas plus schema migration. Tests switch cache
+/// directories, so the cache is keyed by path and reopened when it changes.
+fn open_db() -> Option<CacheConn> {
+    let dir = cache_dir()?;
+    let path = dir.join(DB_FILE);
+    let cached = DB_CONN.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(cached, _)| *cached == path)
+            .map(|(_, conn)| CacheConn(Rc::clone(conn)))
+    });
+    if cached.is_some() {
+        return cached;
+    }
     // `None` degrades to parsing without a cache, matching this function's
     // contract; a poisoned lock would mean a loader thread panicked mid-open.
     let _guard = OPEN_DB_LOCK.lock().ok()?;
     timed!("open_db", {
-        let dir = cache_dir()?;
         fs::create_dir_all(&dir).ok()?;
-        let conn = sqlite::open(dir.join(DB_FILE)).ok()?;
+        let conn = sqlite::open(&path).ok()?;
         // Set the busy timeout first so ordinary lock waits — BEGIN IMMEDIATE and the
         // schema migration — block and retry instead of failing outright.
         conn.execute("PRAGMA busy_timeout=5000;").ok()?;
@@ -585,7 +621,11 @@ fn open_db() -> Option<sqlite::Connection> {
             }
         }
         migrate(&conn)?;
-        Some(conn)
+        let conn = Rc::new(conn);
+        DB_CONN.with(|slot| {
+            *slot.borrow_mut() = Some((path, Rc::clone(&conn)));
+        });
+        Some(CacheConn(conn))
     })
 }
 
