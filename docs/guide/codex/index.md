@@ -37,7 +37,7 @@ CODEX_HOME="$HOME/.codex,$HOME/.codex-work,$HOME/codex-exec-logs" ccusage codex 
 | `ccusage codex monthly` | Aggregate usage by month     | [Monthly Usage](/guide/monthly-reports) |
 | `ccusage codex session` | Group usage by Codex session | [Session Usage](/guide/session-reports) |
 
-These views support `--json`, `--compact`, `--offline`, and `--speed auto|standard|fast`.
+These views support `--json`, `--compact`, `--offline`, and `--speed auto|standard|flex|fast`.
 
 ## Monthly Example
 
