@@ -601,10 +601,14 @@ pub struct PricingMap {
     // reprice loop would otherwise repeat for every billable row. Distinct
     // models per run number in the dozens.
     find_cache: std::sync::RwLock<(u64, FxHashMap<String, Option<Pricing>>)>,
-    /// Every entry key under its normalized spelling, or `None` when several
-    /// keys share it. Built lazily so per-event pricing does not rescan the
-    /// whole table per call; keys (not rates) are stored, so only a key-set
-    /// change drops it.
+    /// Every entry key under its normalized spelling, mapped to the one key
+    /// carrying that spelling, or `None` when several keys share it.
+    ///
+    /// Built on the first normalized lookup so [`Self::find_exact_normalized`]
+    /// does not rescan the whole table per call; parsers that price every
+    /// event through it would otherwise spend most of a report there. Keys
+    /// rather than rates are stored, so only a change to the key set has to
+    /// drop it.
     normalized_keys: OnceLock<FxHashMap<String, Option<String>>>,
 }
 

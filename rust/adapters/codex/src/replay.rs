@@ -16,7 +16,9 @@ use crate::{
 };
 
 use super::{
-    parser::{codex_value_timestamp, visit_codex_session_file_with_compaction_history},
+    parser::{
+        CodexForkReplay, codex_value_timestamp, visit_codex_session_file_with_compaction_history,
+    },
     reader::open_rollout_reader_with_capacity,
 };
 
@@ -89,6 +91,7 @@ struct ParentReplay {
     /// `None` when the referenced parent log is not part of the scanned files.
     path: Option<PathBuf>,
     forked_at: Option<TimestampMs>,
+    spawned: bool,
 }
 
 struct ParentUsage {
@@ -161,16 +164,23 @@ impl CodexReplayPlan {
     /// Usage history that `child` replayed from the session it forked from.
     ///
     /// Returns `None` for sessions that are not forks. Forked sessions whose
-    /// parent log is unavailable return an empty slice, which tells the parser
-    /// to fall back to the rewritten-second heuristic.
-    pub(super) fn replay_prefix(&self, child: &Path) -> Option<&[CodexRawUsage]> {
+    /// parent log is unavailable get an empty prefix, which tells the parser
+    /// to fall back to the rewritten-burst heuristic.
+    pub(super) fn fork_replay(&self, child: &Path) -> Option<CodexForkReplay<'_>> {
         let parent = self.parent_by_child.get(child)?;
+        Some(CodexForkReplay {
+            prefix: self.replay_prefix(parent),
+            ends_at_usage_record: parent.spawned,
+        })
+    }
+
+    fn replay_prefix(&self, parent: &ParentReplay) -> &[CodexRawUsage] {
         let Some(stream) = parent
             .path
             .as_ref()
             .and_then(|path| self.usage_by_parent.get(path))
         else {
-            return Some(&[]);
+            return &[];
         };
         // Usage the parent recorded after the fork was never replayed, so it must
         // not mask the child's own events.
@@ -181,7 +191,7 @@ impl CodexReplayPlan {
                 .position(|timestamp| timestamp.is_some_and(|timestamp| timestamp > forked_at))
                 .unwrap_or(stream.usage.len())
         });
-        Some(&stream.usage[..replay_len])
+        &stream.usage[..replay_len]
     }
 
     /// Recognizes copied compaction requests even when date filtering excludes
@@ -238,6 +248,7 @@ fn build_parent_replays(
                 ParentReplay {
                     path: first_non_child_path(files_by_session_id, parent_id, child),
                     forked_at: metadata.timestamp,
+                    spawned: metadata.spawned,
                 },
             ))
         })
@@ -394,6 +405,7 @@ struct CodexSessionMetadata {
     session_id: Option<String>,
     parent_id: Option<String>,
     timestamp: Option<TimestampMs>,
+    spawned: bool,
 }
 
 fn read_codex_session_metadata(path: &Path) -> CodexSessionMetadata {
@@ -414,6 +426,10 @@ fn read_codex_session_metadata(path: &Path) -> CodexSessionMetadata {
     let payload = (value.get("type").and_then(Value::as_str) == Some("session_meta"))
         .then_some(value.get("payload"))
         .flatten();
+    let spawn_parent_id = payload
+        .and_then(|payload| payload.pointer("/source/subagent/thread_spawn/parent_thread_id"))
+        .and_then(Value::as_str)
+        .filter(|parent_id| !parent_id.is_empty());
     CodexSessionMetadata {
         timestamp: codex_value_timestamp(value.get("timestamp")),
         session_id: payload
@@ -423,14 +439,9 @@ fn read_codex_session_metadata(path: &Path) -> CodexSessionMetadata {
         parent_id: payload
             .and_then(|payload| payload.get("forked_from_id"))
             .and_then(Value::as_str)
-            .or_else(|| {
-                payload
-                    .and_then(|payload| {
-                        payload.pointer("/source/subagent/thread_spawn/parent_thread_id")
-                    })
-                    .and_then(Value::as_str)
-            })
             .filter(|parent_id| !parent_id.is_empty())
+            .or(spawn_parent_id)
             .map(str::to_string),
+        spawned: spawn_parent_id.is_some(),
     }
 }

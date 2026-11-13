@@ -212,6 +212,7 @@ fn command_snapshot(command: Option<Command>) -> Value {
             "agent": agent,
         }),
         Some(Command::ZCode(args)) => agent_command_snapshot("zcode", args),
+        Some(Command::Cline(args)) => agent_command_snapshot("cline", args),
     }
 }
 
@@ -811,7 +812,7 @@ fn root_help_lists_agent_namespaces_without_nested_commands() {
     let help = help_text();
     let agents = [
         "claude", "codex", "opencode", "amp", "droid", "codebuff", "hermes", "pi", "goose", "kilo",
-        "copilot", "gemini", "kimi", "qwen", "openclaw", "grok", "zcode",
+        "copilot", "gemini", "kimi", "qwen", "openclaw", "grok", "zcode", "cline",
     ];
 
     for agent in agents {
@@ -1124,6 +1125,10 @@ fn snapshots_representative_cli_parse_shapes() {
             "cli": cli_snapshot(parse(&["ccusage", "zcode", "daily", "--json"])),
         }),
         json!({
+            "case": "cline weekly",
+            "cli": cli_snapshot(parse(&["ccusage", "cline", "weekly", "--json"])),
+        }),
+        json!({
             "case": "blocks active recent",
             "cli": cli_snapshot(parse(&[
                 "ccusage",
@@ -1422,6 +1427,44 @@ fn parses_opencode_weekly_options() {
     };
     assert_eq!(args.kind, AgentReportKind::Weekly);
     assert!(args.shared.json);
+    assert!(!args.include_claude_agent);
+}
+
+#[test]
+fn parses_opencode_include_claude_agent_on_every_report() {
+    for report in [None, Some("daily"), Some("weekly"), Some("session")] {
+        let mut argv = vec!["ccusage", "opencode"];
+        argv.extend(report);
+        argv.extend(["--include-claude-agent", "--json"]);
+        let cli = parse(&argv);
+        let Some(Command::OpenCode(args)) = cli.command else {
+            panic!("expected opencode command");
+        };
+        assert!(args.include_claude_agent, "{report:?}");
+        assert!(args.shared.json, "{report:?}");
+    }
+    assert_eq!(
+        parse_error(&["ccusage", "amp", "--include-claude-agent"]),
+        "Unknown option '--include-claude-agent'"
+    );
+}
+
+#[test]
+fn parses_cline_standard_reports() {
+    for (report, kind) in [
+        ("daily", AgentReportKind::Daily),
+        ("weekly", AgentReportKind::Weekly),
+        ("monthly", AgentReportKind::Monthly),
+        ("session", AgentReportKind::Session),
+    ] {
+        let cli = parse(&["ccusage", "cline", report, "--json"]);
+        let Some(Command::Cline(args)) = cli.command else {
+            panic!("expected cline {report} command");
+        };
+
+        assert_eq!(args.kind, kind);
+        assert!(args.shared.json);
+    }
 }
 
 #[test]

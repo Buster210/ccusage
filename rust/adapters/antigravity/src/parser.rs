@@ -41,6 +41,7 @@ struct GeneratorMetadata {
     usage: Option<ModelUsage>,
     retry_usages: Vec<ModelUsage>,
     timestamp: Option<TimestampMs>,
+    step_indices: Vec<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +77,24 @@ impl ModelUsage {
             || self.cache_read_tokens > 0
             || self.reasoning_tokens > 0
             || self.visible_output_tokens > 0
+    }
+
+    fn same_token_counts(&self, other: &Self) -> bool {
+        self.model_id == other.model_id
+            && self.input_tokens == other.input_tokens
+            && self.total_output_tokens == other.total_output_tokens
+            && self.cache_creation_tokens == other.cache_creation_tokens
+            && self.cache_read_tokens == other.cache_read_tokens
+            && self.reasoning_tokens == other.reasoning_tokens
+            && self.visible_output_tokens == other.visible_output_tokens
+    }
+
+    fn is_mirror_of(&self, primary: &Self) -> bool {
+        self.same_token_counts(primary)
+            && self
+                .identity_keys()
+                .iter()
+                .all(|identity| primary.identity_keys().contains(identity))
     }
 
     fn identity_keys(&self) -> Vec<String> {
@@ -178,7 +197,7 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
 
     let mut events = Vec::new();
     let mut identity_timestamps = HashMap::new();
-    for (_idx, metadata) in step_rows {
+    for (idx, metadata) in step_rows {
         let model = metadata
             .model
             .as_deref()
@@ -191,6 +210,7 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
             })
             .or_else(|| generation_model.clone());
         let timestamp = metadata.timestamp.map(|timestamp| (timestamp, 3));
+        let fallback_identities = [format!("step:{session_id}:{idx}")];
         if let Some(usage) = metadata.usage {
             append_usage_event(
                 &mut events,
@@ -198,11 +218,13 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
                 usage,
                 EventContext {
                     model: model.as_deref(),
+                    model_id: metadata.model_id,
                     provider: metadata.provider,
                     timestamp,
                     trajectory_timestamp,
                     fallback_timestamp,
                     session_id: &session_id,
+                    fallback_identities: &fallback_identities,
                 },
             );
         }
@@ -213,18 +235,20 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
                 usage,
                 EventContext {
                     model: model.as_deref(),
+                    model_id: metadata.model_id,
                     provider: metadata.provider,
                     timestamp,
                     trajectory_timestamp,
                     fallback_timestamp,
                     session_id: &session_id,
+                    fallback_identities: &[],
                 },
             );
         }
     }
 
     let mut current_model = None;
-    for (_idx, metadata) in generation_rows {
+    for (idx, metadata) in generation_rows {
         let row_model = metadata
             .model
             .as_deref()
@@ -247,6 +271,15 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
             current_model = Some(model);
         }
         let model = current_model.clone();
+        let fallback_identities: Vec<String> = if metadata.step_indices.is_empty() {
+            vec![format!("gen:{session_id}:{idx}")]
+        } else {
+            metadata
+                .step_indices
+                .iter()
+                .map(|step_idx| format!("step:{session_id}:{step_idx}"))
+                .collect()
+        };
         if let Some(usage) = metadata.usage {
             append_usage_event(
                 &mut events,
@@ -254,11 +287,13 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
                 usage,
                 EventContext {
                     model: model.as_deref(),
+                    model_id: metadata.model_id,
                     provider: None,
                     timestamp: metadata.timestamp.map(|timestamp| (timestamp, 3)),
                     trajectory_timestamp,
                     fallback_timestamp,
                     session_id: &session_id,
+                    fallback_identities: &fallback_identities,
                 },
             );
         }
@@ -269,11 +304,13 @@ pub(super) fn parse_sqlite_file(path: &Path) -> Result<Option<Vec<AntigravityUsa
                 usage,
                 EventContext {
                     model: model.as_deref(),
+                    model_id: metadata.model_id,
                     provider: None,
                     timestamp: metadata.timestamp.map(|timestamp| (timestamp, 3)),
                     trajectory_timestamp,
                     fallback_timestamp,
                     session_id: &session_id,
+                    fallback_identities: &[],
                 },
             );
         }
@@ -413,11 +450,13 @@ fn table_exists(connection: &sqlite::Connection, table: &str) -> Result<bool> {
 #[derive(Clone, Copy)]
 struct EventContext<'a> {
     model: Option<&'a str>,
+    model_id: Option<u64>,
     provider: Option<u64>,
     timestamp: Option<(TimestampMs, u8)>,
     trajectory_timestamp: Option<TimestampMs>,
     fallback_timestamp: TimestampMs,
     session_id: &'a str,
+    fallback_identities: &'a [String],
 }
 
 fn append_usage_event(
@@ -429,13 +468,16 @@ fn append_usage_event(
     if !usage.is_token_bearing() {
         return;
     }
+    let mut identities = usage.identity_keys();
+    if identities.is_empty() {
+        identities.extend(context.fallback_identities.iter().cloned());
+    }
     let (timestamp, timestamp_rank) = context
         .timestamp
         .or_else(|| {
-            usage
-                .identity_keys()
-                .into_iter()
-                .find_map(|identity| identity_timestamps.get(&identity).copied())
+            identities
+                .iter()
+                .find_map(|identity| identity_timestamps.get(identity).copied())
         })
         .or_else(|| context.trajectory_timestamp.map(|timestamp| (timestamp, 1)))
         .unwrap_or((context.fallback_timestamp, 0));
@@ -450,15 +492,23 @@ fn append_usage_event(
     let reasoning_tokens = usage
         .reasoning_tokens
         .max(total_output_tokens.saturating_sub(output_tokens));
-    let model = usage
+    let id_model = usage
         .model_id
         .map(model_name_from_id)
-        .and_then(|model| normalize_antigravity_model(&model))
+        .and_then(|model| normalize_antigravity_model(&model));
+    let same_model_row = context
+        .model
+        .filter(|_| context.model_id == usage.model_id)
+        .and_then(normalize_antigravity_model);
+    let model = id_model
+        .clone()
+        .filter(|model| is_resolved_model(model))
+        .or_else(|| same_model_row.filter(|model| is_resolved_model(model)))
+        .or(id_model)
         .or_else(|| context.model.and_then(normalize_antigravity_model))
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let provider = usage.provider.or(context.provider);
     let (message_id, message_id_rank) = usage.preferred_message_id();
-    let identities = usage.identity_keys();
     let timestamp_value = timestamp;
     for identity in &identities {
         let should_update =
@@ -516,7 +566,7 @@ pub(super) fn merge_usage_event(
         .saturating_add(target.cache_creation_tokens)
         .saturating_add(target.cache_read_tokens)
         .saturating_add(target.total_output_tokens);
-    if target.model == DEFAULT_MODEL && duplicate.model != DEFAULT_MODEL {
+    if model_resolution(&duplicate.model) > model_resolution(&target.model) {
         target.model = duplicate.model.clone();
     }
     if target.provider.is_none() {
@@ -548,13 +598,14 @@ fn parse_generator_metadata(blob: &[u8]) -> ProtoResult<GeneratorMetadata> {
     let usage = field_bytes(&chat_model_fields, 4)
         .map(parse_model_usage)
         .transpose()?;
-    let retry_usages = field_bytes_all(&chat_model_fields, 17)
+    let mut retry_usages = field_bytes_all(&chat_model_fields, 17)
         .into_iter()
         .map(parse_retry_info)
         .collect::<ProtoResult<Vec<_>>>()?
         .into_iter()
         .flatten()
-        .collect();
+        .collect::<Vec<_>>();
+    drop_primary_mirror(usage.as_ref(), &mut retry_usages);
     let timestamp = field_bytes(&chat_model_fields, 9)
         .map(parse_generation_info_timestamp)
         .transpose()?
@@ -563,25 +614,71 @@ fn parse_generator_metadata(blob: &[u8]) -> ProtoResult<GeneratorMetadata> {
         .into_iter()
         .find_map(|field| field_text(&chat_model_fields, field));
     let model_id = field_varint(&chat_model_fields, 3).filter(|value| *value != 0);
+    let step_indices = parse_step_indices(&root);
     Ok(GeneratorMetadata {
         model,
         model_id,
         usage,
         retry_usages,
         timestamp,
+        step_indices,
     })
+}
+
+// `retry_infos` lists every attempt, including the one already reported as the
+// primary `usage`, so exactly one entry may be its copy.
+fn drop_primary_mirror(primary: Option<&ModelUsage>, retries: &mut Vec<ModelUsage>) {
+    if let Some(primary) = primary
+        && let Some(position) = retries.iter().position(|retry| retry.is_mirror_of(primary))
+    {
+        retries.remove(position);
+    }
+}
+
+fn parse_step_indices(root: &[ProtoField<'_>]) -> Vec<i64> {
+    let mut indices = Vec::new();
+    for field in root {
+        if field.number != 2 {
+            continue;
+        }
+        match field.value {
+            ProtoValue::Varint(value) => {
+                if let Ok(index) = i64::try_from(value) {
+                    indices.push(index);
+                }
+            }
+            ProtoValue::Bytes(packed) => {
+                let mut packed = packed;
+                while !packed.is_empty() {
+                    match read_varint(&mut packed) {
+                        Ok(value) => {
+                            if let Ok(index) = i64::try_from(value) {
+                                indices.push(index);
+                            } else {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            ProtoValue::Fixed32 | ProtoValue::Fixed64 => {}
+        }
+    }
+    indices
 }
 
 fn parse_step_metadata(blob: &[u8]) -> ProtoResult<StepMetadata> {
     let fields = decode_fields(blob)?;
     let usage = field_bytes(&fields, 9).map(parse_model_usage).transpose()?;
-    let retry_usages = field_bytes_all(&fields, 28)
+    let mut retry_usages = field_bytes_all(&fields, 28)
         .into_iter()
         .map(parse_retry_info)
         .collect::<ProtoResult<Vec<_>>>()?
         .into_iter()
         .flatten()
-        .collect();
+        .collect::<Vec<_>>();
+    drop_primary_mirror(usage.as_ref(), &mut retry_usages);
     let model_info = field_bytes(&fields, 24)
         .map(parse_model_info)
         .transpose()?
@@ -805,9 +902,37 @@ fn model_name_from_id(model_id: u64) -> String {
         1417..=1419 => "gemini-4-argon".to_string(),
         1402 => "claude-opus-5-5".to_string(),
         1050 => "gemini-3.1-flash-lite".to_string(),
-        1_000.. => format!("model_placeholder_m{}", model_id - 1_000),
-        _ => format!("antigravity-model-{model_id}"),
+        1_000.. => format!("{UNRESOLVED_PLACEHOLDER_PREFIX}{}", model_id - 1_000),
+        _ => format!("{UNRESOLVED_ID_PREFIX}{model_id}"),
     }
+}
+
+const UNRESOLVED_PLACEHOLDER_PREFIX: &str = "model_placeholder_m";
+const UNRESOLVED_ID_PREFIX: &str = "antigravity-model-";
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum ModelResolution {
+    Default,
+    Placeholder,
+    Resolved,
+}
+
+// Placeholders that normalization did not map to a real model rank below a
+// model name from another field or a duplicate copy, but above the default.
+fn model_resolution(model: &str) -> ModelResolution {
+    if model == DEFAULT_MODEL {
+        ModelResolution::Default
+    } else if model.starts_with(UNRESOLVED_PLACEHOLDER_PREFIX)
+        || model.starts_with(UNRESOLVED_ID_PREFIX)
+    {
+        ModelResolution::Placeholder
+    } else {
+        ModelResolution::Resolved
+    }
+}
+
+fn is_resolved_model(model: &str) -> bool {
+    model_resolution(model) == ModelResolution::Resolved
 }
 
 fn normalize_antigravity_model(raw: &str) -> Option<String> {
@@ -1187,6 +1312,16 @@ pub(super) mod test_support {
         timestamp: Option<(u64, u64)>,
         retries: &[UsageFixture],
     ) -> Vec<u8> {
+        metadata_blob_with_steps(model, usage, timestamp, retries, &[])
+    }
+
+    pub(crate) fn metadata_blob_with_steps(
+        model: Option<&str>,
+        usage: Option<UsageFixture>,
+        timestamp: Option<(u64, u64)>,
+        retries: &[UsageFixture],
+        step_indices: &[i64],
+    ) -> Vec<u8> {
         let mut chat_model = Vec::new();
         if let Some(usage) = usage {
             if let Some(model_id) = usage.model_id {
@@ -1211,6 +1346,10 @@ pub(super) mod test_support {
 
         let mut metadata = Vec::new();
         field_bytes(1, &chat_model, &mut metadata);
+        for step_index in step_indices {
+            let value = u64::try_from(*step_index).unwrap_or(0);
+            field_varint(2, value, &mut metadata);
+        }
         metadata
     }
 
@@ -1309,13 +1448,70 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{UsageFixture, step_metadata_blob};
+    use super::test_support::{UsageFixture, metadata_blob_with_steps, step_metadata_blob};
     use super::{
-        API_PROVIDER_GOOGLE_GEMINI, ProtoField, ProtoValue, calculate_antigravity_cost,
-        field_bytes, field_bytes_all, field_text, field_varint, missing_antigravity_pricing,
-        model_candidates, model_name_from_id, normalize_antigravity_model, parse_step_metadata,
+        API_PROVIDER_GOOGLE_GEMINI, DEFAULT_MODEL, EventContext, ModelUsage, ProtoField,
+        ProtoValue, append_usage_event, calculate_antigravity_cost, field_bytes, field_bytes_all,
+        field_text, field_varint, merge_usage_event, missing_antigravity_pricing, model_candidates,
+        model_name_from_id, normalize_antigravity_model, parse_generator_metadata,
+        parse_step_metadata,
     };
     use crate::{PricingMap, TimestampMs, TokenUsageRaw, cli::CostMode, parse_ts_timestamp};
+
+    #[test]
+    fn merge_prefers_resolved_then_placeholder_then_default_model() {
+        let event = |model: Option<&str>| {
+            let mut events = Vec::new();
+            append_usage_event(
+                &mut events,
+                &mut std::collections::HashMap::new(),
+                ModelUsage {
+                    input_tokens: 1,
+                    ..ModelUsage::default()
+                },
+                EventContext {
+                    model,
+                    model_id: None,
+                    provider: None,
+                    timestamp: None,
+                    trajectory_timestamp: None,
+                    fallback_timestamp: TimestampMs::UNIX_EPOCH,
+                    session_id: "session",
+                    fallback_identities: &[],
+                },
+            );
+            events.remove(0)
+        };
+        let merged_model = |target: Option<&str>, duplicate: Option<&str>| {
+            let mut target = event(target);
+            merge_usage_event(&mut target, event(duplicate));
+            target.model
+        };
+
+        assert_eq!(
+            merged_model(None, Some("model_placeholder_m401")),
+            "model_placeholder_m401"
+        );
+        assert_eq!(
+            merged_model(Some("model_placeholder_m401"), None),
+            "model_placeholder_m401"
+        );
+        assert_eq!(
+            merged_model(
+                Some("model_placeholder_m401"),
+                Some("claude-opus-5-5-medium")
+            ),
+            "claude-opus-5-5-medium"
+        );
+        assert_eq!(
+            merged_model(
+                Some("claude-opus-5-5-medium"),
+                Some("model_placeholder_m401")
+            ),
+            "claude-opus-5-5-medium"
+        );
+        assert_eq!(merged_model(None, None), DEFAULT_MODEL);
+    }
 
     #[test]
     fn protobuf_scalars_use_last_duplicate_and_messages_keep_merge_order() {
@@ -1383,6 +1579,60 @@ mod tests {
             metadata.retry_usages[0].response_id.as_deref(),
             Some("production-step-retry")
         );
+    }
+
+    #[test]
+    fn parses_step_indices_and_drops_mirror_retry() {
+        let unkeyed = UsageFixture {
+            input_tokens: 15_027,
+            total_output_tokens: 49,
+            visible_output_tokens: 49,
+            ..UsageFixture::default()
+        };
+        let metadata = parse_generator_metadata(&metadata_blob_with_steps(
+            Some("gemini-4-argon"),
+            Some(unkeyed),
+            None,
+            &[unkeyed],
+            &[1],
+        ))
+        .unwrap();
+
+        assert_eq!(metadata.step_indices, vec![1]);
+        assert!(metadata.usage.is_some());
+        assert!(metadata.retry_usages.is_empty());
+    }
+
+    #[test]
+    fn keeps_distinct_retry_attempt_for_deduplication() {
+        let primary = UsageFixture {
+            input_tokens: 100,
+            total_output_tokens: 50,
+            visible_output_tokens: 40,
+            reasoning_tokens: 10,
+            response_id: Some("response-1"),
+            provider_assigned_message_id: Some("provider-1"),
+            ..UsageFixture::default()
+        };
+        let retry = UsageFixture {
+            input_tokens: 80,
+            total_output_tokens: 30,
+            visible_output_tokens: 25,
+            reasoning_tokens: 5,
+            response_id: Some("retry-response"),
+            provider_assigned_message_id: Some("provider-1"),
+            ..UsageFixture::default()
+        };
+        let metadata = parse_generator_metadata(&metadata_blob_with_steps(
+            Some("gemini-3-pro"),
+            Some(primary),
+            None,
+            &[retry],
+            &[1],
+        ))
+        .unwrap();
+
+        assert_eq!(metadata.retry_usages.len(), 1);
     }
 
     #[test]

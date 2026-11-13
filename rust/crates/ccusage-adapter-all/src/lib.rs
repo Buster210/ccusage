@@ -14,6 +14,7 @@ mod adapter {
     pub use ccusage_adapter_amp as amp;
     pub use ccusage_adapter_antigravity as antigravity;
     pub use ccusage_adapter_claude as claude;
+    pub use ccusage_adapter_cline as cline;
     pub use ccusage_adapter_codebuff as codebuff;
     pub use ccusage_adapter_codex as codex;
     pub use ccusage_adapter_copilot as copilot;
@@ -73,6 +74,14 @@ pub fn run(args: AgentCommandArgs) -> Result<()> {
         return print_json_or_jq(output, shared.jq.as_deref(), shared.no_cost);
     }
     report::print_table(&result.rows, kind, &shared, &result.detected_agents)
+}
+
+/// Runs `ccusage opencode`, leaving Claude Agent turns to the Claude source
+/// unless `--include-claude-agent` keeps them.
+pub fn run_opencode(args: AgentCommandArgs) -> Result<()> {
+    let entries =
+        loader::load_opencode_entries(&args.shared, args.kind, args.include_claude_agent)?;
+    adapter::opencode::print_report(&args, entries)
 }
 
 fn print_warnings(warnings: &[String]) {

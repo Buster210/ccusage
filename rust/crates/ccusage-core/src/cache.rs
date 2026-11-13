@@ -771,7 +771,7 @@ pub fn clear_cache_namespaces(agent: &str) -> bool {
 fn agent_namespaces(agent: &str) -> &'static [&'static str] {
     match agent {
         "claude" => &["claude"],
-        "opencode" => &["opencode", "opencode-db"],
+        "opencode" => &["opencode", "opencode-db", "opencode-db-compaction"],
         "amp" => &["amp"],
         "codebuff" => &["codebuff"],
         "copilot" => &["copilot"],

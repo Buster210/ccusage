@@ -2,6 +2,7 @@ pub(crate) use ccusage_adapter_all as all;
 pub(crate) use ccusage_adapter_amp as amp;
 pub(crate) use ccusage_adapter_antigravity as antigravity;
 pub(crate) use ccusage_adapter_claude as claude;
+pub(crate) use ccusage_adapter_cline as cline;
 pub(crate) use ccusage_adapter_codebuff as codebuff;
 pub(crate) use ccusage_adapter_codex as codex;
 pub(crate) use ccusage_adapter_copilot as copilot;
@@ -13,6 +14,7 @@ pub(crate) use ccusage_adapter_hermes as hermes;
 pub(crate) use ccusage_adapter_kilo as kilo;
 pub(crate) use ccusage_adapter_kimi as kimi;
 pub(crate) use ccusage_adapter_openclaw as openclaw;
+#[cfg(test)]
 pub(crate) use ccusage_adapter_opencode as opencode;
 pub(crate) use ccusage_adapter_pi as pi;
 pub(crate) use ccusage_adapter_qwen as qwen;

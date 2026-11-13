@@ -614,6 +614,7 @@ fn agent_label(agent: &str) -> &str {
         "qwen" => "Qwen",
         "grok" => "Grok",
         "zcode" => "ZCode",
+        "cline" => "Cline",
         _ => agent,
     }
 }

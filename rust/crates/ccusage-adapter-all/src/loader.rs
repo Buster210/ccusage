@@ -12,8 +12,8 @@ use crate::{
     BUILT_IN_AGENT_NAMES, CodexGroup, LoadedEntry, ModelBreakdown, PricingMap, Result,
     SessionAccumulator, UsageSummary,
     adapter::{
-        amp, antigravity, claude, codebuff, codex, copilot, droid, gemini, goose, grok, hermes,
-        kilo, kimi, openclaw, opencode, pi, qwen, zcode,
+        amp, antigravity, claude, cline, codebuff, codex, copilot, droid, gemini, goose, grok,
+        hermes, kilo, kimi, openclaw, opencode, pi, qwen, zcode,
     },
     cli::{AgentReportKind, CodexSpeed, CostMode, NamedPiStore, SharedArgs, SourceArgs, WeekDay},
     date_within_range, filter_loaded_entries_by_date, filter_session_summaries_by_last_activity,
@@ -549,6 +549,21 @@ fn load_base_rows(
                 )
             }),
         },
+        AgentLoadSpec {
+            index: 18,
+            agent: BUILT_IN_AGENT_NAMES[18],
+            progress_agent: crate::progress::UsageLoadAgent("Cline"),
+            load: Box::new(|| {
+                load_priced_summary_agent_rows(
+                    "cline",
+                    load_kind,
+                    &source_shared["cline"],
+                    &pricing["cline"],
+                    cline::load_entries,
+                    cline::summarize_entries,
+                )
+            }),
+        },
     ];
     let named_pi_stores = resolve_named_pi_store_paths(&shared.pi_stores, pi_path)?;
     for store in named_pi_stores {
@@ -893,17 +908,53 @@ fn filtered_pi_format_agent_rows(
 enum ClaudeCounted {
     /// Daily-family reports count usage on the day Claude logged it.
     SessionDays(claude::SessionDays),
-    /// A session report counts a session whole, every day included.
+    /// A session report counts every session with in-window usage.
     Sessions(HashSet<Arc<str>>),
 }
 
 impl ClaudeCounted {
-    fn covers(&self, session: &Arc<str>, date: impl FnOnce() -> String) -> bool {
+    fn covers(
+        &self,
+        session: &Arc<str>,
+        date: impl FnOnce() -> String,
+        claude: &SharedArgs,
+    ) -> bool {
         match self {
             Self::SessionDays(days) => days.contains(&(Arc::clone(session), date())),
-            Self::Sessions(sessions) => sessions.contains(session),
+            // Claude counts only the session's in-window days, so a row outside them stays.
+            Self::Sessions(sessions) => {
+                sessions.contains(session)
+                    && date_within_range(&date(), claude.since.as_deref(), claude.until.as_deref())
+            }
         }
     }
+}
+
+/// Loads `ccusage opencode` entries. The `claude-agent` turns the Claude
+/// source counts are left to it unless `include_claude_agent` is set, so the
+/// focused reports add up to the unified one.
+pub(super) fn load_opencode_entries(
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+    include_claude_agent: bool,
+) -> Result<Vec<LoadedEntry>> {
+    let entries = opencode::load_entries_with_native_sessions(shared, kind)?;
+    if include_claude_agent || entries.iter().all(|(_, session)| session.is_none()) {
+        return Ok(entries.into_iter().map(|(entry, _)| entry).collect());
+    }
+    let claude_shared = SharedArgs {
+        json: true,
+        mode: CostMode::Display,
+        ..shared.clone()
+    };
+    // Focused Claude reports, sessions included, count only in-window days, so match by
+    // session day. Missing Claude directories load as no session days, so those turns stay.
+    let (_, claude_counted) = load_claude_rows(AgentReportKind::Daily, &claude_shared, None)?;
+    Ok(without_turns_counted_by_claude(
+        entries,
+        &claude_counted,
+        &claude_shared,
+    ))
 }
 
 /// Claude rows plus the usage they count.
@@ -913,15 +964,27 @@ fn load_claude_rows(
     project_filter: Option<&str>,
 ) -> Result<(AgentRows, ClaudeCounted)> {
     if kind == AgentReportKind::Session {
+        // Like `ccusage claude session`, a session counts only its in-window usage.
         let deduped = claude::load_deduped_entries(shared, project_filter)?;
         let detected = !deduped.entries.is_empty();
-        let mut summaries = summarize_entry_sessions(&deduped.entries)?;
-        filter_session_summaries_by_last_activity(&mut summaries, shared);
-        let counted_sessions = summaries
-            .iter()
-            .filter_map(|summary| summary.session_id.as_deref())
-            .collect::<BTreeSet<_>>();
-        let sessions = deduped.main_thread_sessions(|session| counted_sessions.contains(session));
+        let in_window = |entry: &LoadedEntry| {
+            date_within_range(
+                &entry.date,
+                shared.since.as_deref(),
+                shared.until.as_deref(),
+            )
+        };
+        let sessions = deduped
+            .main_thread_session_days(in_window)
+            .into_iter()
+            .map(|(session, _)| session)
+            .collect();
+        let entries = deduped
+            .entries
+            .into_iter()
+            .filter(|entry| in_window(entry))
+            .collect::<Vec<_>>();
+        let summaries = summarize_entry_sessions(&entries)?;
         return Ok((
             AgentRows {
                 rows: summary_rows("claude", summaries, false),
@@ -971,9 +1034,11 @@ fn without_turns_counted_by_claude(
         .into_iter()
         .filter(|(entry, native_session)| {
             native_session.as_ref().is_none_or(|session| {
-                !claude_counted.covers(session, || {
-                    format_date_tz(entry.timestamp, claude_tz.as_ref())
-                })
+                !claude_counted.covers(
+                    session,
+                    || format_date_tz(entry.timestamp, claude_tz.as_ref()),
+                    claude_shared,
+                )
             })
         })
         .map(|(entry, _)| entry)
@@ -1171,6 +1236,7 @@ where
                 output_tokens: usage.output_tokens,
                 cache_creation_tokens: usage.cache_creation_tokens,
                 cache_read_tokens: usage.cached_input_tokens,
+                cache_creation_1h_tokens: None,
                 extra_total_tokens: 0,
                 cost: codex::calculate_codex_model_cost(model, usage, pricing, speed),
                 missing_pricing: mode != CostMode::Display
@@ -1400,6 +1466,8 @@ mod tests {
             ("GROK_HOME", None),
             ("ZCODE_HOME", None),
             ("ANTIGRAVITY_DATA_DIR", None),
+            ("CLINE_DATA_DIR", None),
+            ("APPDATA", None),
             (
                 "XDG_CONFIG_HOME",
                 Some(fixture.path("empty-xdg-config").into_os_string()),

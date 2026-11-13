@@ -119,6 +119,25 @@ struct OpenCodeV2Message {
     time: Option<OpenCodeTime>,
     #[serde(default, deserialize_with = "jsonl::lenient_f64")]
     cost: Option<f64>,
+    #[serde(default, deserialize_with = "jsonl::non_empty_string")]
+    status: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionMessageKind {
+    Assistant,
+    /// A compaction request, billed apart from assistant steps.
+    Compaction,
+}
+
+impl SessionMessageKind {
+    pub(crate) fn from_row_type(row_type: &str) -> Option<Self> {
+        match row_type {
+            "assistant" => Some(Self::Assistant),
+            "compaction" => Some(Self::Compaction),
+            _ => None,
+        }
+    }
 }
 
 struct ContentField;
@@ -421,16 +440,33 @@ pub(crate) fn reprice(entry: &mut LoadedEntry, mode: CostMode, pricing: Option<&
     entry.missing_pricing_model = missing_pricing_model;
 }
 
+pub(crate) struct SessionMessageRow<'a> {
+    pub(crate) kind: SessionMessageKind,
+    pub(crate) data: &'a str,
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) created: i64,
+}
+
 pub(crate) fn session_message_value_to_entry(
-    data: &str,
-    id: String,
-    session_id: String,
-    created: i64,
+    row: SessionMessageRow<'_>,
     tz: Option<&JiffTimeZone>,
     mode: CostMode,
     pricing: Option<&PricingMap>,
 ) -> Option<(LoadedEntry, Option<Arc<str>>)> {
+    let SessionMessageRow {
+        kind,
+        data,
+        id,
+        session_id,
+        created,
+    } = row;
     let value = serde_json::from_str::<OpenCodeV2Message>(data).ok()?;
+    // Running and failed compactions are out of scope: a failed one records
+    // the usage it was billed but no model to attribute it to.
+    if kind == SessionMessageKind::Compaction && value.status.as_deref() != Some("completed") {
+        return None;
+    }
     let native_session = (value.provider() == Some("claude-agent"))
         .then(|| native_session_id(data))
         .flatten();
@@ -651,9 +687,9 @@ mod tests {
 
     use super::{
         MessageEntryOptions, OpenCodeCache, OpenCodeMessage, OpenCodeSessionAggregate,
-        OpenCodeTime, OpenCodeTokens, message_to_entry, message_value_to_entry_inner,
-        open_code_model_candidates, open_code_timestamp, session_message_value_to_entry,
-        session_value_to_entry,
+        OpenCodeTime, OpenCodeTokens, SessionMessageKind, SessionMessageRow, message_to_entry,
+        message_value_to_entry_inner, open_code_model_candidates, open_code_timestamp,
+        session_message_value_to_entry, session_value_to_entry,
     };
     use crate::{LoadedEntry, PricingMap, cli::CostMode};
 
@@ -672,10 +708,13 @@ mod tests {
 
     fn v2_native_session(data: &str) -> Option<String> {
         session_message_value_to_entry(
-            data,
-            "msg-v2".to_string(),
-            "v2-session".to_string(),
-            1_767_312_000_000,
+            SessionMessageRow {
+                kind: SessionMessageKind::Assistant,
+                data,
+                id: "msg-v2".to_string(),
+                session_id: "v2-session".to_string(),
+                created: 1_767_312_000_000,
+            },
             None,
             CostMode::Display,
             None,

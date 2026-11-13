@@ -158,7 +158,8 @@ mod tests {
 
     use super::*;
     use crate::parser::test_support::{
-        UsageFixture, create_database, metadata_blob, step_metadata_blob, trajectory_metadata_blob,
+        UsageFixture, create_database, metadata_blob, metadata_blob_with_steps, step_metadata_blob,
+        trajectory_metadata_blob,
     };
 
     fn shared(single_thread: bool) -> SharedArgs {
@@ -552,6 +553,138 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_unkeyed_mirror_copies_via_step_index() {
+        let fixture = Fixture::new();
+        let unkeyed = UsageFixture {
+            input_tokens: 15_027,
+            total_output_tokens: 49,
+            visible_output_tokens: 49,
+            cache_read_tokens: 500_131,
+            ..UsageFixture::default()
+        };
+        create_database(
+            &fixture.path("conversations/session.db"),
+            &[(
+                0,
+                metadata_blob_with_steps(
+                    Some("gemini-4-argon"),
+                    Some(unkeyed),
+                    Some((1_778_100_001, 0)),
+                    &[unkeyed],
+                    &[1],
+                ),
+            )],
+            &[(
+                1,
+                step_metadata_blob(
+                    Some("gemini-4-argon-medium"),
+                    Some(unkeyed),
+                    Some((1_778_100_000, 0)),
+                    &[],
+                    None,
+                ),
+            )],
+            &[],
+        );
+
+        let entries = load_from_fixture(&fixture, true);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data.message.usage.input_tokens, 15_027);
+        assert_eq!(
+            entries[0].data.message.usage.cache_read_input_tokens,
+            500_131
+        );
+        assert_eq!(entries[0].data.message.usage.output_tokens, 49);
+    }
+
+    #[test]
+    fn drops_unkeyed_retry_mirror_without_step_link() {
+        let fixture = Fixture::new();
+        let unkeyed = UsageFixture {
+            input_tokens: 100,
+            total_output_tokens: 50,
+            visible_output_tokens: 50,
+            ..UsageFixture::default()
+        };
+        create_database(
+            &fixture.path("conversations/session.db"),
+            &[(
+                1,
+                metadata_blob(
+                    Some("gemini-3-pro"),
+                    Some(unkeyed),
+                    Some((1_778_100_001, 0)),
+                    &[unkeyed],
+                ),
+            )],
+            &[],
+            &[],
+        );
+
+        let entries = load_from_fixture(&fixture, true);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data.message.usage.input_tokens, 100);
+        assert_eq!(entries[0].data.message.usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn keeps_unkeyed_failed_attempt_when_retries_mirror_primary() {
+        let fixture = Fixture::new();
+        let success = UsageFixture {
+            input_tokens: 100,
+            total_output_tokens: 50,
+            visible_output_tokens: 50,
+            ..UsageFixture::default()
+        };
+        let failed = UsageFixture {
+            input_tokens: 100,
+            total_output_tokens: 10,
+            visible_output_tokens: 10,
+            ..UsageFixture::default()
+        };
+        create_database(
+            &fixture.path("conversations/session.db"),
+            &[(
+                0,
+                metadata_blob_with_steps(
+                    Some("gemini-3-pro"),
+                    Some(success),
+                    Some((1_778_100_001, 0)),
+                    &[failed, success],
+                    &[1],
+                ),
+            )],
+            &[(
+                1,
+                step_metadata_blob(
+                    Some("gemini-3-pro"),
+                    Some(success),
+                    Some((1_778_100_000, 0)),
+                    &[],
+                    None,
+                ),
+            )],
+            &[],
+        );
+
+        let entries = load_from_fixture(&fixture, true);
+
+        let mut usages = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.data.message.usage.input_tokens,
+                    entry.data.message.usage.output_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+        usages.sort_unstable();
+        assert_eq!(usages, vec![(100, 10), (100, 50)]);
+    }
+
+    #[test]
     fn attributes_step_and_retry_usage_to_their_token_models() {
         let fixture = Fixture::new();
         let step_usage = UsageFixture {
@@ -838,6 +971,133 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
 
         insta::assert_json_snapshot!(reports);
+    }
+
+    #[test]
+    fn prefers_explicit_model_name_over_placeholder_for_unknown_ids() {
+        let fixture = Fixture::new();
+        let cases = [
+            (1401, "claude-opus-5-5-medium", "unknown-opus"),
+            (1404, "claude-sonnet-5-5-medium", "unknown-sonnet"),
+            (1427, "gemini-4-carbon", "unknown-carbon-high"),
+            (1437, "gemini-4-carbon", "unknown-carbon-medium"),
+        ];
+        let rows = cases
+            .iter()
+            .enumerate()
+            .map(|(idx, (model_id, model, response_id))| {
+                (
+                    i64::try_from(idx).unwrap(),
+                    metadata_blob(
+                        Some(model),
+                        Some(UsageFixture {
+                            model_id: Some(*model_id),
+                            input_tokens: 60,
+                            total_output_tokens: 10,
+                            cache_read_tokens: 40,
+                            visible_output_tokens: 10,
+                            response_id: Some(response_id),
+                            ..UsageFixture::default()
+                        }),
+                        Some((1_781_481_600 + u64::try_from(idx).unwrap(), 0)),
+                        &[UsageFixture {
+                            model_id: Some(1499),
+                            input_tokens: 5,
+                            total_output_tokens: 1,
+                            visible_output_tokens: 1,
+                            response_id: Some("unknown-retry"),
+                            ..UsageFixture::default()
+                        }],
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        create_database(&fixture.path("conversations/session.db"), &rows, &[], &[]);
+
+        let entries = load_from_fixture(&fixture, true);
+
+        for (_, model, response_id) in cases {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.data.message.id.as_deref() == Some(response_id))
+                .unwrap();
+            assert_eq!(entry.model.as_deref(), Some(model));
+            assert!(entry.cost > 0.0);
+            assert!(entry.missing_pricing_model.is_none());
+        }
+        let retry = entries
+            .iter()
+            .find(|entry| entry.data.message.id.as_deref() == Some("unknown-retry"))
+            .unwrap();
+        assert_eq!(retry.model.as_deref(), Some("model_placeholder_m499"));
+    }
+
+    #[test]
+    fn keeps_alias_mapped_ids_over_explicit_model_name() {
+        let fixture = Fixture::new();
+        create_database(
+            &fixture.path("conversations/session.db"),
+            &[(
+                0,
+                metadata_blob(
+                    Some("gemini-3-flash-agent"),
+                    Some(UsageFixture {
+                        model_id: Some(1187),
+                        input_tokens: 60,
+                        total_output_tokens: 10,
+                        visible_output_tokens: 10,
+                        ..UsageFixture::default()
+                    }),
+                    Some((1_781_481_600, 0)),
+                    &[],
+                ),
+            )],
+            &[],
+            &[],
+        );
+
+        let entries = load_from_fixture(&fixture, true);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].model.as_deref(),
+            Some("gemini-3.5-flash-extra-low")
+        );
+    }
+
+    #[test]
+    fn keeps_explicit_model_name_when_merging_unnamed_step_copy() {
+        let fixture = Fixture::new();
+        let usage = UsageFixture {
+            model_id: Some(1401),
+            input_tokens: 60,
+            total_output_tokens: 10,
+            visible_output_tokens: 10,
+            response_id: Some("shared-response"),
+            ..UsageFixture::default()
+        };
+        create_database(
+            &fixture.path("conversations/session.db"),
+            &[(
+                0,
+                metadata_blob(
+                    Some("claude-opus-5-5-medium"),
+                    Some(usage),
+                    Some((1_781_481_600, 0)),
+                    &[],
+                ),
+            )],
+            &[(
+                0,
+                step_metadata_blob(None, Some(usage), Some((1_781_481_600, 0)), &[], Some(1)),
+            )],
+            &[],
+        );
+
+        let entries = load_from_fixture(&fixture, true);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model.as_deref(), Some("claude-opus-5-5-medium"));
     }
 
     #[test]

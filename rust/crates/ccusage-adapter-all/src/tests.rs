@@ -412,6 +412,7 @@ fn all_report_totals_list_unpriced_models_only_when_present() {
                 output_tokens: 10,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                cache_creation_1h_tokens: None,
                 extra_total_tokens: 0,
                 cost: 0.0,
                 missing_pricing: true,
@@ -423,6 +424,7 @@ fn all_report_totals_list_unpriced_models_only_when_present() {
                 output_tokens: 10,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 10,
+                cache_creation_1h_tokens: None,
                 extra_total_tokens: 0,
                 cost: 0.01,
                 missing_pricing: false,
@@ -925,6 +927,159 @@ fn unified_reports_count_claude_agent_sessions_once() {
     }
 }
 
+fn focused_opencode_input(
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+    include_claude_agent: bool,
+) -> u64 {
+    let mut entries = loader::load_opencode_entries(shared, kind, include_claude_agent).unwrap();
+    filter_loaded_entries_by_date(&mut entries, shared);
+    entries
+        .iter()
+        .map(|entry| entry.data.message.usage.input_tokens)
+        .sum()
+}
+
+fn write_claude_agent_fixture(fixture: &ccusage_test_support::Fixture) {
+    let _ = fixture.write_file(
+        "claude/projects/project-a/claude-native-a.jsonl",
+        claude_usage_line("claude-native-a", "2099-01-02T00:00:00.000Z", "msg-a", 100),
+    );
+    write_opencode_rows(
+        &fixture.create_dir_all("opencode").join("opencode.db"),
+        &[
+            (
+                "m-dup",
+                "ses-agent",
+                CLAUDE_AGENT_DAY_ONE,
+                claude_agent_row("claude-native-a", CLAUDE_AGENT_DAY_ONE, 100),
+            ),
+            (
+                "m-no-log",
+                "ses-agent-old",
+                CLAUDE_AGENT_DAY_ONE,
+                claude_agent_row("claude-native-missing", CLAUDE_AGENT_DAY_ONE, 7),
+            ),
+            (
+                "m-api",
+                "ses-api",
+                CLAUDE_AGENT_DAY_ONE,
+                api_row(CLAUDE_AGENT_DAY_ONE, 20),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn focused_opencode_reports_leave_claude_agent_turns_to_claude() {
+    let fixture = fs_fixture!({});
+    write_claude_agent_fixture(&fixture);
+    let _env = claude_opencode_env(&fixture, fixture.path("claude").into_os_string());
+    let shared = claude_agent_shared("20990101", "20990103");
+
+    for kind in [
+        AgentReportKind::Daily,
+        AgentReportKind::Weekly,
+        AgentReportKind::Monthly,
+        AgentReportKind::Session,
+    ] {
+        assert_eq!(focused_opencode_input(&shared, kind, false), 27, "{kind:?}");
+        assert_eq!(focused_opencode_input(&shared, kind, true), 127, "{kind:?}");
+        // The 100 Claude input tokens plus the focused OpenCode rows add up to the unified report.
+        assert_eq!(
+            unified_totals(kind, &shared, &NO_SOURCES)["inputTokens"],
+            100 + focused_opencode_input(&shared, kind, false),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn focused_opencode_session_skips_turns_of_a_claude_session_active_past_until() {
+    let fixture = fs_fixture!({});
+    let _ = fixture.write_file(
+        "claude/projects/project-a/claude-native-a.jsonl",
+        [
+            claude_usage_line("claude-native-a", "2099-01-02T00:00:00.000Z", "msg-a", 100),
+            claude_usage_line("claude-native-a", "2099-01-03T00:00:00.000Z", "msg-b", 50),
+        ]
+        .join("\n"),
+    );
+    write_opencode_rows(
+        &fixture.create_dir_all("opencode").join("opencode.db"),
+        &[
+            (
+                "m-day-one",
+                "ses-agent",
+                CLAUDE_AGENT_DAY_ONE,
+                claude_agent_row("claude-native-a", CLAUDE_AGENT_DAY_ONE, 100),
+            ),
+            (
+                "m-day-two",
+                "ses-agent",
+                CLAUDE_AGENT_DAY_TWO,
+                claude_agent_row("claude-native-a", CLAUDE_AGENT_DAY_TWO, 50),
+            ),
+        ],
+    );
+    let _env = claude_opencode_env(&fixture, fixture.path("claude").into_os_string());
+    let shared = claude_agent_shared("20990101", "20990102");
+    let mut claude_entries = adapter::claude::load_entries(&shared, None).unwrap();
+    filter_loaded_entries_by_date(&mut claude_entries, &shared);
+
+    // `ccusage claude session` counts the in-window day of the session, so OpenCode drops it.
+    assert_eq!(claude_entries.len(), 1);
+    for kind in [AgentReportKind::Daily, AgentReportKind::Session] {
+        assert_eq!(focused_opencode_input(&shared, kind, false), 0, "{kind:?}");
+        assert_eq!(focused_opencode_input(&shared, kind, true), 100, "{kind:?}");
+    }
+}
+
+#[test]
+fn focused_opencode_reports_keep_claude_agent_turns_without_a_claude_source() {
+    let fixture = fs_fixture!({});
+    write_claude_agent_fixture(&fixture);
+    let _env = isolated_agents_env(
+        &fixture,
+        [(
+            "OPENCODE_DATA_DIR",
+            fixture.path("opencode").into_os_string(),
+        )],
+    );
+    let shared = claude_agent_shared("20990101", "20990103");
+
+    for kind in [AgentReportKind::Daily, AgentReportKind::Session] {
+        assert_eq!(
+            focused_opencode_input(&shared, kind, false),
+            127,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn focused_opencode_reports_fail_like_unified_reports_on_claude_errors() {
+    let fixture = fs_fixture!({});
+    write_claude_agent_fixture(&fixture);
+    let _env = claude_opencode_env(&fixture, fixture.path("missing-claude").into_os_string());
+    let shared = claude_agent_shared("20990101", "20990103");
+
+    for kind in [AgentReportKind::Daily, AgentReportKind::Session] {
+        assert!(
+            loader::load_opencode_entries(&shared, kind, false).is_err(),
+            "{kind:?}"
+        );
+        assert!(
+            load_rows(kind, &shared, &NO_SOURCES, WeekDay::Monday).is_err(),
+            "{kind:?}"
+        );
+        assert!(
+            loader::load_opencode_entries(&shared, kind, true).is_ok(),
+            "{kind:?}"
+        );
+    }
+}
+
 #[test]
 fn unified_reports_keep_claude_agent_rows_whose_transcript_has_no_usage() {
     let fixture = fs_fixture!({
@@ -1246,6 +1401,52 @@ fn unified_daily_drops_a_claude_agent_turn_whose_later_calls_fall_after_until() 
         )["inputTokens"],
         100
     );
+}
+
+#[test]
+fn unified_session_counts_a_claude_agent_session_active_past_until_once() {
+    let fixture = fs_fixture!({});
+    let _ = fixture.write_file(
+        "claude/projects/project-a/claude-native-a.jsonl",
+        [
+            claude_usage_line("claude-native-a", "2099-01-02T00:00:00.000Z", "msg-a", 100),
+            claude_usage_line("claude-native-a", "2099-01-03T00:00:00.000Z", "msg-b", 10),
+        ]
+        .join("\n"),
+    );
+    write_opencode_rows(
+        &fixture.create_dir_all("opencode").join("opencode.db"),
+        &[(
+            "m-dup",
+            "ses-agent",
+            CLAUDE_AGENT_DAY_ONE,
+            claude_agent_row("claude-native-a", CLAUDE_AGENT_DAY_ONE, 100),
+        )],
+    );
+    let _env = claude_opencode_env(&fixture, fixture.path("claude").into_os_string());
+    let shared = claude_agent_shared("20990101", "20990102");
+
+    // The session runs past `--until`: Claude counts its day-one turn and OpenCode skips its copy.
+    // Totals alone cannot tell which source kept the turn, so check where each row comes from.
+    // Daily rows merge sources and list them in metadata; session rows carry one agent each.
+    for (kind, period) in [
+        (AgentReportKind::Daily, "2099-01-02"),
+        (AgentReportKind::Session, "claude-native-a"),
+    ] {
+        let result = load_rows(kind, &shared, &NO_SOURCES, WeekDay::Monday).unwrap();
+        let rows: Vec<_> = result
+            .rows
+            .iter()
+            .map(|row| {
+                let agents = row
+                    .metadata_agents
+                    .clone()
+                    .unwrap_or_else(|| vec![row.agent]);
+                (agents, row.period.as_str(), row.input_tokens)
+            })
+            .collect();
+        assert_eq!(rows, [(vec!["claude"], period, 100)], "{kind:?}");
+    }
 }
 
 #[test]
@@ -1660,6 +1861,137 @@ fn zcode_fixture_reports_daily_monthly_session_json_and_table_snapshots() {
 }
 
 #[test]
+fn cline_fixture_reports_all_kinds_through_unified_json_and_tables() {
+    let fixture = fs_fixture!({
+        "cline/tasks/session-a/ui_messages.json": include_str!(
+            "../../../adapters/cline/tests/fixtures/extension/ui_messages.json"
+        ),
+        "cline/tasks/session-a/task_metadata.json": include_str!(
+            "../../../adapters/cline/tests/fixtures/extension/task_metadata.json"
+        ),
+        "cline/tasks/session-a/api_conversation_history.json": include_str!(
+            "../../../adapters/cline/tests/fixtures/extension/api_conversation_history.json"
+        ),
+        "cline/data/sessions/session-a/session-a.messages.json": include_str!(
+            "../../../adapters/cline/tests/fixtures/cli/session.messages.json"
+        ),
+    });
+    let _ = fixture.write_file(
+        "cline/data/sessions/rejected-cache/rejected-cache.messages.json",
+        r#"{"version":1,"sessionId":"rejected-cache","messages":[{"role":"assistant","ts":1793491260000,"id":"cache-exceeds-input-session","modelInfo":{"id":"claude-sonnet-4-20250514","provider":"anthropic"},"metrics":{"inputTokens":5,"outputTokens":2,"cacheReadTokens":4,"cacheWriteTokens":2,"cost":0.5}}]}"#,
+    );
+    let _env = isolated_agent_env(
+        &fixture,
+        "CLINE_DATA_DIR",
+        fixture.path("cline").into_os_string(),
+    );
+    let mut shared = fixture_shared("20261001", "20261101");
+    shared.mode = CostMode::Auto;
+
+    for kind in [
+        AgentReportKind::Daily,
+        AgentReportKind::Weekly,
+        AgentReportKind::Monthly,
+        AgentReportKind::Session,
+    ] {
+        let result = load_rows(kind, &shared, &NO_SOURCES, WeekDay::Monday).unwrap();
+
+        assert_eq!(result.detected_agents, ["cline"]);
+        assert!(
+            !result.rows.is_empty(),
+            "{kind:?} should include Cline rows"
+        );
+        assert_cline_unified_result_contains_only_accepted_requests(&result.rows, kind);
+        if kind == AgentReportKind::Session {
+            assert!(result.rows.iter().all(|row| row.agent == "cline"));
+            assert!(result.rows.iter().all(|row| row.metadata_agents.is_none()));
+        } else {
+            assert!(result.rows.iter().all(|row| row.agent == "all"));
+            assert!(
+                result
+                    .rows
+                    .iter()
+                    .all(|row| row.metadata_agents.as_deref() == Some(["cline"].as_slice()))
+            );
+        }
+
+        insta::assert_json_snapshot!(
+            format!("cline_fixture_{kind:?}_unified_json").to_lowercase(),
+            report_json(&result.rows, kind)
+        );
+        insta::assert_snapshot!(
+            format!("cline_fixture_{kind:?}_unified_table").to_lowercase(),
+            serde_json::to_string_pretty(&table_snapshot(
+                &result.rows,
+                kind,
+                &result.detected_agents,
+            ))
+            .unwrap()
+        );
+    }
+}
+
+fn assert_cline_unified_result_contains_only_accepted_requests(
+    rows: &[AllRow],
+    kind: AgentReportKind,
+) {
+    for (actual, expected, label) in [
+        (
+            rows.iter().map(|row| row.input_tokens).sum::<u64>(),
+            255,
+            "input tokens",
+        ),
+        (
+            rows.iter().map(|row| row.output_tokens).sum::<u64>(),
+            51,
+            "output tokens",
+        ),
+        (
+            rows.iter()
+                .map(|row| row.cache_creation_tokens)
+                .sum::<u64>(),
+            30,
+            "cache creation tokens",
+        ),
+        (
+            rows.iter().map(|row| row.cache_read_tokens).sum::<u64>(),
+            50,
+            "cache read tokens",
+        ),
+        (
+            rows.iter().map(|row| row.total_tokens).sum::<u64>(),
+            386,
+            "total tokens",
+        ),
+    ] {
+        assert_eq!(actual, expected, "{kind:?} {label}");
+    }
+    let total_cost = rows.iter().map(|row| row.total_cost).sum::<f64>();
+    assert!((total_cost - 0.0012).abs() < 1e-12, "{kind:?} cost");
+
+    let mut periods = rows
+        .iter()
+        .map(|row| row.period.as_str())
+        .collect::<Vec<_>>();
+    periods.sort_unstable();
+    let expected_periods: &[&str] = match kind {
+        AgentReportKind::Daily => &["2026-10-01", "2026-11-01"],
+        AgentReportKind::Weekly => &["2026-09-28", "2026-10-26"],
+        AgentReportKind::Monthly => &["2026-10", "2026-11"],
+        AgentReportKind::Session => &["cli:session-a", "task:session-a"],
+    };
+    assert_eq!(periods, expected_periods.to_vec(), "{kind:?} periods");
+
+    let mut models = rows
+        .iter()
+        .flat_map(|row| row.models_used.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    models.sort_unstable();
+    models.dedup();
+    assert_eq!(models, ["claude-sonnet-4-20250514"], "{kind:?} models");
+}
+
+#[test]
 fn unified_report_omits_zcode_without_usage_database() {
     let fixture = fs_fixture!({});
     let _env = isolated_agent_env(
@@ -1837,6 +2169,8 @@ fn isolated_agents_env(
         "GROK_HOME",
         "ZCODE_HOME",
         "ANTIGRAVITY_DATA_DIR",
+        "CLINE_DATA_DIR",
+        "APPDATA",
         "COPILOT_HOME",
         "LOG_LEVEL",
     ]
@@ -2125,15 +2459,22 @@ fn aggregates_model_breakdowns_across_agents() {
                 metadata: None,
                 metadata_agents: Some(vec!["codex"]),
                 agent_breakdowns: None,
-                model_breakdowns: vec![ModelBreakdown {
-                    model_name: "gpt-5".to_string(),
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 2,
-                    cost: 0.03,
-                    ..ModelBreakdown::default()
-                }],
+                model_breakdowns: vec![
+                    ModelBreakdown {
+                        model_name: "gpt-5".to_string(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 2,
+                        cost: 0.03,
+                        ..ModelBreakdown::default()
+                    },
+                    ModelBreakdown {
+                        model_name: "gpt-5-mini".to_string(),
+                        input_tokens: 1,
+                        ..ModelBreakdown::default()
+                    },
+                ],
             },
             AllRow {
                 period: "2026-01-02".to_string(),
@@ -2155,6 +2496,7 @@ fn aggregates_model_breakdowns_across_agents() {
                         output_tokens: 3,
                         cache_creation_tokens: 1,
                         cache_read_tokens: 2,
+                        cache_creation_1h_tokens: Some(1),
                         cost: 0.01,
                         missing_pricing: true,
                         ..ModelBreakdown::default()
@@ -2168,6 +2510,11 @@ fn aggregates_model_breakdowns_across_agents() {
                         cost: 0.06,
                         ..ModelBreakdown::default()
                     },
+                    ModelBreakdown {
+                        model_name: "gpt-5-mini".to_string(),
+                        input_tokens: 2,
+                        ..ModelBreakdown::default()
+                    },
                 ],
             },
         ],
@@ -2176,7 +2523,7 @@ fn aggregates_model_breakdowns_across_agents() {
     );
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].model_breakdowns.len(), 2);
+    assert_eq!(rows[0].model_breakdowns.len(), 3);
     assert_eq!(
         rows[0].model_breakdowns[0].model_name,
         "claude-sonnet-4-20250514"
@@ -2189,6 +2536,13 @@ fn aggregates_model_breakdowns_across_agents() {
     assert_eq!(rows[0].model_breakdowns[1].cache_read_tokens, 4);
     assert_eq!(rows[0].model_breakdowns[1].cost, 0.04);
     assert!(rows[0].model_breakdowns[1].missing_pricing);
+    assert_eq!(
+        rows[0].model_breakdowns[1].cache_creation_1h_tokens,
+        Some(1)
+    );
+    assert_eq!(rows[0].model_breakdowns[2].model_name, "gpt-5-mini");
+    assert_eq!(rows[0].model_breakdowns[2].input_tokens, 3);
+    assert_eq!(rows[0].model_breakdowns[2].cache_creation_1h_tokens, None);
 }
 
 #[test]

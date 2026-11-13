@@ -324,7 +324,8 @@ fn run_cli_with_color<const N: usize>(fixture: &Fixture, args: [&str; N], color:
         .env_remove("GEMINI_DATA_DIR")
         .env_remove("KIMI_DATA_DIR")
         .env_remove("QWEN_DATA_DIR")
-        .env_remove("GROK_HOME");
+        .env_remove("GROK_HOME")
+        .env_remove("CLINE_DATA_DIR");
     if color {
         command.env_remove("NO_COLOR").env("FORCE_COLOR", "1");
     } else {

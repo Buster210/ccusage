@@ -52,7 +52,8 @@ fn window_target(cli: &mut Cli) -> Option<(&mut SharedArgs, PeriodUnit, WeekDay)
             | Command::Qwen(args)
             | Command::OpenClaw(args)
             | Command::Grok(args)
-            | Command::ZCode(args),
+            | Command::ZCode(args)
+            | Command::Cline(args),
         ) => agent_window_target(args),
         Some(
             Command::Session(_)
@@ -106,6 +107,7 @@ mod tests {
             pi_path: None,
             open_claw_path: None,
             codex_speed: CodexSpeed::Auto,
+            include_claude_agent: false,
             start_of_week: WeekDay::Monday,
             sources: BTreeMap::new(),
         }
@@ -118,7 +120,9 @@ mod tests {
         };
         resolve(&mut cli).unwrap();
         match cli.command {
-            Some(Command::All(args)) | Some(Command::Codex(args)) => args.shared.since,
+            Some(Command::All(args)) | Some(Command::Codex(args)) | Some(Command::Cline(args)) => {
+                args.shared.since
+            }
             Some(Command::Weekly(args)) => args.shared.since,
             Some(Command::Monthly(shared)) => shared.since,
             _ => panic!("unexpected command"),
@@ -137,11 +141,17 @@ mod tests {
     #[test]
     fn resolves_agent_report_kinds_to_their_own_period() {
         let weekly = resolved_since(Command::Codex(agent_command(AgentReportKind::Weekly, 1)));
+        let cline_weekly =
+            resolved_since(Command::Cline(agent_command(AgentReportKind::Weekly, 1)));
         let monthly = resolved_since(Command::Codex(agent_command(AgentReportKind::Monthly, 1)));
 
         let today = format_date(utc_now(), Some("UTC"));
         assert_eq!(
             weekly,
+            last_periods_since(PeriodUnit::Week, 1, &today, WeekDay::Monday)
+        );
+        assert_eq!(
+            cline_weekly,
             last_periods_since(PeriodUnit::Week, 1, &today, WeekDay::Monday)
         );
         assert_eq!(

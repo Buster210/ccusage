@@ -70,6 +70,7 @@ export default defineConfig({
 						{ text: 'Amp', link: '/guide/amp/' },
 						{ text: 'Droid', link: '/guide/droid/' },
 						{ text: 'Codebuff', link: '/guide/codebuff/' },
+						{ text: 'Cline', link: '/guide/cline/' },
 						{ text: 'Hermes Agent', link: '/guide/hermes/' },
 						{ text: 'pi', link: '/guide/pi/' },
 						{ text: 'Goose', link: '/guide/goose/' },
