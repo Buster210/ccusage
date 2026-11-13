@@ -95,7 +95,7 @@ runs:
       if: >-
         inputs.save-cargo-cache == 'true'
         && steps.cargo-cache.outputs.cache-hit != 'true'
-        && github.ref == 'refs/heads/main'
+        && github.ref == 'refs/heads/master'
         && github.event_name != 'pull_request'
         && github.event_name != 'pull_request_target'
       shell: bash

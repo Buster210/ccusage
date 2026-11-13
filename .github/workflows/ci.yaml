@@ -14,7 +14,9 @@ env:
   # changes are discarded. This is decided here rather than only inside the
   # local actions, so the gate sits next to the triggers. It cannot stop a
   # queued commit that edits this file; review before queuing does that.
-  PERSIST_CACHES: ${{ github.ref == 'refs/heads/main' }}
+  # fork: the fork's default branch is master, so every branch gate below
+  # compares against master. Comparing against main disabled every save.
+  PERSIST_CACHES: ${{ github.ref == 'refs/heads/master' }}
 
 jobs:
   changes:
@@ -198,9 +200,9 @@ jobs:
       # The dev-profile test and hawk dependency layers are only reused if the
       # sticky disk keeps them, and this job roots nothing else. Rooting them in
       # the store's own gcroots protects them from the next trim (see
-      # build-linux-native-package); only main commits the disk, so PRs skip it.
+      # build-linux-native-package); only master commits the disk, so PRs skip it.
       - name: Root test dependency layers for the sticky disk
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
         run: |
           mkdir -p /nix/var/nix/gcroots/ci
           nix build .#ccusage-tests.passthru.cargoArtifacts \
