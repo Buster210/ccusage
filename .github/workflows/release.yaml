@@ -150,4 +150,12 @@ jobs:
           REF_NAME: ${{ inputs.release_tag || github.ref_name }}
           HEAD_SHA: ${{ steps.version.outputs.commit }}
         run: |
-          gh release create "$REF_NAME" dist/* --title "ccusage $REF_NAME" --notes "Release $REF_NAME built from $HEAD_SHA."
+          # A re-run happens exactly when an earlier publish did not finish, so an
+          # existing release must be reused instead of failing the whole run.
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$REF_NAME" dist/* --clobber
+          else
+            gh release create "$REF_NAME" dist/* --verify-tag \
+              --title "ccusage $REF_NAME" \
+              --notes "Release $REF_NAME built from $HEAD_SHA."
+          fi
