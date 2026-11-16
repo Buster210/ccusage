@@ -1043,7 +1043,7 @@ mod tests {
         );
 
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|row| row[0].contains("└─")));
+        assert!(rows.iter().all(|row| !row[0].contains("└─")));
         assert!(rows[0][0].contains("gpt-5.3-codex") || rows[1][0].contains("gpt-5.3-codex"));
         assert!(rows[0][0].contains("gpt-5-mini") || rows[1][0].contains("gpt-5-mini"));
         for (model, usage) in &group.models {

@@ -23,7 +23,7 @@ struct TableRow {
     cells: Vec<String>,
     cell_alignment: Option<(usize, Align)>,
     hidden_separator_after: Option<usize>,
-    row_span: Option<usize>,
+    row_span: Option<(usize, usize)>,
     dashed_separator_after: bool,
     bold: bool,
 }
@@ -107,11 +107,15 @@ impl SimpleTable {
     }
 
     pub fn push_with_row_span(&mut self, row: Vec<String>, span_rows: usize) {
+        self.push_with_column_row_span(row, 0, span_rows);
+    }
+
+    pub fn push_with_column_row_span(&mut self, row: Vec<String>, column: usize, span_rows: usize) {
         self.rows.push(Some(TableRow {
             cells: row,
             cell_alignment: None,
             hidden_separator_after: None,
-            row_span: (span_rows > 1).then_some(span_rows),
+            row_span: (span_rows > 0).then_some((column, span_rows)),
             dashed_separator_after: false,
             bold: false,
         }));
@@ -123,11 +127,26 @@ impl SimpleTable {
         span_rows: usize,
         hidden_separator_after: usize,
     ) {
+        self.push_with_column_row_span_and_hidden_separator_after(
+            row,
+            0,
+            span_rows,
+            hidden_separator_after,
+        );
+    }
+
+    pub fn push_with_column_row_span_and_hidden_separator_after(
+        &mut self,
+        row: Vec<String>,
+        column: usize,
+        span_rows: usize,
+        hidden_separator_after: usize,
+    ) {
         self.rows.push(Some(TableRow {
             cells: row,
             cell_alignment: None,
             hidden_separator_after: Some(hidden_separator_after),
-            row_span: (span_rows > 1).then_some(span_rows),
+            row_span: (span_rows > 0).then_some((column, span_rows)),
             dashed_separator_after: false,
             bold: false,
         }));
@@ -191,8 +210,9 @@ impl SimpleTable {
             &widths,
             None,
             first_hidden_separator,
+            &[],
             false,
-            false,
+            self.style,
         ));
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
@@ -223,8 +243,9 @@ impl SimpleTable {
                         &widths,
                         hidden_above,
                         hidden_below,
+                        &[],
                         false,
-                        false,
+                        self.style,
                     ));
                 }
             }
@@ -236,18 +257,28 @@ impl SimpleTable {
                 let hidden_below = self.rows[row_index + 1]
                     .as_ref()
                     .and_then(|row| row.hidden_separator_after);
-                let merged_first_column = matches!(
-                    (row_span_groups[row_index], row_span_groups[row_index + 1]),
-                    (Some(above_group), Some(below_group)) if above_group == below_group
-                );
-                let dashed = merged_first_column
-                    && row.as_ref().is_some_and(|row| row.dashed_separator_after);
+                let merged_columns = (0..widths.len())
+                    .map(|column| {
+                        matches!(
+                            (
+                                row_span_groups[row_index][column],
+                                row_span_groups[row_index + 1][column],
+                            ),
+                            (Some(above_group), Some(below_group))
+                                if above_group == below_group
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let has_merged_cell = merged_columns.iter().any(|merged| *merged);
+                let dashed =
+                    has_merged_cell && row.as_ref().is_some_and(|row| row.dashed_separator_after);
                 lines.push(row_separator(
                     &widths,
                     hidden_above,
                     hidden_below,
-                    merged_first_column,
+                    &merged_columns,
                     dashed,
+                    self.style,
                 ));
             }
         }
@@ -355,28 +386,27 @@ impl SimpleTable {
         &self,
         rendered_rows: &mut [Option<Vec<Vec<String>>>],
         widths: &[usize],
-    ) -> Vec<Option<usize>> {
-        let mut groups = vec![None; self.rows.len()];
+    ) -> Vec<Vec<Option<usize>>> {
+        let mut groups = vec![vec![None; widths.len()]; self.rows.len()];
         for (start, row) in self.rows.iter().enumerate() {
             let Some(row) = row else {
                 continue;
             };
-            let Some(span_rows) = row.row_span else {
+            let Some((column, span_rows)) = row.row_span else {
                 continue;
             };
-            let column = 0;
-            if widths.is_empty() || span_rows < 2 {
+            if column >= widths.len() || span_rows == 0 {
                 continue;
             }
             let members = (start..self.rows.len())
                 .take_while(|index| self.rows[*index].is_some())
                 .take(span_rows)
                 .collect::<Vec<_>>();
-            if members.len() < 2 {
+            if members.is_empty() {
                 continue;
             }
             for member in &members {
-                groups[*member] = Some(start);
+                groups[*member][column] = Some(start);
             }
 
             let Some(label) = self
@@ -759,22 +789,30 @@ fn row_separator(
     widths: &[usize],
     hidden_above: Option<usize>,
     hidden_below: Option<usize>,
-    merged_first_column: bool,
+    merged_columns: &[bool],
     dashed: bool,
+    style: TerminalStyle,
 ) -> String {
-    let mut line = String::from(if merged_first_column { "│" } else { "├" });
+    let first_column_is_merged = merged_columns.first().copied().unwrap_or(false);
+    let mut line = String::from(if first_column_is_merged { "│" } else { "├" });
     for (index, width) in widths.iter().enumerate() {
-        if merged_first_column && index == 0 {
+        if merged_columns.get(index).copied().unwrap_or(false) {
             line.push_str(&" ".repeat(*width));
-            line.push(if index + 1 == widths.len() {
+            let edge = if index + 1 == widths.len() {
                 '┤'
+            } else if merged_columns.get(index + 1).copied().unwrap_or(false) {
+                '│'
             } else {
                 '├'
-            });
+            };
+            line.push(edge);
             continue;
         }
-        let horizontal = if dashed { '-' } else { '─' };
-        line.extend(std::iter::repeat_n(horizontal, *width));
+        if dashed {
+            line.push_str(&color(style, "-".repeat(*width), Color::Grey));
+        } else {
+            line.push_str(&"─".repeat(*width));
+        }
         let intersection = if index + 1 == widths.len() {
             '┤'
         } else {
@@ -902,6 +940,201 @@ mod tests {
                 .all(char::is_whitespace)
         );
         assert_eq!(lines[4].chars().nth(agent_model_seam), Some('┬'));
+    }
+
+    #[test]
+    fn single_row_span_centers_period_across_multiline_models() {
+        let mut table = SimpleTable::new(
+            vec!["Date", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_column_row_span(
+            vec![
+                "2026-01-02".to_string(),
+                "pi".to_string(),
+                "model-a\nmodel-b\nmodel-c".to_string(),
+                "90".to_string(),
+            ],
+            0,
+            1,
+        );
+
+        let lines = table.render_lines();
+
+        assert!(!lines[3].contains("2026-01-02"));
+        assert!(lines[4].contains("2026-01-02"));
+        assert!(!lines[5].contains("2026-01-02"));
+    }
+
+    #[test]
+    fn row_spans_merge_date_and_agent_columns_independently() {
+        let mut table = SimpleTable::new(
+            vec!["Date", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_row_span(
+            vec![
+                "2026-01-02".to_string(),
+                String::new(),
+                String::new(),
+                "90".to_string(),
+            ],
+            4,
+        );
+        table.push_with_column_row_span(
+            vec![
+                String::new(),
+                "Claude".to_string(),
+                String::new(),
+                "90".to_string(),
+            ],
+            1,
+            3,
+        );
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-a".to_string(),
+            "30".to_string(),
+        ]);
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-b".to_string(),
+            "60".to_string(),
+        ]);
+
+        let lines = table.render_lines();
+        let widths = table.column_widths();
+        let after_date = 1 + widths[0];
+        let after_agent = 2 + widths[..2].iter().sum::<usize>();
+        let within_merged_cells = &lines[6];
+
+        assert!(lines[5].contains("2026-01-02"));
+        assert!(!lines[5].contains("Claude"));
+        assert!(lines[7].contains("Claude"));
+        assert_eq!(within_merged_cells.chars().nth(after_date), Some('│'));
+        assert_eq!(within_merged_cells.chars().nth(after_agent), Some('├'));
+        assert!(
+            within_merged_cells
+                .chars()
+                .skip(2 + widths[0])
+                .take(widths[1])
+                .all(char::is_whitespace)
+        );
+    }
+
+    #[test]
+    fn dashed_separator_colors_only_horizontal_dashes() {
+        let mut table = SimpleTable::new(
+            vec!["Period", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_column_row_span(
+            vec![
+                "2026-W01".to_string(),
+                "Claude".to_string(),
+                String::new(),
+                "90".to_string(),
+            ],
+            1,
+            3,
+        );
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-a".to_string(),
+            "30".to_string(),
+        ]);
+        table.dashed_separator_after_last_row();
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-b".to_string(),
+            "60".to_string(),
+        ]);
+
+        let lines = table.render_lines();
+        let separator = lines
+            .iter()
+            .find(|line| line.contains('├') && line.contains('-'))
+            .expect("dashed separator should be present");
+
+        if std::env::var_os("NO_COLOR").is_none() {
+            let grey_segments = separator
+                .split("\x1b[90m")
+                .skip(1)
+                .map(|segment| segment.split("\x1b[0m").next().unwrap())
+                .collect::<Vec<_>>();
+            assert!(!grey_segments.is_empty(), "{separator:?}");
+            assert!(
+                grey_segments
+                    .iter()
+                    .all(|segment| !segment.is_empty() && segment.chars().all(|ch| ch == '-')),
+                "only horizontal dashes should be grey: {separator:?}"
+            );
+        } else {
+            assert!(!separator.contains("\x1b[90m"));
+        }
+        assert!(
+            lines
+                .iter()
+                .filter(|line| line.contains("model-a") || line.contains("model-b"))
+                .all(|line| !line.contains("\x1b[90m"))
+        );
+    }
+
+    #[test]
+    fn dashed_separator_applies_inside_agent_span_without_date_span() {
+        let mut table = SimpleTable::new(
+            vec!["Period", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_column_row_span(
+            vec![
+                "2026-W01".to_string(),
+                "Claude".to_string(),
+                String::new(),
+                "90".to_string(),
+            ],
+            1,
+            3,
+        );
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-a".to_string(),
+            "30".to_string(),
+        ]);
+        table.dashed_separator_after_last_row();
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "model-b".to_string(),
+            "60".to_string(),
+        ]);
+
+        let separator = &table.render_lines()[6];
+
+        assert!(separator.starts_with('├'));
+        assert!(separator.contains('-'));
+        assert!(!separator.contains('─'));
     }
 
     #[test]

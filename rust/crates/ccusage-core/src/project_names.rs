@@ -134,15 +134,23 @@ pub(crate) fn short_model_name(model: &str) -> String {
     model.to_string()
 }
 
-/// Shared per-model breakdown label so every `--breakdown` table renders the
-/// same `└─ model` sub-row shape.
+/// Shared shortened model name used by every `--breakdown` table.
 pub fn format_breakdown_model_label(model: &str) -> String {
-    format!("  └─ {}", short_model_name(model))
+    short_model_name(model)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_model_breakdown_names_without_tree_prefixes() {
+        assert_eq!(
+            format_breakdown_model_label("claude-opus-4-20250101"),
+            "opus-4"
+        );
+        assert_eq!(format_breakdown_model_label("gpt-6-luna"), "gpt-6-luna");
+    }
 
     #[test]
     fn formats_users_project_paths_without_dropping_project_name() {

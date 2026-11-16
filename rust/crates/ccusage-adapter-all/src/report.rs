@@ -238,66 +238,87 @@ pub(super) fn print_table(
         .with_bold_headers();
 
     for row in rows {
-        let values = all_table_row(row, kind, compact, false, shared.no_cost);
-        let daily_row_span = if kind == AgentReportKind::Daily {
-            let breakdown_rows = row
-                .agent_breakdowns
-                .as_ref()
-                .map(|breakdowns| {
-                    breakdowns.len()
-                        + if shared.breakdown {
-                            breakdowns
-                                .iter()
-                                .map(|breakdown| breakdown.model_breakdowns.len())
-                                .sum::<usize>()
+        let collapse_period = kind == AgentReportKind::Daily
+            && should_collapse_single_agent_period(row, shared.breakdown);
+        if !collapse_period {
+            let values = all_table_row(row, kind, compact, false, shared.no_cost, false);
+            let daily_row_span = if kind == AgentReportKind::Daily {
+                let breakdown_rows = row
+                    .agent_breakdowns
+                    .as_ref()
+                    .map(|breakdowns| {
+                        breakdowns
+                            .iter()
+                            .map(|breakdown| agent_breakdown_row_count(breakdown, shared.breakdown))
+                            .sum::<usize>()
+                    })
+                    .unwrap_or_else(|| {
+                        if shared.breakdown {
+                            row.model_breakdowns.len()
                         } else {
                             0
                         }
-                })
-                .unwrap_or_else(|| {
-                    if shared.breakdown {
-                        row.model_breakdowns.len()
-                    } else {
-                        0
-                    }
-                });
-            1 + breakdown_rows
-        } else {
-            1
-        };
-        if row.agent_breakdowns.is_some() {
-            if kind == AgentReportKind::Daily {
-                table.push_with_row_span_and_hidden_separator_after(values, daily_row_span, 1);
+                    });
+                1 + breakdown_rows
             } else {
-                table.push_with_cell_alignment(values, 1, Align::Center);
-            }
-            table.bold_last_row();
-        } else if kind == AgentReportKind::Daily && row.agent == "all" {
-            if daily_row_span > 1 {
-                table.push_with_row_span_and_hidden_separator_after(values, daily_row_span, 1);
+                1
+            };
+            if row.agent_breakdowns.is_some() {
+                if kind == AgentReportKind::Daily {
+                    table.push_with_row_span_and_hidden_separator_after(values, daily_row_span, 1);
+                } else {
+                    table.push_with_cell_alignment(values, 1, Align::Center);
+                }
+                table.bold_last_row();
+            } else if kind == AgentReportKind::Daily && row.agent == "all" {
+                if daily_row_span > 1 {
+                    table.push_with_row_span_and_hidden_separator_after(values, daily_row_span, 1);
+                } else {
+                    table.push_with_hidden_separator_after(values, 1);
+                }
+            } else if kind == AgentReportKind::Daily && daily_row_span > 1 {
+                table.push_with_row_span(values, daily_row_span);
             } else {
-                table.push_with_hidden_separator_after(values, 1);
+                table.push(values);
             }
-        } else if kind == AgentReportKind::Daily && daily_row_span > 1 {
-            table.push_with_row_span(values, daily_row_span);
-        } else {
-            table.push(values);
         }
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
             for (index, breakdown) in agent_breakdowns.iter().enumerate() {
-                table.push(all_table_row(
-                    breakdown,
-                    kind,
-                    compact,
-                    true,
-                    shared.no_cost,
-                ));
-                if shared.breakdown && !breakdown.model_breakdowns.is_empty() {
+                let has_model_details = shared.breakdown && !breakdown.model_breakdowns.is_empty();
+                let collapse_summary =
+                    should_collapse_single_model_summary(breakdown, shared.breakdown);
+                if !collapse_summary {
+                    let mut values = all_table_row(
+                        breakdown,
+                        kind,
+                        compact,
+                        true,
+                        shared.no_cost,
+                        shared.breakdown,
+                    );
+                    if collapse_period && !has_model_details {
+                        values[0] = row.period.clone();
+                    }
+                    if has_model_details {
+                        table.push_with_column_row_span(
+                            values,
+                            1,
+                            agent_breakdown_row_count(breakdown, shared.breakdown),
+                        );
+                    } else if collapse_period {
+                        table.push_with_column_row_span(values, 0, 1);
+                    } else {
+                        table.push(values);
+                    }
+                }
+                if has_model_details {
                     push_model_breakdown_rows(
                         &mut table,
                         &breakdown.model_breakdowns,
                         compact,
                         shared,
+                        collapse_period.then_some(row.period.as_str()),
+                        collapse_summary.then(|| agent_label(breakdown.agent)),
                     );
                 }
                 if kind == AgentReportKind::Daily && index + 1 < agent_breakdowns.len() {
@@ -305,7 +326,14 @@ pub(super) fn print_table(
                 }
             }
         } else if shared.breakdown && !row.model_breakdowns.is_empty() {
-            push_model_breakdown_rows(&mut table, &row.model_breakdowns, compact, shared);
+            push_model_breakdown_rows(
+                &mut table,
+                &row.model_breakdowns,
+                compact,
+                shared,
+                None,
+                None,
+            );
         }
     }
     table.separator();
@@ -471,6 +499,7 @@ pub(super) fn all_table_row(
     compact: bool,
     breakdown: bool,
     no_cost: bool,
+    render_model_details: bool,
 ) -> Vec<String> {
     let period = if breakdown {
         String::new()
@@ -487,7 +516,9 @@ pub(super) fn all_table_row(
     } else {
         agent_label(row.agent).to_string()
     };
-    let models = if row.agent_breakdowns.is_some() {
+    let models = if row.agent_breakdowns.is_some()
+        || (render_model_details && !row.model_breakdowns.is_empty())
+    {
         String::new()
     } else {
         format_models_multiline(&row.models_used)
@@ -517,6 +548,53 @@ fn format_table_cost(value: f64) -> String {
     format!("{value:.2}")
 }
 
+fn rows_match_displayed_totals(left: &AllRow, right: &AllRow) -> bool {
+    left.input_tokens == right.input_tokens
+        && left.output_tokens == right.output_tokens
+        && left.cache_creation_tokens == right.cache_creation_tokens
+        && left.cache_read_tokens == right.cache_read_tokens
+        && left.total_tokens == right.total_tokens
+        && format_table_cost(left.total_cost) == format_table_cost(right.total_cost)
+}
+
+fn row_matches_model_totals(row: &AllRow, model: &ModelBreakdown) -> bool {
+    row.input_tokens == model.input_tokens
+        && row.output_tokens == model.output_tokens
+        && row.cache_creation_tokens == model.cache_creation_tokens
+        && row.cache_read_tokens == model.cache_read_tokens
+        && row.total_tokens == model.total_tokens()
+        && format_table_cost(row.total_cost) == format_table_cost(model.cost)
+}
+
+pub(super) fn should_collapse_single_model_summary(row: &AllRow, show_model_details: bool) -> bool {
+    let [model] = row.model_breakdowns.as_slice() else {
+        return false;
+    };
+    show_model_details && row_matches_model_totals(row, model)
+}
+
+pub(super) fn should_collapse_single_agent_period(row: &AllRow, show_model_details: bool) -> bool {
+    let Some([agent]) = row.agent_breakdowns.as_deref() else {
+        return false;
+    };
+    rows_match_displayed_totals(row, agent)
+        && (!show_model_details || should_collapse_single_model_summary(agent, true))
+}
+
+pub(super) fn agent_breakdown_row_count(row: &AllRow, show_model_details: bool) -> usize {
+    let model_rows = if show_model_details {
+        row.model_breakdowns.len()
+    } else {
+        0
+    };
+    let summary_rows = if should_collapse_single_model_summary(row, show_model_details) {
+        0
+    } else {
+        1
+    };
+    summary_rows + model_rows
+}
+
 fn component_total_tokens(row: &AllRow) -> u64 {
     row.input_tokens
         .saturating_add(row.output_tokens)
@@ -529,22 +607,20 @@ fn push_model_breakdown_rows(
     breakdowns: &[ModelBreakdown],
     compact: bool,
     shared: &SharedArgs,
+    period: Option<&str>,
+    agent: Option<&str>,
 ) {
-    for b in breakdowns {
+    for (index, b) in breakdowns.iter().enumerate() {
         let total = b.total_tokens();
-        let model = color(
-            shared,
-            format_breakdown_model_label(&b.model_name),
-            Color::Grey,
-        );
+        let model = format_breakdown_model_label(&b.model_name);
         if compact {
             let mut row = vec![
-                String::new(),
-                String::new(),
+                period.unwrap_or_default().to_string(),
+                agent.unwrap_or_default().to_string(),
                 model,
-                color(shared, format_number(b.input_tokens), Color::Grey),
-                color(shared, format_number(b.output_tokens), Color::Grey),
-                color(shared, format_table_cost(b.cost), Color::Grey),
+                format_number(b.input_tokens),
+                format_number(b.output_tokens),
+                format_table_cost(b.cost),
             ];
             if shared.no_cost {
                 row.pop();
@@ -552,20 +628,23 @@ fn push_model_breakdown_rows(
             table.push(row);
         } else {
             let mut row = vec![
-                String::new(),
-                String::new(),
+                period.unwrap_or_default().to_string(),
+                agent.unwrap_or_default().to_string(),
                 model,
-                color(shared, format_number(b.input_tokens), Color::Grey),
-                color(shared, format_number(b.output_tokens), Color::Grey),
-                color(shared, format_number(b.cache_creation_tokens), Color::Grey),
-                color(shared, format_number(b.cache_read_tokens), Color::Grey),
-                color(shared, format_number(total), Color::Grey),
-                color(shared, format_table_cost(b.cost), Color::Grey),
+                format_number(b.input_tokens),
+                format_number(b.output_tokens),
+                format_number(b.cache_creation_tokens),
+                format_number(b.cache_read_tokens),
+                format_number(total),
+                format_table_cost(b.cost),
             ];
             if shared.no_cost {
                 row.pop();
             }
             table.push(row);
+        }
+        if index + 1 < breakdowns.len() {
+            table.dashed_separator_after_last_row();
         }
     }
 }
