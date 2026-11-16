@@ -123,7 +123,6 @@ impl SimpleTable {
 
     fn render_lines(&self) -> Vec<String> {
         let widths = self.column_widths();
-        let separator = border('├', '┼', '┤', &widths);
         let header_aligns = vec![Align::Center; widths.len()];
         let mut lines = Vec::new();
         lines.push(border('┌', '┬', '┐', &widths));
@@ -141,7 +140,11 @@ impl SimpleTable {
                 .collect::<Vec<_>>();
             lines.push(table_line(&header_row, &header_aligns, &widths, None, None));
         }
-        lines.push(separator.clone());
+        let first_hidden_separator = self
+            .rows
+            .first()
+            .and_then(|row| row.as_ref().and_then(|row| row.hidden_separator_after));
+        lines.push(row_separator(&widths, None, first_hidden_separator));
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
                 Some(row) => {
@@ -163,16 +166,37 @@ impl SimpleTable {
                         ));
                     }
                 }
-                None => lines.push(separator.clone()),
+                None => {
+                    let hidden_above = self.rows[..row_index]
+                        .iter()
+                        .rev()
+                        .find_map(|row| row.as_ref().map(|row| row.hidden_separator_after))
+                        .flatten();
+                    let hidden_below = self.rows[row_index + 1..]
+                        .iter()
+                        .find_map(|row| row.as_ref().map(|row| row.hidden_separator_after))
+                        .flatten();
+                    lines.push(row_separator(&widths, hidden_above, hidden_below));
+                }
             }
             if row.is_some()
                 && row_index + 1 < self.rows.len()
                 && !matches!(self.rows.get(row_index + 1), Some(None))
             {
-                lines.push(separator.clone());
+                let hidden_above = row.as_ref().and_then(|row| row.hidden_separator_after);
+                let hidden_below = self.rows[row_index + 1]
+                    .as_ref()
+                    .and_then(|row| row.hidden_separator_after);
+                lines.push(row_separator(&widths, hidden_above, hidden_below));
             }
         }
-        lines.push(border('└', '┴', '┘', &widths));
+        let last_hidden_separator = self
+            .rows
+            .iter()
+            .rev()
+            .find_map(|row| row.as_ref().map(|row| row.hidden_separator_after))
+            .flatten();
+        lines.push(bottom_border(&widths, last_hidden_separator));
         lines
     }
 
@@ -532,7 +556,9 @@ fn table_line(
         line.push(' ');
         line.push_str(&pad_cell(cell, width.saturating_sub(2), align));
         line.push(' ');
-        if hidden_separator_after != Some(index) || index + 1 == widths.len() {
+        if hidden_separator_after == Some(index) && index + 1 < widths.len() {
+            line.push(' ');
+        } else {
             line.push('│');
         }
     }
@@ -565,6 +591,44 @@ fn border(left: char, middle: char, right: char, widths: &[usize]) -> String {
             right
         } else {
             middle
+        });
+    }
+    line
+}
+
+fn row_separator(
+    widths: &[usize],
+    hidden_above: Option<usize>,
+    hidden_below: Option<usize>,
+) -> String {
+    let mut line = String::from("├");
+    for (index, width) in widths.iter().enumerate() {
+        line.push_str(&"─".repeat(*width));
+        let intersection = if index + 1 == widths.len() {
+            '┤'
+        } else {
+            match (hidden_above == Some(index), hidden_below == Some(index)) {
+                (false, false) => '┼',
+                (false, true) => '┴',
+                (true, false) => '┬',
+                (true, true) => '─',
+            }
+        };
+        line.push(intersection);
+    }
+    line
+}
+
+fn bottom_border(widths: &[usize], hidden_above: Option<usize>) -> String {
+    let mut line = String::from("└");
+    for (index, width) in widths.iter().enumerate() {
+        line.push_str(&"─".repeat(*width));
+        line.push(if index + 1 == widths.len() {
+            '┘'
+        } else if hidden_above == Some(index) {
+            '─'
+        } else {
+            '┴'
         });
     }
     line
@@ -603,11 +667,16 @@ mod tests {
             "150".to_string(),
         ];
         table.push(row.clone());
-        table.push_with_hidden_separator_after(row, 1);
+        table.push_with_hidden_separator_after(row.clone(), 1);
+        table.push(row);
         let lines = table.render_lines();
+        let seam = 2 + table.column_widths()[..2].iter().sum::<usize>();
 
         assert_eq!(lines[3].matches('│').count(), 5);
         assert_eq!(lines[5].matches('│').count(), 4);
+        assert_eq!(visible_width(&lines[3]), visible_width(&lines[5]));
+        assert_eq!(lines[4].chars().nth(seam), Some('┴'));
+        assert_eq!(lines[6].chars().nth(seam), Some('┬'));
         assert!(lines[5].contains("2026-01-02"));
         assert!(lines[5].contains("150"));
     }
