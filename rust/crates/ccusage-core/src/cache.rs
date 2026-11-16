@@ -11,11 +11,13 @@
 //! back to the home profile's `.cache/ccusage`). Three tables:
 //!
 //! - `files` — one row per source file: freshness fingerprint (mtime, size, cost
-//!   fingerprint) and a postcard-encoded `Vec<CachedEntry>` blob.
+//!   fingerprint) and a postcard-encoded `Vec<CachedEntry>` blob, optionally
+//!   DEFLATE-compressed.
 //! - `ledger` — billable entries retained from deleted source files, keyed by
 //!   `(namespace, dedup_key)`. The primary key makes a duplicate append a no-op,
 //!   so spend is counted at most once and survives source-file deletion.
-//! - `opencode` — one row per OpenCode message database, keyed by its cache key.
+//! - `opencode`: one optionally compressed row cache per OpenCode message
+//!   database, keyed by its cache key.
 //!
 //! # Validity
 //!
@@ -474,10 +476,46 @@ const PRICING_SCHEMA_VERSION: i64 = 2;
 /// Schema version for the `headers` table, tracked in `schema_meta`.
 const HEADERS_SCHEMA_VERSION: i64 = 1;
 
+/// Postcard vectors cannot collide with this marker: only an empty vector starts with zero, as one byte.
+const CACHE_BLOB_MAGIC: &[u8; 5] = b"\0CCZ1";
+const CACHE_BLOB_COMPRESSION_LEVEL: u8 = 1;
+const CACHE_BLOB_MIGRATION: &str = "cache_blob_compression";
+const CACHE_BLOB_MIGRATION_VERSION: i64 = 3;
+const CACHE_BLOB_SAVED_BYTES: &str = "cache_blob_compression_saved_bytes";
+const CACHE_BLOB_MIGRATION_BATCH_SIZE: usize = 128;
+const CACHE_VACUUM_DAY: &str = "cache_vacuum_day";
+const CACHE_VACUUM_DONE: &str = "cache_vacuum_done";
+const CACHE_VACUUM_MIN_SAVINGS_BYTES: i64 = 16 * 1024 * 1024;
+
+fn compress_cache_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    let compressed = miniz_oxide::deflate::compress_to_vec(bytes, CACHE_BLOB_COMPRESSION_LEVEL);
+    if compressed.len() + CACHE_BLOB_MAGIC.len() >= bytes.len() {
+        return None;
+    }
+    let mut blob = Vec::with_capacity(CACHE_BLOB_MAGIC.len() + compressed.len());
+    blob.extend_from_slice(CACHE_BLOB_MAGIC);
+    blob.extend_from_slice(&compressed);
+    Some(blob)
+}
+
+fn encode_cache_blob(bytes: &[u8]) -> Vec<u8> {
+    compress_cache_blob(bytes).unwrap_or_else(|| bytes.to_vec())
+}
+
+fn decode_cache_blob(bytes: &[u8]) -> Option<Cow<'_, [u8]>> {
+    match bytes.strip_prefix(CACHE_BLOB_MAGIC) {
+        Some(compressed) => miniz_oxide::inflate::decompress_to_vec(compressed)
+            .ok()
+            .map(Cow::Owned),
+        None => Some(Cow::Borrowed(bytes)),
+    }
+}
+
 /// Encode parsed entries into the compact blob stored in the `files` table.
 fn encode_entries(entries: &[LoadedEntry]) -> Option<Vec<u8>> {
     let cached: Vec<CachedEntry> = entries.iter().map(CachedEntry::from).collect();
-    postcard::to_allocvec(&cached).ok()
+    let bytes = postcard::to_allocvec(&cached).ok()?;
+    Some(encode_cache_blob(&bytes))
 }
 
 /// Decode one postcard value from `bytes`, requiring the whole buffer to be used.
@@ -493,10 +531,14 @@ fn decode_exact<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
 /// Decode a `files` blob back into reconstructed entries, accepting the layout
 /// that releases before `data_session_id` wrote.
 fn decode_entries(bytes: &[u8]) -> Option<Vec<LoadedEntry>> {
-    if let Some(cached) = decode_exact::<Vec<CachedEntry>>(bytes) {
+    let Some(bytes) = decode_cache_blob(bytes) else {
+        warn_unreadable_files_row();
+        return None;
+    };
+    if let Some(cached) = decode_exact::<Vec<CachedEntry>>(&bytes) {
         return Some(cached.into_iter().map(LoadedEntry::from).collect());
     }
-    if let Some(legacy) = decode_exact::<Vec<LegacyCachedEntry>>(bytes) {
+    if let Some(legacy) = decode_exact::<Vec<LegacyCachedEntry>>(&bytes) {
         return Some(
             legacy
                 .into_iter()
@@ -942,7 +984,151 @@ fn migrate(conn: &sqlite::Connection) -> Option<()> {
             let _ = st.next();
         }
     }
+    let saved_bytes = migrate_cache_blob_compression(conn).unwrap_or(0);
+    maybe_vacuum_cache(conn, saved_bytes);
     Some(())
+}
+
+/// Raw rows remain readable; failed migrations roll back.
+/// shortcut: Older releases may write raw rows; refresh or bump this version to recompress.
+fn migrate_cache_blob_compression(conn: &sqlite::Connection) -> Option<i64> {
+    if read_schema_version(conn, CACHE_BLOB_MIGRATION) == Some(CACHE_BLOB_MIGRATION_VERSION) {
+        return Some(read_schema_version(conn, CACHE_BLOB_SAVED_BYTES).unwrap_or(0));
+    }
+    conn.execute("BEGIN IMMEDIATE").ok()?;
+    let migrated = (|| -> Option<i64> {
+        if read_schema_version(conn, CACHE_BLOB_MIGRATION) == Some(CACHE_BLOB_MIGRATION_VERSION) {
+            return Some(read_schema_version(conn, CACHE_BLOB_SAVED_BYTES).unwrap_or(0));
+        }
+        let saved_bytes = compress_cache_column(conn, "files", "entries")?
+            .saturating_add(compress_cache_column(conn, "opencode", "rows")?);
+        if saved_bytes >= CACHE_VACUUM_MIN_SAVINGS_BYTES {
+            conn.execute(
+                "DELETE FROM schema_meta WHERE name IN ('cache_vacuum_day', 'cache_vacuum_done')",
+            )
+            .ok()?;
+        }
+        for (name, version) in [
+            (CACHE_BLOB_MIGRATION, CACHE_BLOB_MIGRATION_VERSION),
+            (CACHE_BLOB_SAVED_BYTES, saved_bytes),
+        ] {
+            let mut st = conn
+                .prepare("INSERT OR REPLACE INTO schema_meta(name, version) VALUES (?, ?)")
+                .ok()?;
+            st.bind((1, name)).ok()?;
+            st.bind((2, version)).ok()?;
+            st.next().ok()?;
+        }
+        Some(saved_bytes)
+    })();
+    let committed = migrated.is_some() && conn.execute("COMMIT").is_ok();
+    if committed {
+        migrated
+    } else {
+        let _ = conn.execute("ROLLBACK");
+        None
+    }
+}
+
+/// Rewrite existing cache payloads in small batches to bound migration memory.
+fn compress_cache_column(conn: &sqlite::Connection, table: &str, column: &str) -> Option<i64> {
+    let select_sql = format!(
+        "SELECT rowid, {column} FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT {CACHE_BLOB_MIGRATION_BATCH_SIZE}"
+    );
+    let update_sql = format!("UPDATE {table} SET {column} = ? WHERE rowid = ?");
+    let mut last_rowid = 0_i64;
+    let mut saved_bytes = 0_i64;
+    loop {
+        let (next_rowid, updates) = {
+            let mut st = conn.prepare(&select_sql).ok()?;
+            st.bind((1, last_rowid)).ok()?;
+            let mut next_rowid = last_rowid;
+            let mut updates = Vec::new();
+            while let sqlite::State::Row = st.next().ok()? {
+                let rowid = st.read::<i64, _>(0).ok()?;
+                let blob = st.read::<Vec<u8>, _>(1).ok()?;
+                next_rowid = rowid;
+                if !blob.starts_with(CACHE_BLOB_MAGIC)
+                    && let Some(compressed) = compress_cache_blob(&blob)
+                {
+                    saved_bytes = saved_bytes.saturating_add(
+                        i64::try_from(blob.len().saturating_sub(compressed.len()))
+                            .unwrap_or(i64::MAX),
+                    );
+                    updates.push((rowid, compressed));
+                }
+            }
+            (next_rowid, updates)
+        };
+        if next_rowid == last_rowid {
+            break;
+        }
+        last_rowid = next_rowid;
+        if !updates.is_empty() {
+            let mut st = conn.prepare(&update_sql).ok()?;
+            for (rowid, blob) in updates {
+                st.bind((1, &blob[..])).ok()?;
+                st.bind((2, rowid)).ok()?;
+                st.next().ok()?;
+                st.reset().ok()?;
+            }
+        }
+    }
+    Some(saved_bytes)
+}
+
+/// Reclaim space after a worthwhile compression migration, at most once per UTC day.
+/// VACUUM changes SQLite's layout only; it does not alter table contents.
+fn maybe_vacuum_cache(conn: &sqlite::Connection, saved_bytes: i64) {
+    if saved_bytes < CACHE_VACUUM_MIN_SAVINGS_BYTES
+        || read_schema_version(conn, CACHE_VACUUM_DONE) == Some(1)
+    {
+        return;
+    }
+    let today = today_day_number();
+    if read_schema_version(conn, CACHE_VACUUM_DAY).is_some_and(|day| day >= today) {
+        return;
+    }
+    if conn.execute("BEGIN IMMEDIATE").is_err() {
+        return;
+    }
+    if read_schema_version(conn, CACHE_VACUUM_DAY).is_some_and(|day| day >= today) {
+        let _ = conn.execute("COMMIT");
+        return;
+    }
+    let stamped = (|| -> Option<()> {
+        let mut st = conn
+            .prepare("INSERT OR REPLACE INTO schema_meta(name, version) VALUES (?, ?)")
+            .ok()?;
+        st.bind((1, CACHE_VACUUM_DAY)).ok()?;
+        st.bind((2, today)).ok()?;
+        st.next().ok()?;
+        Some(())
+    })();
+    if stamped.is_none() || conn.execute("COMMIT").is_err() {
+        let _ = conn.execute("ROLLBACK");
+        return;
+    }
+    if let Err(e) = conn.execute("VACUUM") {
+        eprintln!("WARN  Failed to compact the cache database ({e}); cache data remains usable.");
+        return;
+    }
+    if let Ok(mut st) =
+        conn.prepare("INSERT OR REPLACE INTO schema_meta(name, version) VALUES (?, ?)")
+    {
+        let _ = st.bind((1, CACHE_VACUUM_DONE));
+        let _ = st.bind((2, 1_i64));
+        let _ = st.next();
+    }
+}
+
+#[cfg(test)]
+fn pragma_i64(conn: &sqlite::Connection, pragma: &str) -> Option<i64> {
+    let mut st = conn.prepare(pragma).ok()?;
+    match st.next() {
+        Ok(sqlite::State::Row) => st.read::<i64, _>(0).ok(),
+        _ => None,
+    }
 }
 
 /// Whole UTC days since the Unix epoch, used to rate-limit `PRAGMA optimize`
@@ -1732,6 +1918,7 @@ pub fn load_opencode_row_cache(cache_key: &str) -> Option<Vec<OpenCodeRow>> {
     match st.next().ok()? {
         sqlite::State::Row => {
             let blob = st.read::<Vec<u8>, _>(0).ok()?;
+            let blob = decode_cache_blob(&blob)?;
             postcard::from_bytes::<Vec<OpenCodeRow>>(&blob).ok()
         }
         sqlite::State::Done => None,
@@ -1749,6 +1936,7 @@ pub fn save_opencode_row_cache(cache_key: &str, rows: &[OpenCodeRow]) {
     let Ok(blob) = postcard::to_allocvec(rows) else {
         return;
     };
+    let blob = encode_cache_blob(&blob);
     // `cost_fingerprint` is retained as a NOT NULL schema column to avoid a
     // migration, but cost is now derived at load, so it is always written as 0
     // and never consulted for validity.
@@ -2655,6 +2843,247 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn compressed_file_cache_entries_round_trip() {
+        let entries = vec![sample_entry(); 128];
+        let blob = encode_entries(&entries).expect("encode file cache entries");
+
+        assert!(
+            blob.starts_with(b"\0CCZ1"),
+            "repetitive entries should compress"
+        );
+        let decoded = decode_entries(&blob).expect("decode compressed file cache entries");
+        assert_eq!(decoded.len(), entries.len());
+        assert_eq!(decoded[0].session_id.as_ref(), "session-a");
+        assert_eq!(decoded[127].data.message.id.as_deref(), Some("msg-a"));
+    }
+
+    #[test]
+    fn compressed_opencode_rows_round_trip_and_keep_legacy_rows_readable() {
+        let _env = CacheEnv::new("opencode-compressed-cache");
+        let entry = CachedEntry::from(&sample_entry());
+        let rows: Vec<_> = (0..128)
+            .map(|i| OpenCodeRow {
+                id: format!("row-{i}"),
+                content_hash: i,
+                entry: entry.clone(),
+            })
+            .collect();
+        save_opencode_row_cache("compressed", &rows);
+
+        let conn = open_db().expect("cache connection");
+        let mut st = conn
+            .prepare("SELECT rows FROM opencode WHERE db_key = ?")
+            .unwrap();
+        st.bind((1, "compressed")).unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        let blob = st.read::<Vec<u8>, _>(0).unwrap();
+        assert!(
+            blob.starts_with(b"\0CCZ1"),
+            "repetitive OpenCode rows should compress"
+        );
+        drop(st);
+
+        let loaded = load_opencode_row_cache("compressed").expect("compressed rows decode");
+        assert_eq!(loaded.len(), rows.len());
+        assert_eq!(loaded[0].id, "row-0");
+        assert_eq!(loaded[127].content_hash, 127);
+        assert_eq!(loaded[0].entry.model.as_deref(), Some("claude-test"));
+
+        let legacy = vec![OpenCodeRow {
+            id: "legacy-row".to_string(),
+            content_hash: 9,
+            entry,
+        }];
+        let legacy_blob = postcard::to_allocvec(&legacy).expect("encode legacy rows");
+        let mut st = conn
+            .prepare("INSERT INTO opencode(db_key, cost_fingerprint, rows) VALUES (?, 0, ?)")
+            .unwrap();
+        st.bind((1, "legacy")).unwrap();
+        st.bind((2, &legacy_blob[..])).unwrap();
+        st.next().unwrap();
+        let loaded = load_opencode_row_cache("legacy").expect("legacy rows stay readable");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "legacy-row");
+    }
+
+    #[test]
+    fn cache_vacuum_reclaims_space_after_large_compression_savings() {
+        let _env = CacheEnv::new("cache-vacuum");
+        let conn = open_db().expect("cache connection");
+        conn.execute("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES ('vacuum-large', 'test', 0, 0, 0, randomblob(33554432))")
+            .unwrap();
+        conn.execute("DELETE FROM files WHERE path = 'vacuum-large'")
+            .unwrap();
+        let page_count_before = pragma_i64(&conn, "PRAGMA page_count").unwrap();
+
+        maybe_vacuum_cache(&conn, 32 * 1024 * 1024);
+
+        let page_count_after = pragma_i64(&conn, "PRAGMA page_count").unwrap();
+        assert!(page_count_after < page_count_before);
+        assert_eq!(
+            read_schema_version(&conn, CACHE_VACUUM_DAY),
+            Some(today_day_number())
+        );
+        assert_eq!(read_schema_version(&conn, CACHE_VACUUM_DONE), Some(1));
+    }
+
+    #[test]
+    fn cache_blob_migration_compresses_existing_rows_once() {
+        let _env = CacheEnv::new("cache-blob-migration");
+        let conn = open_db().expect("cache connection");
+        let entries = vec![CachedEntry::from(&sample_entry()); 128];
+        let file_blob = postcard::to_allocvec(&entries).expect("encode legacy file cache");
+        let rows = vec![OpenCodeRow {
+            id: "row-a".to_string(),
+            content_hash: 1,
+            entry: CachedEntry::from(&sample_entry()),
+        }];
+        let opencode_blob = postcard::to_allocvec(&rows).expect("encode legacy OpenCode cache");
+        let precompressed_file_blob = encode_cache_blob(&file_blob);
+        let precompressed_opencode_blob = encode_cache_blob(&opencode_blob);
+        assert!(precompressed_file_blob.starts_with(CACHE_BLOB_MAGIC));
+        assert!(precompressed_opencode_blob.starts_with(CACHE_BLOB_MAGIC));
+        let large_blob = vec![b'x'; 17 * 1024 * 1024];
+        let mut st = conn
+            .prepare("UPDATE schema_meta SET version = ? WHERE name = ?")
+            .unwrap();
+        st.bind((1, CACHE_BLOB_MIGRATION_VERSION - 1)).unwrap();
+        st.bind((2, CACHE_BLOB_MIGRATION)).unwrap();
+        st.next().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(name, version) VALUES ('cache_vacuum_day', 1)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(name, version) VALUES ('cache_vacuum_done', 1)",
+        )
+        .unwrap();
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES (?, ?, 0, 0, 0, ?)")
+            .unwrap();
+        st.bind((1, "legacy-file")).unwrap();
+        st.bind((2, "test")).unwrap();
+        st.bind((3, &file_blob[..])).unwrap();
+        st.next().unwrap();
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES ('already-compressed-file', 'test', 0, 0, 0, ?)")
+            .unwrap();
+        st.bind((1, &precompressed_file_blob[..])).unwrap();
+        st.next().unwrap();
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES (?, 'test', 0, 0, 0, ?)")
+            .unwrap();
+        st.bind((1, "legacy-large")).unwrap();
+        st.bind((2, &large_blob[..])).unwrap();
+        st.next().unwrap();
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES (?, 'test', 0, 0, 0, ?)")
+            .unwrap();
+        for index in 0..=CACHE_BLOB_MIGRATION_BATCH_SIZE {
+            let path = format!("batch-{index}");
+            st.bind((1, path.as_str())).unwrap();
+            st.bind((2, &file_blob[..])).unwrap();
+            st.next().unwrap();
+            st.reset().unwrap();
+        }
+        let mut st = conn
+            .prepare("INSERT INTO opencode(db_key, cost_fingerprint, rows) VALUES (?, 0, ?)")
+            .unwrap();
+        st.bind((1, "legacy-opencode")).unwrap();
+        st.bind((2, &opencode_blob[..])).unwrap();
+        st.next().unwrap();
+        let mut st = conn
+            .prepare("INSERT INTO opencode(db_key, cost_fingerprint, rows) VALUES ('already-compressed-opencode', 0, ?)")
+            .unwrap();
+        st.bind((1, &precompressed_opencode_blob[..])).unwrap();
+        st.next().unwrap();
+
+        let saved_bytes = migrate_cache_blob_compression(&conn).expect("migration succeeds");
+        assert!(saved_bytes >= CACHE_VACUUM_MIN_SAVINGS_BYTES);
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path LIKE 'batch-%'")
+            .unwrap();
+        let mut batch_count = 0;
+        while let Ok(sqlite::State::Row) = st.next() {
+            let blob = st.read::<Vec<u8>, _>(0).unwrap();
+            assert_eq!(decode_entries(&blob).unwrap().len(), 128);
+            batch_count += 1;
+        }
+        assert_eq!(batch_count, CACHE_BLOB_MIGRATION_BATCH_SIZE + 1);
+        assert_eq!(read_schema_version(&conn, CACHE_VACUUM_DAY), None);
+        assert_eq!(read_schema_version(&conn, CACHE_VACUUM_DONE), None);
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path = ?")
+            .unwrap();
+        st.bind((1, "legacy-file")).unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        let blob = st.read::<Vec<u8>, _>(0).unwrap();
+        assert!(blob.starts_with(CACHE_BLOB_MAGIC));
+        assert_eq!(decode_entries(&blob).unwrap().len(), 128);
+        drop(st);
+
+        let loaded = load_opencode_row_cache("legacy-opencode").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "row-a");
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path = 'already-compressed-file'")
+            .unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        let preserved_blob = st.read::<Vec<u8>, _>(0).unwrap();
+        assert!(preserved_blob.starts_with(CACHE_BLOB_MAGIC));
+        assert_eq!(decode_entries(&preserved_blob).unwrap().len(), 128);
+        drop(st);
+        let preserved_rows = load_opencode_row_cache("already-compressed-opencode").unwrap();
+        assert_eq!(preserved_rows.len(), 1);
+        assert_eq!(preserved_rows[0].id, "row-a");
+        assert_eq!(
+            read_schema_version(&conn, CACHE_BLOB_MIGRATION),
+            Some(CACHE_BLOB_MIGRATION_VERSION)
+        );
+        assert_eq!(
+            read_schema_version(&conn, CACHE_BLOB_SAVED_BYTES),
+            Some(saved_bytes)
+        );
+        assert_eq!(migrate_cache_blob_compression(&conn), Some(saved_bytes));
+    }
+
+    #[test]
+    fn cache_blob_migration_rolls_back_partial_row_updates() {
+        let _env = CacheEnv::new("cache-blob-migration-rollback");
+        let conn = open_db().expect("cache connection");
+        let entries = vec![CachedEntry::from(&sample_entry()); 128];
+        let file_blob = postcard::to_allocvec(&entries).expect("encode legacy cache");
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES (?, 'test', 0, 0, 0, ?)")
+            .unwrap();
+        for path in ["first", "second"] {
+            st.bind((1, path)).unwrap();
+            st.bind((2, &file_blob[..])).unwrap();
+            st.next().unwrap();
+            st.reset().unwrap();
+        }
+        conn.execute("CREATE TRIGGER fail_second_cache_update BEFORE UPDATE ON files WHEN OLD.path = 'second' BEGIN SELECT RAISE(ABORT, 'simulated migration failure'); END")
+            .unwrap();
+        let mut st = conn
+            .prepare("UPDATE schema_meta SET version = ? WHERE name = ?")
+            .unwrap();
+        st.bind((1, CACHE_BLOB_MIGRATION_VERSION - 1)).unwrap();
+        st.bind((2, CACHE_BLOB_MIGRATION)).unwrap();
+        st.next().unwrap();
+
+        assert!(migrate_cache_blob_compression(&conn).is_none());
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path = 'first'")
+            .unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        assert_eq!(st.read::<Vec<u8>, _>(0).unwrap(), file_blob);
+        assert_eq!(
+            read_schema_version(&conn, CACHE_BLOB_MIGRATION),
+            Some(CACHE_BLOB_MIGRATION_VERSION - 1)
+        );
+    }
+
+    #[test]
     fn round_trips_cached_entries_for_unchanged_file() {
         let _env = CacheEnv::new("roundtrip");
         let src = write_source("roundtrip", "line\n");
@@ -2699,6 +3128,13 @@ pub(crate) mod tests {
     fn load_with_cache_serves_unchanged_files_from_cache() {
         let _env = CacheEnv::new("load-with-cache-hit");
         let src = write_source("load-with-cache-hit", "line\n");
+        let entries: Vec<_> = (0..128)
+            .map(|i| {
+                let mut entry = sample_entry();
+                entry.data.message.id = Some(format!("message-{i}"));
+                entry
+            })
+            .collect();
 
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let cold = load_with_cache(
@@ -2712,14 +3148,28 @@ pub(crate) mod tests {
             Freshness::FileStat,
             |_path| {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(vec![sample_entry()])
+                Ok(entries.clone())
             },
             |_| {},
             None,
         )
         .unwrap();
-        assert_eq!(cold.len(), 1);
+        assert_eq!(cold.len(), entries.len());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let conn = open_db().expect("cache connection");
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path = ?")
+            .unwrap();
+        let source_path = src.to_string_lossy().to_string();
+        st.bind((1, source_path.as_str())).unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        assert!(
+            st.read::<Vec<u8>, _>(0)
+                .unwrap()
+                .starts_with(CACHE_BLOB_MAGIC)
+        );
+        drop(st);
 
         let warm = load_with_cache(
             "test",
@@ -2737,7 +3187,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(warm.len(), 1);
+        assert_eq!(warm.len(), entries.len());
         assert_eq!(warm[0].session_id.as_ref(), "session-a");
 
         let _ = fs::remove_file(&src);
@@ -2931,6 +3381,116 @@ pub(crate) mod tests {
                 "stored cost in {mode:?} mode"
             );
         }
+    }
+
+    #[test]
+    fn compression_migration_preserves_spend_after_source_deletion() {
+        let _env = CacheEnv::new("compression-migration-ledger");
+        let src = write_source("compression-migration-ledger", "line\n");
+        let entries: Vec<_> = (0..128)
+            .map(|i| {
+                let mut entry = sample_entry();
+                entry.data.message.id = Some(format!("message-{i}"));
+                entry.data.cost_usd = Some(0.25);
+                entry.stored_cost = stored_cost_for_mode(entry.data.cost_usd, CostMode::Auto);
+                entry
+            })
+            .collect();
+        let cold = load_with_cache(
+            "test-ns",
+            std::slice::from_ref(&src),
+            CacheOpts {
+                single_thread: false,
+                live_only: false,
+                mode: CostMode::Auto,
+            },
+            Freshness::FileStat,
+            |_| Ok(entries.clone()),
+            |_| {},
+            None,
+        )
+        .unwrap();
+        assert_eq!(cold.len(), entries.len());
+
+        let conn = open_db().expect("cache connection");
+        let read_ledger = |conn: &sqlite::Connection| {
+            let mut st = conn
+                .prepare("SELECT dedup_key, recorded_cost, entry FROM ledger WHERE namespace = ? ORDER BY dedup_key")
+                .unwrap();
+            st.bind((1, "test-ns")).unwrap();
+            let mut rows = Vec::new();
+            while let Ok(sqlite::State::Row) = st.next() {
+                rows.push((
+                    st.read::<String, _>(0).unwrap(),
+                    st.read::<Option<f64>, _>(1).unwrap(),
+                    st.read::<Vec<u8>, _>(2).unwrap(),
+                ));
+            }
+            rows
+        };
+        let ledger_before = read_ledger(&conn);
+        assert_eq!(ledger_before.len(), entries.len());
+        let large_legacy_blob = vec![b'x'; 17 * 1024 * 1024];
+        let mut st = conn
+            .prepare("INSERT INTO files(path, namespace, mtime, size, cost_fingerprint, entries) VALUES ('legacy-large', 'test-large', 0, 0, 0, ?)")
+            .unwrap();
+        st.bind((1, &large_legacy_blob[..])).unwrap();
+        st.next().unwrap();
+
+        let path = src.to_string_lossy().to_string();
+        let mut st = conn
+            .prepare("SELECT entries FROM files WHERE path = ?")
+            .unwrap();
+        st.bind((1, path.as_str())).unwrap();
+        assert_eq!(st.next().unwrap(), sqlite::State::Row);
+        let compressed = st.read::<Vec<u8>, _>(0).unwrap();
+        assert!(compressed.starts_with(CACHE_BLOB_MAGIC));
+        let legacy_blob = decode_cache_blob(&compressed).unwrap().into_owned();
+        drop(st);
+        let mut st = conn
+            .prepare("UPDATE files SET entries = ? WHERE path = ?")
+            .unwrap();
+        st.bind((1, &legacy_blob[..])).unwrap();
+        st.bind((2, path.as_str())).unwrap();
+        st.next().unwrap();
+        let mut st = conn
+            .prepare("UPDATE schema_meta SET version = ? WHERE name = ?")
+            .unwrap();
+        st.bind((1, CACHE_BLOB_MIGRATION_VERSION - 1)).unwrap();
+        st.bind((2, CACHE_BLOB_MIGRATION)).unwrap();
+        st.next().unwrap();
+
+        let saved_bytes = migrate_cache_blob_compression(&conn).unwrap();
+        assert!(saved_bytes >= CACHE_VACUUM_MIN_SAVINGS_BYTES);
+        maybe_vacuum_cache(&conn, saved_bytes);
+        assert_eq!(read_schema_version(&conn, CACHE_VACUUM_DONE), Some(1));
+        assert_eq!(read_ledger(&conn), ledger_before);
+
+        fs::remove_file(&src).unwrap();
+        let warm = load_with_cache(
+            "test-ns",
+            &[],
+            CacheOpts {
+                single_thread: false,
+                live_only: false,
+                mode: CostMode::Auto,
+            },
+            Freshness::FileStat,
+            |_| panic!("deleted source must be served from the ledger"),
+            |_| {},
+            None,
+        )
+        .unwrap();
+        assert_eq!(warm.len(), entries.len());
+        assert!(warm.iter().all(|entry| entry.stored_cost == Some(0.25)));
+        assert_eq!(
+            warm.iter()
+                .map(|entry| entry.stored_cost.unwrap())
+                .sum::<f64>(),
+            32.0
+        );
+        assert!(file_paths("test-ns").is_empty());
+        assert_eq!(read_ledger(&conn), ledger_before);
     }
 
     /// A v2 ledger (no `recorded_cost` column) is migrated in place: the column
