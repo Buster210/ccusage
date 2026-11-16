@@ -240,8 +240,14 @@ pub(super) fn print_table(
     for row in rows {
         let values = all_table_row(row, kind, compact, false, shared.no_cost);
         if row.agent_breakdowns.is_some() {
-            table.push_with_cell_alignment(values, 1, Align::Center);
+            if kind == AgentReportKind::Daily {
+                table.push_with_hidden_separator_after(values, 1);
+            } else {
+                table.push_with_cell_alignment(values, 1, Align::Center);
+            }
             table.bold_last_row();
+        } else if kind == AgentReportKind::Daily && row.agent == "all" {
+            table.push_with_hidden_separator_after(values, 1);
         } else {
             table.push(values);
         }

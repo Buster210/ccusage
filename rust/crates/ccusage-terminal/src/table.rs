@@ -22,6 +22,7 @@ pub enum Align {
 struct TableRow {
     cells: Vec<String>,
     cell_alignment: Option<(usize, Align)>,
+    hidden_separator_after: Option<usize>,
     bold: bool,
 }
 
@@ -74,6 +75,7 @@ impl SimpleTable {
         self.rows.push(Some(TableRow {
             cells: row,
             cell_alignment: None,
+            hidden_separator_after: None,
             bold: false,
         }));
     }
@@ -82,6 +84,16 @@ impl SimpleTable {
         self.rows.push(Some(TableRow {
             cells: row,
             cell_alignment: Some((column, align)),
+            hidden_separator_after: None,
+            bold: false,
+        }));
+    }
+
+    pub fn push_with_hidden_separator_after(&mut self, row: Vec<String>, column: usize) {
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: None,
+            hidden_separator_after: Some(column),
             bold: false,
         }));
     }
@@ -127,7 +139,7 @@ impl SimpleTable {
                     }
                 })
                 .collect::<Vec<_>>();
-            lines.push(table_line(&header_row, &header_aligns, &widths, None));
+            lines.push(table_line(&header_row, &header_aligns, &widths, None, None));
         }
         lines.push(separator.clone());
         for (row_index, row) in self.rows.iter().enumerate() {
@@ -147,6 +159,7 @@ impl SimpleTable {
                             &self.aligns,
                             &widths,
                             row.cell_alignment,
+                            row.hidden_separator_after,
                         ));
                     }
                 }
@@ -502,6 +515,7 @@ fn table_line(
     aligns: &[Align],
     widths: &[usize],
     cell_alignment: Option<(usize, Align)>,
+    hidden_separator_after: Option<usize>,
 ) -> String {
     let mut line = String::from("│");
     for (index, width) in widths.iter().enumerate() {
@@ -518,7 +532,9 @@ fn table_line(
         line.push(' ');
         line.push_str(&pad_cell(cell, width.saturating_sub(2), align));
         line.push(' ');
-        line.push('│');
+        if hidden_separator_after != Some(index) || index + 1 == widths.len() {
+            line.push('│');
+        }
     }
     line
 }
@@ -568,6 +584,32 @@ mod tests {
         ] {
             assert_eq!(pad_cell(cell, width, Align::Center), expected);
         }
+    }
+
+    #[test]
+    fn hidden_separator_applies_to_only_the_selected_row() {
+        let mut table = SimpleTable::new(
+            vec!["Date", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        let row = vec![
+            "2026-01-02".to_string(),
+            String::new(),
+            String::new(),
+            "150".to_string(),
+        ];
+        table.push(row.clone());
+        table.push_with_hidden_separator_after(row, 1);
+        let lines = table.render_lines();
+
+        assert_eq!(lines[3].matches('│').count(), 5);
+        assert_eq!(lines[5].matches('│').count(), 4);
+        assert!(lines[5].contains("2026-01-02"));
+        assert!(lines[5].contains("150"));
     }
 
     #[test]
