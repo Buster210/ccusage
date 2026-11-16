@@ -24,6 +24,7 @@ struct TableRow {
     cell_alignment: Option<(usize, Align)>,
     hidden_separator_after: Option<usize>,
     row_span: Option<usize>,
+    dashed_separator_after: bool,
     bold: bool,
 }
 
@@ -78,6 +79,7 @@ impl SimpleTable {
             cell_alignment: None,
             hidden_separator_after: None,
             row_span: None,
+            dashed_separator_after: false,
             bold: false,
         }));
     }
@@ -88,6 +90,7 @@ impl SimpleTable {
             cell_alignment: Some((column, align)),
             hidden_separator_after: None,
             row_span: None,
+            dashed_separator_after: false,
             bold: false,
         }));
     }
@@ -98,6 +101,7 @@ impl SimpleTable {
             cell_alignment: None,
             hidden_separator_after: Some(column),
             row_span: None,
+            dashed_separator_after: false,
             bold: false,
         }));
     }
@@ -108,6 +112,7 @@ impl SimpleTable {
             cell_alignment: None,
             hidden_separator_after: None,
             row_span: (span_rows > 1).then_some(span_rows),
+            dashed_separator_after: false,
             bold: false,
         }));
     }
@@ -123,8 +128,15 @@ impl SimpleTable {
             cell_alignment: None,
             hidden_separator_after: Some(hidden_separator_after),
             row_span: (span_rows > 1).then_some(span_rows),
+            dashed_separator_after: false,
             bold: false,
         }));
+    }
+
+    pub fn dashed_separator_after_last_row(&mut self) {
+        if let Some(Some(row)) = self.rows.last_mut() {
+            row.dashed_separator_after = true;
+        }
     }
 
     pub fn bold_last_row(&mut self) {
@@ -175,7 +187,13 @@ impl SimpleTable {
             .rows
             .first()
             .and_then(|row| row.as_ref().and_then(|row| row.hidden_separator_after));
-        lines.push(row_separator(&widths, None, first_hidden_separator, false));
+        lines.push(row_separator(
+            &widths,
+            None,
+            first_hidden_separator,
+            false,
+            false,
+        ));
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
                 Some(row) => {
@@ -201,7 +219,13 @@ impl SimpleTable {
                         .iter()
                         .find_map(|row| row.as_ref().map(|row| row.hidden_separator_after))
                         .flatten();
-                    lines.push(row_separator(&widths, hidden_above, hidden_below, false));
+                    lines.push(row_separator(
+                        &widths,
+                        hidden_above,
+                        hidden_below,
+                        false,
+                        false,
+                    ));
                 }
             }
             if row.is_some()
@@ -216,11 +240,14 @@ impl SimpleTable {
                     (row_span_groups[row_index], row_span_groups[row_index + 1]),
                     (Some(above_group), Some(below_group)) if above_group == below_group
                 );
+                let dashed = merged_first_column
+                    && row.as_ref().is_some_and(|row| row.dashed_separator_after);
                 lines.push(row_separator(
                     &widths,
                     hidden_above,
                     hidden_below,
                     merged_first_column,
+                    dashed,
                 ));
             }
         }
@@ -733,6 +760,7 @@ fn row_separator(
     hidden_above: Option<usize>,
     hidden_below: Option<usize>,
     merged_first_column: bool,
+    dashed: bool,
 ) -> String {
     let mut line = String::from(if merged_first_column { "│" } else { "├" });
     for (index, width) in widths.iter().enumerate() {
@@ -745,7 +773,8 @@ fn row_separator(
             });
             continue;
         }
-        line.push_str(&"─".repeat(*width));
+        let horizontal = if dashed { '-' } else { '─' };
+        line.extend(std::iter::repeat_n(horizontal, *width));
         let intersection = if index + 1 == widths.len() {
             '┤'
         } else {
@@ -873,6 +902,74 @@ mod tests {
                 .all(char::is_whitespace)
         );
         assert_eq!(lines[4].chars().nth(agent_model_seam), Some('┬'));
+    }
+
+    #[test]
+    fn dashed_separator_only_marks_agent_boundary_within_date_group() {
+        let mut table = SimpleTable::new(
+            vec!["Date", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_row_span_and_hidden_separator_after(
+            vec![
+                "2026-01-02".to_string(),
+                String::new(),
+                String::new(),
+                "100".to_string(),
+            ],
+            5,
+            1,
+        );
+        table.push(vec![
+            String::new(),
+            "Claude".to_string(),
+            "".to_string(),
+            "60".to_string(),
+        ]);
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "sonnet-5".to_string(),
+            "30".to_string(),
+        ]);
+        table.push(vec![
+            String::new(),
+            String::new(),
+            "opus-5".to_string(),
+            "30".to_string(),
+        ]);
+        table.dashed_separator_after_last_row();
+        table.push(vec![
+            String::new(),
+            "pi".to_string(),
+            "gpt-6".to_string(),
+            "40".to_string(),
+        ]);
+        table.push(vec![
+            "2026-01-03".to_string(),
+            String::new(),
+            String::new(),
+            "50".to_string(),
+        ]);
+
+        let lines = table.render_lines();
+        let dashed = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with('│') && line.contains('├') && line.contains('-'))
+            .collect::<Vec<_>>();
+
+        assert_eq!(dashed.len(), 1);
+        let (index, line) = dashed[0];
+        assert!(!line.contains('─'));
+        assert!(!line.contains('┅'));
+        assert!(lines[index - 1].contains("opus-5"));
+        assert!(lines[index + 1].contains("pi"));
+        assert!(lines[index + 2].contains('─'));
     }
 
     #[test]

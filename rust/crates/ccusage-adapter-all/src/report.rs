@@ -284,7 +284,7 @@ pub(super) fn print_table(
             table.push(values);
         }
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
-            for breakdown in agent_breakdowns {
+            for (index, breakdown) in agent_breakdowns.iter().enumerate() {
                 table.push(all_table_row(
                     breakdown,
                     kind,
@@ -299,6 +299,9 @@ pub(super) fn print_table(
                         compact,
                         shared,
                     );
+                }
+                if kind == AgentReportKind::Daily && index + 1 < agent_breakdowns.len() {
+                    table.dashed_separator_after_last_row();
                 }
             }
         } else if shared.breakdown && !row.model_breakdowns.is_empty() {
