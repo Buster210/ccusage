@@ -238,7 +238,7 @@ pub(super) fn print_table(
         .with_bold_headers();
 
     for row in rows {
-        let values = all_table_row(row, compact, false, shared.no_cost);
+        let values = all_table_row(row, kind, compact, false, shared.no_cost);
         if row.agent_breakdowns.is_some() {
             table.push_with_cell_alignment(values, 1, Align::Center);
             table.bold_last_row();
@@ -247,7 +247,13 @@ pub(super) fn print_table(
         }
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
             for breakdown in agent_breakdowns {
-                table.push(all_table_row(breakdown, compact, true, shared.no_cost));
+                table.push(all_table_row(
+                    breakdown,
+                    kind,
+                    compact,
+                    true,
+                    shared.no_cost,
+                ));
                 if shared.breakdown && !breakdown.model_breakdowns.is_empty() {
                     push_model_breakdown_rows(
                         &mut table,
@@ -420,6 +426,7 @@ fn detected_agent_labels(rows: &[AllRow], detected_agents: &[&'static str]) -> S
 
 pub(super) fn all_table_row(
     row: &AllRow,
+    kind: AgentReportKind,
     compact: bool,
     breakdown: bool,
     no_cost: bool,
@@ -429,7 +436,12 @@ pub(super) fn all_table_row(
     } else {
         row.period.clone()
     };
-    let agent = if !breakdown && row.agent_breakdowns.is_some() {
+    let agent = if kind == AgentReportKind::Daily
+        && !breakdown
+        && (row.agent == "all" || row.agent_breakdowns.is_some())
+    {
+        String::new()
+    } else if !breakdown && row.agent_breakdowns.is_some() {
         "All".to_string()
     } else {
         agent_label(row.agent).to_string()

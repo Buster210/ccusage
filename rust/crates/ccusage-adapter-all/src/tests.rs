@@ -2084,13 +2084,13 @@ fn table_snapshot(
     for row in rows {
         rendered_rows.push(json!({
             "kind": "row",
-            "cells": all_table_row(row, false, false, false),
+            "cells": all_table_row(row, kind, false, false, false),
         }));
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
             for breakdown in agent_breakdowns {
                 rendered_rows.push(json!({
                     "kind": "agent-breakdown",
-                    "cells": all_table_row(breakdown, false, true, false),
+                    "cells": all_table_row(breakdown, kind, false, true, false),
                 }));
             }
         }
@@ -2111,7 +2111,7 @@ fn table_snapshot(
         agent_breakdowns: None,
         model_breakdowns: Vec::new(),
     };
-    let mut total_cells = all_table_row(&total_row, false, false, false);
+    let mut total_cells = all_table_row(&total_row, kind, false, false, false);
     total_cells[1].clear();
     total_cells[2].clear();
     if let Some(cost_cell) = total_cells.last_mut() {
@@ -2563,7 +2563,7 @@ fn displays_total_tokens_including_extra_tokens() {
         model_breakdowns: Vec::new(),
     };
 
-    let cells = all_table_row(&row, false, false, false);
+    let cells = all_table_row(&row, AgentReportKind::Weekly, false, false, false);
 
     assert_eq!(cells[7], "135");
 }
@@ -2599,7 +2599,7 @@ fn report_title_uses_detected_agents_even_when_filtered_rows_are_sparse() {
 }
 
 #[test]
-fn all_table_rows_match_main_agent_breakdown_display() {
+fn daily_table_omits_only_the_aggregate_agent_label() {
     let row = AllRow {
         period: "2026-01-02".to_string(),
         agent: "all",
@@ -2631,16 +2631,20 @@ fn all_table_rows_match_main_agent_breakdown_display() {
     };
 
     assert_eq!(
-        all_table_row(&row, true, false, false),
+        all_table_row(&row, AgentReportKind::Weekly, true, false, false),
         vec!["2026-01-02", "All", "", "100", "20", "0.01"]
     );
+    let breakdown = row.agent_breakdowns.as_ref().unwrap().first().unwrap();
     assert_eq!(
-        all_table_row(
-            row.agent_breakdowns.as_ref().unwrap().first().unwrap(),
-            true,
-            true,
-            false,
-        ),
+        all_table_row(breakdown, AgentReportKind::Weekly, true, true, false),
+        vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
+    );
+    assert_eq!(
+        all_table_row(&row, AgentReportKind::Daily, true, false, false),
+        vec!["2026-01-02", "", "", "100", "20", "0.01"]
+    );
+    assert_eq!(
+        all_table_row(breakdown, AgentReportKind::Daily, true, true, false),
         vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
     );
 }
