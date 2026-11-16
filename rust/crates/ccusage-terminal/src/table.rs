@@ -23,6 +23,7 @@ struct TableRow {
     cells: Vec<String>,
     cell_alignment: Option<(usize, Align)>,
     hidden_separator_after: Option<usize>,
+    row_span: Option<usize>,
     bold: bool,
 }
 
@@ -76,6 +77,7 @@ impl SimpleTable {
             cells: row,
             cell_alignment: None,
             hidden_separator_after: None,
+            row_span: None,
             bold: false,
         }));
     }
@@ -85,6 +87,7 @@ impl SimpleTable {
             cells: row,
             cell_alignment: Some((column, align)),
             hidden_separator_after: None,
+            row_span: None,
             bold: false,
         }));
     }
@@ -94,6 +97,32 @@ impl SimpleTable {
             cells: row,
             cell_alignment: None,
             hidden_separator_after: Some(column),
+            row_span: None,
+            bold: false,
+        }));
+    }
+
+    pub fn push_with_row_span(&mut self, row: Vec<String>, span_rows: usize) {
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: None,
+            hidden_separator_after: None,
+            row_span: (span_rows > 1).then_some(span_rows),
+            bold: false,
+        }));
+    }
+
+    pub fn push_with_row_span_and_hidden_separator_after(
+        &mut self,
+        row: Vec<String>,
+        span_rows: usize,
+        hidden_separator_after: usize,
+    ) {
+        self.rows.push(Some(TableRow {
+            cells: row,
+            cell_alignment: None,
+            hidden_separator_after: Some(hidden_separator_after),
+            row_span: (span_rows > 1).then_some(span_rows),
             bold: false,
         }));
     }
@@ -123,6 +152,8 @@ impl SimpleTable {
 
     fn render_lines(&self) -> Vec<String> {
         let widths = self.column_widths();
+        let mut rendered_rows = self.expand_rows(&widths);
+        let row_span_groups = self.apply_row_spans(&mut rendered_rows, &widths);
         let header_aligns = vec![Align::Center; widths.len()];
         let mut lines = Vec::new();
         lines.push(border('┌', '┬', '┐', &widths));
@@ -144,26 +175,20 @@ impl SimpleTable {
             .rows
             .first()
             .and_then(|row| row.as_ref().and_then(|row| row.hidden_separator_after));
-        lines.push(row_separator(&widths, None, first_hidden_separator));
+        lines.push(row_separator(&widths, None, first_hidden_separator, false));
         for (row_index, row) in self.rows.iter().enumerate() {
             match row {
                 Some(row) => {
-                    let cells = self.compact_date_row(&row.cells, &widths);
-                    for mut physical_row in
-                        expand_multiline_row(&cells, self.headers.len(), &widths)
-                    {
-                        if row.bold {
-                            for cell in &mut physical_row {
-                                *cell = bold(self.style, cell);
-                            }
+                    if let Some(physical_rows) = rendered_rows[row_index].as_ref() {
+                        for physical_row in physical_rows {
+                            lines.push(table_line(
+                                physical_row,
+                                &self.aligns,
+                                &widths,
+                                row.cell_alignment,
+                                row.hidden_separator_after,
+                            ));
                         }
-                        lines.push(table_line(
-                            &physical_row,
-                            &self.aligns,
-                            &widths,
-                            row.cell_alignment,
-                            row.hidden_separator_after,
-                        ));
                     }
                 }
                 None => {
@@ -176,7 +201,7 @@ impl SimpleTable {
                         .iter()
                         .find_map(|row| row.as_ref().map(|row| row.hidden_separator_after))
                         .flatten();
-                    lines.push(row_separator(&widths, hidden_above, hidden_below));
+                    lines.push(row_separator(&widths, hidden_above, hidden_below, false));
                 }
             }
             if row.is_some()
@@ -187,7 +212,16 @@ impl SimpleTable {
                 let hidden_below = self.rows[row_index + 1]
                     .as_ref()
                     .and_then(|row| row.hidden_separator_after);
-                lines.push(row_separator(&widths, hidden_above, hidden_below));
+                let merged_first_column = matches!(
+                    (row_span_groups[row_index], row_span_groups[row_index + 1]),
+                    (Some(above_group), Some(below_group)) if above_group == below_group
+                );
+                lines.push(row_separator(
+                    &widths,
+                    hidden_above,
+                    hidden_below,
+                    merged_first_column,
+                ));
             }
         }
         let last_hidden_separator = self
@@ -267,6 +301,104 @@ impl SimpleTable {
             *first = compact;
         }
         Cow::Owned(row)
+    }
+
+    fn expand_rows(&self, widths: &[usize]) -> Vec<Option<Vec<Vec<String>>>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.as_ref().map(|row| {
+                    let cells = self.compact_date_row(&row.cells, widths);
+                    let mut physical_rows =
+                        expand_multiline_row(&cells, self.headers.len(), widths);
+                    if row.bold {
+                        for physical_row in &mut physical_rows {
+                            for cell in physical_row {
+                                *cell = bold(self.style, cell);
+                            }
+                        }
+                    }
+                    physical_rows
+                })
+            })
+            .collect()
+    }
+
+    fn apply_row_spans(
+        &self,
+        rendered_rows: &mut [Option<Vec<Vec<String>>>],
+        widths: &[usize],
+    ) -> Vec<Option<usize>> {
+        let mut groups = vec![None; self.rows.len()];
+        for (start, row) in self.rows.iter().enumerate() {
+            let Some(row) = row else {
+                continue;
+            };
+            let Some(span_rows) = row.row_span else {
+                continue;
+            };
+            let column = 0;
+            if widths.is_empty() || span_rows < 2 {
+                continue;
+            }
+            let members = (start..self.rows.len())
+                .take_while(|index| self.rows[*index].is_some())
+                .take(span_rows)
+                .collect::<Vec<_>>();
+            if members.len() < 2 {
+                continue;
+            }
+            for member in &members {
+                groups[*member] = Some(start);
+            }
+
+            let Some(label) = self
+                .compact_date_row(&row.cells, widths)
+                .get(column)
+                .cloned()
+            else {
+                continue;
+            };
+            let label_lines = wrap_cell_lines(&label, widths[column].saturating_sub(2));
+            let total_height = members
+                .iter()
+                .filter_map(|member| rendered_rows[*member].as_ref())
+                .map(Vec::len)
+                .sum::<usize>();
+            let label_start_line = total_height.saturating_sub(label_lines.len()) / 2;
+
+            for member in &members {
+                if let Some(physical_rows) = rendered_rows[*member].as_mut() {
+                    for physical_row in physical_rows {
+                        physical_row[column].clear();
+                    }
+                }
+            }
+            for (label_index, label_line) in label_lines.into_iter().enumerate() {
+                let mut target_line = label_start_line + label_index;
+                let mut target_row = None;
+                for member in &members {
+                    let Some(physical_rows) = rendered_rows[*member].as_ref() else {
+                        continue;
+                    };
+                    if target_line < physical_rows.len() {
+                        target_row = Some((*member, target_line));
+                        break;
+                    }
+                    target_line -= physical_rows.len();
+                }
+                if let Some((member, line)) = target_row
+                    && let Some(physical_rows) = rendered_rows[member].as_mut()
+                {
+                    physical_rows[line][column] = if row.bold {
+                        bold(self.style, &label_line)
+                    } else {
+                        label_line
+                    };
+                }
+            }
+        }
+        groups
     }
 }
 
@@ -600,9 +732,19 @@ fn row_separator(
     widths: &[usize],
     hidden_above: Option<usize>,
     hidden_below: Option<usize>,
+    merged_first_column: bool,
 ) -> String {
-    let mut line = String::from("├");
+    let mut line = String::from(if merged_first_column { "│" } else { "├" });
     for (index, width) in widths.iter().enumerate() {
+        if merged_first_column && index == 0 {
+            line.push_str(&" ".repeat(*width));
+            line.push(if index + 1 == widths.len() {
+                '┤'
+            } else {
+                '├'
+            });
+            continue;
+        }
         line.push_str(&"─".repeat(*width));
         let intersection = if index + 1 == widths.len() {
             '┤'
@@ -679,6 +821,58 @@ mod tests {
         assert_eq!(lines[6].chars().nth(seam), Some('┬'));
         assert!(lines[5].contains("2026-01-02"));
         assert!(lines[5].contains("150"));
+    }
+
+    #[test]
+    fn row_span_merges_first_column_and_centers_its_label() {
+        let mut table = SimpleTable::new(
+            vec!["Date", "Agent", "Models", "Input"],
+            vec![Align::Left, Align::Left, Align::Left, Align::Right],
+            TerminalStyle {
+                no_color: true,
+                ..TerminalStyle::default()
+            },
+        );
+        table.push_with_row_span_and_hidden_separator_after(
+            vec![
+                "2026-01-02".to_string(),
+                String::new(),
+                String::new(),
+                "100".to_string(),
+            ],
+            3,
+            1,
+        );
+        table.push(vec![
+            String::new(),
+            "Codex".to_string(),
+            "gpt-5\ngpt-6\ngpt-7".to_string(),
+            "50".to_string(),
+        ]);
+        table.push(vec![
+            String::new(),
+            "Claude".to_string(),
+            "sonnet-5".to_string(),
+            "50".to_string(),
+        ]);
+        let lines = table.render_lines();
+        let widths = table.column_widths();
+        let date_width = widths[0];
+        let agent_model_seam = 2 + widths[..2].iter().sum::<usize>();
+
+        assert!(!lines[3].contains("2026-01-02"));
+        assert!(lines[6].contains("2026-01-02"));
+        assert!(!lines[7].contains("2026-01-02"));
+        assert_eq!(lines[4].chars().next(), Some('│'));
+        assert_eq!(lines[4].chars().nth(1 + date_width), Some('├'));
+        assert!(
+            lines[4]
+                .chars()
+                .skip(1)
+                .take(date_width)
+                .all(char::is_whitespace)
+        );
+        assert_eq!(lines[4].chars().nth(agent_model_seam), Some('┬'));
     }
 
     #[test]
