@@ -18,7 +18,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "2099-01-02",
-        "All",
+        "",
         "",
         "60",
         "10",
@@ -46,7 +46,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "2099-01-15",
-        "All",
+        "",
         "",
         "130",
         "20",
@@ -74,7 +74,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&daily.rows,\nAgentRep
     {
       "cells": [
         "2099-02-01",
-        "All",
+        "",
         "",
         "40",
         "5",

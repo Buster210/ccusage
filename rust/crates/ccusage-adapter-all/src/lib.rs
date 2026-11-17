@@ -110,8 +110,9 @@ fn requested_sections(
 use loader::{aggregate_rows, codex_group_row, load_agent_rows_parallel, load_rows, load_sections};
 #[cfg(test)]
 use report::{
-    all_report_title, all_table_columns, all_table_row, report_json, report_json_with_agents,
-    sections_report_json,
+    agent_breakdown_row_count, all_report_title, all_table_columns, all_table_row, report_json,
+    report_json_with_agents, sections_report_json, should_collapse_single_agent_period,
+    should_collapse_single_model_summary,
 };
 #[cfg(test)]
 use types::{AgentLoadSpec, AgentRows, AllRow};

@@ -2084,13 +2084,13 @@ fn table_snapshot(
     for row in rows {
         rendered_rows.push(json!({
             "kind": "row",
-            "cells": all_table_row(row, false, false, false),
+            "cells": all_table_row(row, kind, false, false, false, false),
         }));
         if let Some(agent_breakdowns) = row.agent_breakdowns.as_ref() {
             for breakdown in agent_breakdowns {
                 rendered_rows.push(json!({
                     "kind": "agent-breakdown",
-                    "cells": all_table_row(breakdown, false, true, false),
+                    "cells": all_table_row(breakdown, kind, false, true, false, false),
                 }));
             }
         }
@@ -2111,7 +2111,7 @@ fn table_snapshot(
         agent_breakdowns: None,
         model_breakdowns: Vec::new(),
     };
-    let mut total_cells = all_table_row(&total_row, false, false, false);
+    let mut total_cells = all_table_row(&total_row, kind, false, false, false, false);
     total_cells[1].clear();
     total_cells[2].clear();
     if let Some(cost_cell) = total_cells.last_mut() {
@@ -2563,7 +2563,7 @@ fn displays_total_tokens_including_extra_tokens() {
         model_breakdowns: Vec::new(),
     };
 
-    let cells = all_table_row(&row, false, false, false);
+    let cells = all_table_row(&row, AgentReportKind::Weekly, false, false, false, false);
 
     assert_eq!(cells[7], "135");
 }
@@ -2599,7 +2599,7 @@ fn report_title_uses_detected_agents_even_when_filtered_rows_are_sparse() {
 }
 
 #[test]
-fn all_table_rows_match_main_agent_breakdown_display() {
+fn daily_table_avoids_duplicate_model_lists_in_breakdown_mode() {
     let row = AllRow {
         period: "2026-01-02".to_string(),
         agent: "all",
@@ -2625,21 +2625,88 @@ fn all_table_rows_match_main_agent_breakdown_display() {
             metadata: None,
             metadata_agents: Some(vec!["codex"]),
             agent_breakdowns: None,
-            model_breakdowns: Vec::new(),
+            model_breakdowns: vec![ModelBreakdown {
+                model_name: "gpt-5".to_string(),
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_tokens: 10,
+                cost: 0.01,
+                ..ModelBreakdown::default()
+            }],
         }]),
         model_breakdowns: Vec::new(),
     };
 
+    assert!(should_collapse_single_agent_period(&row, true));
+    let breakdown = row.agent_breakdowns.as_ref().unwrap().first().unwrap();
+    let models_used = vec!["gpt-5".to_string(), "gpt-6".to_string()];
+    let mut multi_model_agent = breakdown.clone();
+    multi_model_agent.models_used = models_used.clone();
+    multi_model_agent.model_breakdowns.push(ModelBreakdown {
+        model_name: "gpt-6".to_string(),
+        ..ModelBreakdown::default()
+    });
+    let multi_model_period = AllRow {
+        models_used,
+        agent_breakdowns: Some(vec![multi_model_agent]),
+        ..row.clone()
+    };
+    assert!(should_collapse_single_agent_period(
+        &multi_model_period,
+        false
+    ));
+    let mismatched_period_totals = AllRow {
+        total_tokens: row.total_tokens + 1,
+        ..row.clone()
+    };
+    assert!(!should_collapse_single_agent_period(
+        &mismatched_period_totals,
+        true
+    ));
     assert_eq!(
-        all_table_row(&row, true, false, false),
+        all_table_row(&row, AgentReportKind::Weekly, true, false, false, false),
         vec!["2026-01-02", "All", "", "100", "20", "0.01"]
     );
+    let breakdown = row.agent_breakdowns.as_ref().unwrap().first().unwrap();
+    assert!(should_collapse_single_model_summary(breakdown, true));
+    assert_eq!(agent_breakdown_row_count(breakdown, true), 1);
+    assert_eq!(
+        all_table_row(breakdown, AgentReportKind::Weekly, true, true, false, false),
+        vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
+    );
+    assert_eq!(
+        all_table_row(&row, AgentReportKind::Daily, true, false, false, false),
+        vec!["2026-01-02", "", "", "100", "20", "0.01"]
+    );
+    assert_eq!(
+        all_table_row(breakdown, AgentReportKind::Daily, true, true, false, false),
+        vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
+    );
+    assert_eq!(
+        all_table_row(breakdown, AgentReportKind::Daily, true, true, false, true),
+        vec!["", "Codex", "", "100", "20", "0.01"]
+    );
+    let mismatched_totals = AllRow {
+        total_tokens: breakdown.total_tokens + 1,
+        ..breakdown.clone()
+    };
+    assert!(!should_collapse_single_model_summary(
+        &mismatched_totals,
+        true
+    ));
+    assert_eq!(agent_breakdown_row_count(&mismatched_totals, true), 2);
+    let without_model_details = AllRow {
+        model_breakdowns: Vec::new(),
+        ..breakdown.clone()
+    };
     assert_eq!(
         all_table_row(
-            row.agent_breakdowns.as_ref().unwrap().first().unwrap(),
+            &without_model_details,
+            AgentReportKind::Daily,
             true,
             true,
             false,
+            true,
         ),
         vec!["", "Codex", "gpt-5", "100", "20", "0.01"]
     );

@@ -18,7 +18,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&result.rows, kind,\n&
     {
       "cells": [
         "2026-10-01",
-        "All",
+        "",
         "",
         "100",
         "20",
@@ -46,7 +46,7 @@ expression: "serde_json::to_string_pretty(&table_snapshot(&result.rows, kind,\n&
     {
       "cells": [
         "2026-11-01",
-        "All",
+        "",
         "",
         "155",
         "31",

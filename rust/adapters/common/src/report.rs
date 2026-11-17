@@ -359,8 +359,8 @@ mod tests {
         let rows = enabled_breakdown_rows(&row, false, &shared);
 
         assert_eq!(rows.len(), 2);
-        assert!(rows[0][0].contains("└─ model-a"));
-        assert!(rows[1][0].contains("└─ model-b"));
+        assert_eq!(rows[0][0], "model-a");
+        assert_eq!(rows[1][0], "model-b");
         assert_eq!(rows[0][6], "103");
         assert_eq!(rows[1][6], "69");
 
