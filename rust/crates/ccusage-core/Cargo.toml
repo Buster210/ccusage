@@ -15,7 +15,6 @@ test-snapshots = ["dep:ccusage-pricing-snapshots"]
 ccusage-cli.workspace = true
 ccusage-pricing-snapshots = { workspace = true, optional = true }
 ccusage-terminal.workspace = true
-compact_str.workspace = true
 jiff.workspace = true
 memchr.workspace = true
 miniz_oxide.workspace = true
@@ -30,3 +29,6 @@ sqlite.workspace = true
 ccusage-pricing-snapshots.workspace = true
 ccusage-test-support.workspace = true
 insta.workspace = true
+
+[lints]
+workspace = true

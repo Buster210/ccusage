@@ -475,7 +475,6 @@ dependencies = [
  "ccusage-pricing-snapshots",
  "ccusage-terminal",
  "ccusage-test-support",
- "compact_str",
  "insta",
  "jiff",
  "memchr",

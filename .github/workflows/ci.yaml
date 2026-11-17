@@ -184,6 +184,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-nix-cache
+        with:
+          save: ${{ env.PERSIST_CACHES }}
       - name: Run nix flake check
         run: nix flake check --print-build-logs
       - name: Run Rust tests

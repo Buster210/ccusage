@@ -33,6 +33,7 @@ in
             inputs.bun2nix.packages.${system}.default
             nushell
             config.packages.cargo-hawk
+            config.packages.publint
 
             rustToolchain
             cargo-edit
