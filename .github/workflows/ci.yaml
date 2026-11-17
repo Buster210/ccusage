@@ -267,8 +267,10 @@ jobs:
           binary: ${{ matrix.binary }}
           save-cargo-cache: ${{ env.PERSIST_CACHES }}
 
-  # macos-15 is the arm64 macOS pool. macos-15-intel cannot build this flake,
-  # because nixpkgs 26.11 dropped x86_64-darwin.
+  # macos-26 is the arm64 macOS pool, and macos-15 is the image it replaced:
+  # GitHub left that older pool without free runners for hours, and a hosted job
+  # queued more than 15 minutes is cancelled. macos-15-intel cannot build this
+  # flake, because nixpkgs 26.11 dropped x86_64-darwin.
   build-mac-arm64:
     needs: [changes, tirith-scan]
     if: needs.changes.outputs.code-changed == 'true'
@@ -276,7 +278,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -300,7 +302,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
