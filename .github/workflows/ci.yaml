@@ -279,7 +279,10 @@ jobs:
     permissions:
       actions: read
       contents: read
-    runs-on: macos-15
+    # macos-14 instead of macos-15: the macos-15 arm64 pool left this job queued
+    # past GitHub's 15-minute wait limit on every run, while macos-14 handed out
+    # a runner in a few minutes.
+    runs-on: macos-14
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
