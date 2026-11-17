@@ -110,7 +110,7 @@ impl SimpleTable {
         self.push_with_column_row_span(row, 0, span_rows);
     }
 
-    pub fn push_with_column_row_span(&mut self, row: Vec<String>, column: usize, span_rows: usize) {
+    fn push_with_column_row_span(&mut self, row: Vec<String>, column: usize, span_rows: usize) {
         let alignment = self.aligns.get(column).copied().unwrap_or(Align::Left);
         self.push_with_column_row_spans(row, &[(column, span_rows, alignment)]);
     }
@@ -148,7 +148,7 @@ impl SimpleTable {
         );
     }
 
-    pub fn push_with_column_row_span_and_hidden_separator_after(
+    fn push_with_column_row_span_and_hidden_separator_after(
         &mut self,
         row: Vec<String>,
         column: usize,

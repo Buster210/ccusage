@@ -14,21 +14,21 @@
   rustToolchain,
 }:
 let
-  version = "0.1.15";
-  supportedRustChannel = "1.99.0";
+  version = "0.1.18";
+  supportedRustChannel = "1.100.0";
   # sha256 values come from the `.sha256` file published beside each archive.
   archives = {
     aarch64-darwin = {
       target = "aarch64-apple-darwin";
-      hash = "sha256-RXSgtvvzkhcyBFNbHI4BbpFrSlUxBggzCw8LmWLypDA=";
+      hash = "sha256-lrqfFQOhlOuHE/AG3yhugqCSmfP9c+su/5jMPODUzYI=";
     };
     aarch64-linux = {
       target = "aarch64-unknown-linux-gnu";
-      hash = "sha256-VBwjIbaOFiJhNnRQr3+n1xFOeWfzZzA23fTfc9TE8So=";
+      hash = "sha256-sHjCULP3QrEQupwskGQI3RmNCKSn6AXszFuDtvoKHSI=";
     };
     x86_64-linux = {
       target = "x86_64-unknown-linux-gnu";
-      hash = "sha256-xQGJEpxD8Caxmg59oqQFqyWZ/5QmqCb324q2TXJ00dU=";
+      hash = "sha256-hOK2WoVx0KqoT+H+oVSr2/iO//9k5ZqJCr+x1VSteKE=";
     };
   };
   archive =
