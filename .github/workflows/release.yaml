@@ -31,10 +31,10 @@ jobs:
     # Stock GitHub runners are small and the cache starts cold,
     # so allow headroom on the first runs.
     timeout-minutes: 60
-    # Both macOS targets use the shared macos-15-arm64 runner. Keep those
-    # matrix legs from competing for the same hosted runner at once.
+    # One group per matrix leg: a shared group makes GitHub cancel the older
+    # waiting leg, and a cancelled leg leaves the release without a package.
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform == 'darwin' && 'macos' || matrix.name }}
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.name }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -56,7 +56,7 @@ jobs:
             arch: arm64
             binary: result/bin/ccusage
           - name: build-mac-x64
-            os: macos-15
+            os: macos-15-intel
             platform: darwin
             arch: x64
             binary: result/bin/ccusage
