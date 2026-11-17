@@ -300,13 +300,21 @@ pub(super) fn print_table(
                         values[0] = row.period.clone();
                     }
                     if has_model_details {
-                        table.push_with_column_row_span(
+                        table.push_with_column_row_spans(
                             values,
-                            1,
-                            agent_breakdown_row_count(breakdown, shared.breakdown),
+                            &[(
+                                1,
+                                agent_breakdown_row_count(breakdown, shared.breakdown),
+                                Align::Center,
+                            )],
                         );
                     } else if collapse_period {
-                        table.push_with_column_row_span(values, 0, 1);
+                        table.push_with_column_row_spans(
+                            values,
+                            &[(0, 1, Align::Left), (1, 1, Align::Center)],
+                        );
+                    } else if kind == AgentReportKind::Daily {
+                        table.push_with_column_row_spans(values, &[(1, 1, Align::Center)]);
                     } else {
                         table.push(values);
                     }
@@ -613,6 +621,13 @@ fn push_model_breakdown_rows(
     for (index, b) in breakdowns.iter().enumerate() {
         let total = b.total_tokens();
         let model = format_breakdown_model_label(&b.model_name);
+        let mut row_spans = Vec::new();
+        if period.is_some() {
+            row_spans.push((0, 1, Align::Left));
+        }
+        if agent.is_some() {
+            row_spans.push((1, 1, Align::Center));
+        }
         if compact {
             let mut row = vec![
                 period.unwrap_or_default().to_string(),
@@ -625,7 +640,7 @@ fn push_model_breakdown_rows(
             if shared.no_cost {
                 row.pop();
             }
-            table.push(row);
+            table.push_with_column_row_spans(row, &row_spans);
         } else {
             let mut row = vec![
                 period.unwrap_or_default().to_string(),
@@ -641,7 +656,7 @@ fn push_model_breakdown_rows(
             if shared.no_cost {
                 row.pop();
             }
-            table.push(row);
+            table.push_with_column_row_spans(row, &row_spans);
         }
         if index + 1 < breakdowns.len() {
             table.dashed_separator_after_last_row();
