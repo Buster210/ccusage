@@ -55,11 +55,6 @@ jobs:
             platform: darwin
             arch: arm64
             binary: result/bin/ccusage
-          - name: build-mac-x64
-            os: macos-15-intel
-            platform: darwin
-            arch: x64
-            binary: result/bin/ccusage
           - name: build-windows-arm64
             os: windows-11-arm
             platform: win32
@@ -96,8 +91,31 @@ jobs:
           binary: ${{ matrix.binary }}
           save-cargo-cache: ${{ matrix.arch == 'arm64' }}
 
-  release:
+  # The Intel package cross-compiles on the arm64 runner, and GitHub cancels a
+  # hosted job that waits more than 15 minutes for a runner. A job that needs
+  # another job is created only after that job finishes, so chaining x64 behind
+  # the matrix gives it a fresh queue slot.
+  build-mac-x64:
     needs: build-native-packages
+    name: build-mac-x64
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/build-macos-nix-native-package
+        with:
+          arch: x64
+          binary: result/bin/ccusage
+          cache-scope: build-mac-x64
+
+  release:
+    needs: [build-native-packages, build-mac-x64]
     runs-on: ubuntu-latest
     permissions:
       contents: write

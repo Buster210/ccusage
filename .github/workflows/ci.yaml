@@ -267,10 +267,8 @@ jobs:
           binary: ${{ matrix.binary }}
           save-cargo-cache: ${{ env.PERSIST_CACHES }}
 
-  # macos-15 is the arm64 pool and macos-15-intel is the x64 pool, so the two
-  # macOS packages build in parallel on separate runners. Keeping both legs in
-  # the arm64 pool left one leg queued behind the other, and GitHub cancels a
-  # hosted job that waits more than 15 minutes for a runner.
+  # macos-15 is the arm64 macOS pool. macos-15-intel cannot build this flake,
+  # because nixpkgs 26.11 dropped x86_64-darwin.
   build-mac-arm64:
     needs: [changes, tirith-scan]
     if: needs.changes.outputs.code-changed == 'true'
@@ -290,14 +288,19 @@ jobs:
           binary: result/bin/ccusage
           cache-scope: build-mac-arm64
 
+  # Both macOS packages need the one arm64 runner this repository is given, and
+  # GitHub cancels a hosted job that waits more than 15 minutes for a runner. A
+  # job that needs another job is created only after that job finishes, so
+  # chaining x64 behind arm64 gives each leg its own queue slot instead of a
+  # clock that runs while the sibling builds.
   build-mac-x64:
-    needs: [changes, tirith-scan]
+    needs: [changes, tirith-scan, build-mac-arm64]
     if: needs.changes.outputs.code-changed == 'true'
     name: build-mac-x64
     permissions:
       actions: read
       contents: read
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

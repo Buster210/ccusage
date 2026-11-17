@@ -28,9 +28,9 @@ runs:
       env:
         ARCH: ${{ inputs.arch }}
       run: |
-        # Each arch builds natively on its own runner pool: arm64 on macos-15,
-        # x64 on macos-15-intel. When x64 has to share the arm64 runner it
-        # cross-compiles instead (the Apple SDK is multi-arch).
+        # Both macOS packages build on the arm64 runner: arm64 natively, x64
+        # cross-compiled (the Apple SDK is multi-arch). An Intel runner cannot
+        # build this flake at all, because nixpkgs 26.11 dropped x86_64-darwin.
         case "$(uname -m):$ARCH" in
           arm64:arm64 | x86_64:x64)
             package=ccusage

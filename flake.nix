@@ -49,10 +49,6 @@
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        # GitHub hands this repository an arm64 macOS runner only once every
-        # ten minutes but an Intel one immediately, so the x64 package also
-        # builds natively on x86_64-darwin.
-        "x86_64-darwin"
       ];
 
       imports = [
