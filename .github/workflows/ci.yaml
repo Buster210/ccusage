@@ -222,11 +222,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The fork starts with a cold Nix cache, so allow headroom on the first runs.
     timeout-minutes: 60
-    # Both macOS targets use the shared macos-15-arm64 runner, and only one
-    # hosted runner is free for them at a time. A group per matrix leg keeps a
-    # leg from cancelling its sibling while both wait: with a single shared
-    # group, GitHub cancels the older waiting leg as soon as the newer one asks
-    # for the group, and the gate counts that cancellation as a failure.
+    # One group per matrix leg, so a leg that is waiting for a runner is never
+    # cancelled by a sibling that asks for the same group.
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.name }}
       cancel-in-progress: false
@@ -242,16 +239,6 @@ jobs:
           - name: build-linux-x64
             os: ubuntu-latest
             platform: linux
-            arch: x64
-            binary: result/bin/ccusage
-          - name: build-mac-arm64
-            os: macos-15
-            platform: darwin
-            arch: arm64
-            binary: result/bin/ccusage
-          - name: build-mac-x64
-            os: macos-15
-            platform: darwin
             arch: x64
             binary: result/bin/ccusage
           - name: build-windows-x64
@@ -273,18 +260,41 @@ jobs:
           # get no token.
           nix-github-token: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           cache-scope: ${{ matrix.name }}
-      - uses: ./.github/actions/build-macos-nix-native-package
-        if: matrix.platform == 'darwin'
-        with:
-          arch: ${{ matrix.arch }}
-          binary: ${{ matrix.binary }}
-          cache-scope: ${{ matrix.name }}
       - uses: ./.github/actions/build-windows-native-package
         if: matrix.platform == 'win32'
         with:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
           save-cargo-cache: ${{ env.PERSIST_CACHES }}
+
+  # Both macOS targets share one hosted arm64 runner and that runner is handed
+  # out one job at a time. Two matrix legs therefore queue behind each other,
+  # and a leg that waits more than 15 minutes is cancelled while it waits. One
+  # job builds both arches in turn: x64 cross-compiles on the same arm64 runner,
+  # so the second build reuses the store the first one warmed.
+  build-mac:
+    needs: [changes, tirith-scan]
+    if: needs.changes.outputs.code-changed == 'true'
+    name: build-mac
+    permissions:
+      actions: read
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-macos-nix-native-package
+        with:
+          arch: arm64
+          binary: result/bin/ccusage
+          cache-scope: build-mac-arm64
+      - uses: ./.github/actions/build-macos-nix-native-package
+        with:
+          arch: x64
+          binary: result/bin/ccusage
+          cache-scope: build-mac-x64
 
   # Single check for main's branch ruleset to require. Most jobs above are gated
   # on `changes` and are skipped on docs-only pull requests, so requiring them
@@ -299,6 +309,7 @@ jobs:
       - preflight
       - test
       - build-native-packages
+      - build-mac
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
