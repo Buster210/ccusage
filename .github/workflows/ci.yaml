@@ -222,10 +222,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The fork starts with a cold Nix cache, so allow headroom on the first runs.
     timeout-minutes: 60
-    # Both macOS targets use the shared macos-15-arm64 runner. Keep those
-    # matrix legs from competing for the same hosted runner at once.
+    # Both macOS targets use the shared macos-15-arm64 runner, and only one
+    # hosted runner is free for them at a time. A group per matrix leg keeps a
+    # leg from cancelling its sibling while both wait: with a single shared
+    # group, GitHub cancels the older waiting leg as soon as the newer one asks
+    # for the group, and the gate counts that cancellation as a failure.
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform == 'darwin' && 'macos' || matrix.name }}
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.name }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
