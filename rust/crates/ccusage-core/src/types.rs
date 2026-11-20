@@ -170,7 +170,7 @@ impl ModelBreakdown {
         }
     }
 
-    pub fn add_stored_cost(&mut self, stored_cost: Option<f64>) {
+    pub(crate) fn add_stored_cost(&mut self, stored_cost: Option<f64>) {
         if let Some(stored_cost) = stored_cost {
             *self.stored_cost.get_or_insert(0.0) += stored_cost;
         }

@@ -93,7 +93,7 @@ in
             ccusage-clippy = {
               enable = true;
               name = "clippy";
-              entry = "${lib.getExe' rustToolchain "cargo"} clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings";
+              entry = "${lib.getExe' rustToolchain "cargo"} clippy --manifest-path rust/Cargo.toml --workspace --all-targets --config 'build.warnings=\"deny\"'";
               files = "^rust/.*\\.rs$";
               pass_filenames = false;
               stages = [ "pre-push" ];
