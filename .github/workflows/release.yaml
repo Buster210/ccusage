@@ -41,12 +41,12 @@ jobs:
       matrix:
         include:
           - name: build-linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
             platform: linux
             arch: arm64
             binary: result/bin/ccusage
           - name: build-linux-x64
-            os: ubuntu-latest
+            os: ubuntu-26.04
             platform: linux
             arch: x64
             binary: result/bin/ccusage
