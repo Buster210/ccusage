@@ -246,6 +246,11 @@ jobs:
             platform: win32
             arch: x64
             binary: rust/target/release/ccusage.exe
+          - name: build-windows-arm64
+            os: windows-11-arm
+            platform: win32
+            arch: arm64
+            binary: rust/target/release/ccusage.exe
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
