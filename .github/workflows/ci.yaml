@@ -267,19 +267,22 @@ jobs:
           binary: ${{ matrix.binary }}
           save-cargo-cache: ${{ env.PERSIST_CACHES }}
 
-  # macos-26 is the arm64 macOS pool, and macos-15 is the image it replaced:
-  # GitHub left that older pool without free runners for hours, and a hosted job
-  # queued more than 15 minutes is cancelled. macos-15-intel cannot build this
-  # flake, because nixpkgs 26.11 dropped x86_64-darwin.
-  build-mac-arm64:
+  # Both macOS packages come from the one arm64 runner this repository is
+  # given. GitHub cancels a hosted job that waits more than 15 minutes for a
+  # runner, so two macOS jobs mean the second one waits and is cancelled. One
+  # job builds arm64 natively and x64 by cross-compilation. The Intel binary
+  # cannot be built anywhere else: nixpkgs 26.11 dropped x86_64-darwin, so
+  # macos-15-intel cannot evaluate this flake at all.
+  build-mac:
     needs: [changes, tirith-scan]
     if: needs.changes.outputs.code-changed == 'true'
-    name: build-mac-arm64
+    name: build-mac
     permissions:
       actions: read
       contents: read
     runs-on: macos-26
-    timeout-minutes: 60
+    # Two Nix builds in one job, so this needs more headroom than a single one.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -289,25 +292,6 @@ jobs:
           arch: arm64
           binary: result/bin/ccusage
           cache-scope: build-mac-arm64
-
-  # Both macOS packages need the one arm64 runner this repository is given, and
-  # GitHub cancels a hosted job that waits more than 15 minutes for a runner. A
-  # job that needs another job is created only after that job finishes, so
-  # chaining x64 behind arm64 gives each leg its own queue slot instead of a
-  # clock that runs while the sibling builds.
-  build-mac-x64:
-    needs: [changes, tirith-scan, build-mac-arm64]
-    if: needs.changes.outputs.code-changed == 'true'
-    name: build-mac-x64
-    permissions:
-      actions: read
-      contents: read
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - uses: ./.github/actions/build-macos-nix-native-package
         with:
           arch: x64
@@ -327,8 +311,7 @@ jobs:
       - preflight
       - test
       - build-native-packages
-      - build-mac-arm64
-      - build-mac-x64
+      - build-mac
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
