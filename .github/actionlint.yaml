@@ -2,3 +2,7 @@ paths:
   .github/workflows/*.{yaml,yml}:
     ignore:
       - 'unknown permission scope "code-quality"'
+      # actionlint's built-in runner list predates the Ubuntu 26.04 images.
+      # GitHub accepts both labels, and the Linux build legs prove it on every
+      # run, so the unknown-label error is suppressed for these two names only.
+      - 'label "ubuntu-26.04(-arm)?" is unknown'

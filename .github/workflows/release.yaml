@@ -28,37 +28,32 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Stock GitHub runners are small and the cache starts cold,
-    # so allow headroom on the first runs.
-    timeout-minutes: 60
-    # Both macOS targets use the shared macos-15-arm64 runner. Keep those
-    # matrix legs from competing for the same hosted runner at once.
+    # Stock GitHub runners are small and the cache starts cold, so allow
+    # headroom on the first runs. The macOS leg builds two packages in one job.
+    timeout-minutes: 90
+    # One group per matrix leg: a shared group makes GitHub cancel the older
+    # waiting leg, and a cancelled leg leaves the release without a package.
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform == 'darwin' && 'macos' || matrix.name }}
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.name }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: build-linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
             platform: linux
             arch: arm64
             binary: result/bin/ccusage
           - name: build-linux-x64
-            os: ubuntu-latest
+            os: ubuntu-26.04
             platform: linux
             arch: x64
             binary: result/bin/ccusage
-          - name: build-mac-arm64
-            os: macos-15
+          - name: build-mac
+            os: macos-26
             platform: darwin
             arch: arm64
-            binary: result/bin/ccusage
-          - name: build-mac-x64
-            os: macos-15
-            platform: darwin
-            arch: x64
             binary: result/bin/ccusage
           - name: build-windows-arm64
             os: windows-11-arm
@@ -83,12 +78,22 @@ jobs:
           arch: ${{ matrix.arch }}
           binary: ${{ matrix.binary }}
           cache-scope: ${{ matrix.name }}
+      # Both packages come from the one arm64 runner this repository is given,
+      # because a second macOS job waits in the same pool and is cancelled
+      # after fifteen minutes. The Intel package cross-compiles here: nixpkgs
+      # 26.11 dropped x86_64-darwin, so no Intel runner can build this flake.
       - uses: ./.github/actions/build-macos-nix-native-package
         if: matrix.platform == 'darwin'
         with:
-          arch: ${{ matrix.arch }}
-          binary: ${{ matrix.binary }}
-          cache-scope: ${{ matrix.name }}
+          arch: arm64
+          binary: result/bin/ccusage
+          cache-scope: build-mac-arm64
+      - uses: ./.github/actions/build-macos-nix-native-package
+        if: matrix.platform == 'darwin'
+        with:
+          arch: x64
+          binary: result/bin/ccusage
+          cache-scope: build-mac-x64
       - uses: ./.github/actions/build-windows-native-package
         if: matrix.platform == 'win32'
         with:
